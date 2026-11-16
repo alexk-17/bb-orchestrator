@@ -35,6 +35,9 @@ interface Wake {
 }
 const token = () => randomBytes(16).toString("hex");
 
+/** acked_at of a dead letter's entry: out of the unread, but never read. */
+const DROPPED = -1;
+
 export class BatchInbox {
   private inflight = new Set<string>();
   private db: Db;
@@ -68,7 +71,7 @@ export class BatchInbox {
         CASE WHEN x.item_id IS NOT NULL THEN COALESCE(json_extract(x.json,'$.needsReply'),0) ELSE i.needs_ack END,
         x.due_at
       FROM items i LEFT JOIN external_mail x ON x.item_id=i.id
-      WHERE i.state != 'closed' AND NOT EXISTS (SELECT 1 FROM inbox_entries e WHERE e.item_id=i.id) ORDER BY i.created_at,i.rowid;`);
+      WHERE i.state NOT IN ('closed','dead') AND NOT EXISTS (SELECT 1 FROM inbox_entries e WHERE e.item_id=i.id) ORDER BY i.created_at,i.rowid;`);
   }
 
   /** An item's read time (its cursor ack) and its recipient's wake, if one covers it, for receipts. */
@@ -76,7 +79,7 @@ export class BatchInbox {
     const e = this.db.prepare(`SELECT recipient, seq, acked_at FROM inbox_entries WHERE item_id=?`).get(itemId) as { recipient: string; seq: number; acked_at: number | null } | undefined;
     if (!e) return { readAt: null, wake: null };
     const w = e.acked_at === null ? (this.db.prepare(`SELECT state FROM inbox_wakes WHERE recipient=? AND through_seq>=?`).get(e.recipient, e.seq) as { state: string } | undefined) : undefined;
-    return { readAt: e.acked_at, wake: w?.state ?? null };
+    return { readAt: e.acked_at === DROPPED ? null : e.acked_at, wake: w?.state ?? null };
   }
 
   record(it: Item, policy: MailPolicy = {}): void {
@@ -156,13 +159,18 @@ export class BatchInbox {
 
   reroute(id: string, recipient: string): void {
     // A moved item is a new arrival: an older cursor issued to the new recipient cannot consume it.
-    this.db
+    const moved = this.db
       .prepare(`UPDATE inbox_entries SET recipient=?, seq=(SELECT COALESCE(MAX(seq),0)+1 FROM inbox_entries),acked_at=NULL WHERE item_id=?`)
-      .run(recipient, id);
+      .run(recipient, id) as { changes: number | bigint };
+    if (Number(moved.changes) === 0) this.sync(); // a dead letter from before batching has no entry: the backfill adds it
   }
-  /** A dead letter leaves its address's unread: the CoS handles it, and the next holder never gets it. */
+  /**
+   * A dead letter leaves its address's unread: the CoS handles it, and the next holder never gets it. Its entry stays,
+   * with its policy and its place in the sequence, but marked DROPPED rather than read, so a receipt never reports
+   * unread mail as read. A resend or re-route makes it unread again; a dead item is never backfilled.
+   */
   dropped(id: string): void {
-    this.db.prepare(`UPDATE inbox_entries SET acked_at=? WHERE item_id=? AND acked_at IS NULL`).run(this.now(), id);
+    this.db.prepare(`UPDATE inbox_entries SET acked_at=? WHERE item_id=? AND acked_at IS NULL`).run(DROPPED, id);
   }
   handoff(address: string): void {
     // A predecessor's queued wake cannot wake its successor; any late predecessor wake carries no mail.

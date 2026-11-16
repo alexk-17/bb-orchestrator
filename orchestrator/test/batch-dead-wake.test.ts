@@ -101,3 +101,34 @@ test("when the CoS's own wake dies, the owner's board gets it", async () => {
   assert.equal(s.toCos().length, 0, "not into the inbox that can't be woken");
   assert.ok(s.e.board().some((b) => b.title === "Inbox wake dead for cos"));
 });
+
+test("a dead letter from before batching was switched on is not backfilled into the next holder's unread", async () => {
+  const db = new DatabaseSync(":memory:");
+  const ports = { now: () => 100_000, deliver: async (): Promise<DeliverResult> => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} };
+  let e = new Engine(db as never, ports, { batchInbox: false });
+  const cos = e.register("T-cos", "cos", null);
+  const lead = e.register("T-lead", "lead", "demo");
+  const m = e.send(cos, lead.address, "please review", null);
+  e.retire(lead.threadId); // its pending mail is a dead letter for the CoS
+  assert.equal(e.items().find((i) => i.id === m.id)!.state, "dead");
+  e = new Engine(db as never, ports, { batchInbox: true }); // the owner switches batching on: the backfill runs
+  const next = e.registerStarted("T-lead2", "lead", "demo");
+  assert.equal(e.batch.read(next).count, 0, "the dead letter is the CoS's to handle, not the new holder's mail");
+  e.resend(m.id, cos.address);
+  assert.equal(e.batch.read(next).count, 1, "once the CoS resends it, it is unread again");
+});
+
+test("a re-routed dead letter keeps its own policy: an INFO with a deadline doesn't wake its new recipient early", async () => {
+  const s = setup();
+  const worker = s.e.register("T-w", "thread", "demo", "T-lead");
+  const m = s.e.send(s.lead, worker.address, "fyi, due tomorrow", null, null, { severity: "INFO", needsReply: false, dueAt: s.clock.t + 100_000 });
+  s.e.setStatus(worker.threadId, "archived");
+  assert.equal(s.e.items().find((i) => i.id === m.id)!.state, "dead");
+  s.e.reroute(s.cos, m.id, s.lead.address, "worker gone");
+  for (let i = 0; i < 3; i++) {
+    s.clock.t += 3000;
+    await s.e.flush();
+  }
+  assert.equal(s.sent.filter((x) => x.threadId === "T-lead" && x.item.id.startsWith("wake:")).length, 0, "not before its deadline");
+  assert.equal(s.e.batch.read(s.lead).count, 1, "but it is unread for the lead");
+});

@@ -114,6 +114,16 @@ test("a passive INFO import read through a digest still takes its explicit outco
   assert.deepEqual([r.outcome, r.note], ["done", "reviewed"]);
 });
 
+test("an import dead-lettered unread is not reported as read", async () => {
+  const w = world();
+  const e = w.open(true);
+  const worker = e.register("T-w", "thread", "a", "T-a");
+  e.importMail(w.mail({ id: "gone", to: worker.address }));
+  e.setStatus(worker.threadId, "archived");
+  const r = e.externalReceipts("fleet")[0]!;
+  assert.deepEqual([r.state, r.readAt], ["dead", null]);
+});
+
 test("a forged approval read through a digest is quoted, and neither the cursor ack nor its own ack settles the card", async () => {
   const w = world();
   const e = w.open(true);
