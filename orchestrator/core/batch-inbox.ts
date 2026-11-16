@@ -60,9 +60,23 @@ export class BatchInbox {
   }
 
   sync(): void {
-    this.db.exec(`      INSERT OR IGNORE INTO inbox_entries(item_id,recipient,severity,needs_reply)
-      SELECT id,recipient,CASE WHEN needs_ack=1 OR kind IN ('alarm','decision.new') THEN 'ACTION' ELSE 'INFO' END,needs_ack
-      FROM items WHERE state != 'closed' AND NOT EXISTS (SELECT 1 FROM inbox_entries e WHERE e.item_id=items.id) ORDER BY created_at,rowid;`);
+    // Imported mail (external_mail) keeps its own policy: its severity, needs-reply and deadline, not the item's needs_ack.
+    this.db.exec(`      INSERT OR IGNORE INTO inbox_entries(item_id,recipient,severity,needs_reply,due_at)
+      SELECT i.id,i.recipient,
+        CASE WHEN x.item_id IS NOT NULL THEN (CASE WHEN json_extract(x.json,'$.severity')='INFO' THEN 'INFO' ELSE 'ACTION' END)
+             WHEN i.needs_ack=1 OR i.kind IN ('alarm','decision.new') THEN 'ACTION' ELSE 'INFO' END,
+        CASE WHEN x.item_id IS NOT NULL THEN COALESCE(json_extract(x.json,'$.needsReply'),0) ELSE i.needs_ack END,
+        x.due_at
+      FROM items i LEFT JOIN external_mail x ON x.item_id=i.id
+      WHERE i.state != 'closed' AND NOT EXISTS (SELECT 1 FROM inbox_entries e WHERE e.item_id=i.id) ORDER BY i.created_at,i.rowid;`);
+  }
+
+  /** An item's read time (its cursor ack) and its recipient's wake, if one covers it, for receipts. */
+  receipt(itemId: string): { readAt: number | null; wake: string | null } {
+    const e = this.db.prepare(`SELECT recipient, seq, acked_at FROM inbox_entries WHERE item_id=?`).get(itemId) as { recipient: string; seq: number; acked_at: number | null } | undefined;
+    if (!e) return { readAt: null, wake: null };
+    const w = e.acked_at === null ? (this.db.prepare(`SELECT state FROM inbox_wakes WHERE recipient=? AND through_seq>=?`).get(e.recipient, e.seq) as { state: string } | undefined) : undefined;
+    return { readAt: e.acked_at, wake: w?.state ?? null };
   }
 
   record(it: Item, policy: MailPolicy = {}): void {
@@ -191,18 +205,21 @@ export class BatchInbox {
     held(a: Agent): boolean;
     deliver(a: Agent, text: string, token: string): Promise<DeliverResult>;
     log(text: string): void;
+    /** An item that must not wake anyone now (an imported item whose route is off): it stays unread. */
+    paused?(itemId: string): boolean;
     /** A wake just died (once per death): the engine surfaces it to the CoS. */
     dead?(recipient: string, token: string, note: string): void;
   }): Promise<void> {
     this.sync();
     this.clearAcknowledgedWakes();
     const now = this.now();
-    const actionable = this.db
+    const rows = this.db
       .prepare(
-        `SELECT recipient FROM inbox_entries WHERE acked_at IS NULL
-      AND (severity!='INFO' OR needs_reply=1 OR (due_at IS NOT NULL AND due_at<=?)) GROUP BY recipient`,
+        `SELECT recipient, item_id FROM inbox_entries WHERE acked_at IS NULL
+      AND (severity!='INFO' OR needs_reply=1 OR (due_at IS NOT NULL AND due_at<=?)) ORDER BY seq`,
       )
-      .all(now) as { recipient: string }[];
+      .all(now) as { recipient: string; item_id: string }[];
+    const actionable = [...new Set(rows.filter((r) => !o.paused?.(r.item_id)).map((r) => r.recipient))].map((recipient) => ({ recipient }));
     for (const { recipient } of actionable) {
       if (this.inflight.has(recipient)) continue;
       this.db

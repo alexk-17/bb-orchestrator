@@ -832,10 +832,20 @@ export class Engine {
       const key = `external:${createHash("sha256").update(`${mail.source}\0${mail.id}`).digest("hex")}`;
       const body = externalBody(mail);
       const item = this.put({ recipient: mail.to, sender: `external:${mail.source}`, kind: "notice", body, key, needsAck: !quiet || mail.dueAt !== null });
+      // batched, the import's own policy decides its wake: INFO without needsReply waits for its deadline, or for good
+      if (this.settings.batchInbox) this.batch.policy(item.id, { severity: mail.severity === "INFO" ? "INFO" : "ACTION", needsReply: mail.needsReply, dueAt: mail.dueAt });
       this.db.prepare(`INSERT INTO external_mail (source, external_id, item_id, json, quiet, due_at) VALUES (?, ?, ?, ?, ?, ?)`).run(mail.source, mail.id, item.id, json, quiet ? 1 : 0, mail.dueAt);
       this.ports.changed();
       return item;
     });
+  }
+
+  /** An imported item whose source/recipient route is off: its delivery and retries wait (the batched wake too). */
+  private importPaused(itemId: string): boolean {
+    const x = this.db.prepare(`SELECT source, json FROM external_mail WHERE item_id = ?`).get(itemId) as { source: string; json: string } | undefined;
+    if (!x) return false;
+    const to = this.item(itemId)?.recipient ?? (JSON.parse(x.json) as ExternalMail).to;
+    return this.ports.externalEnabled?.(x.source, to) === false;
   }
 
   /** Stable import sequence for pagination. Rescan from zero to refresh mutable receipt states. */
@@ -844,7 +854,9 @@ export class Engine {
     const rows = this.db.prepare(`SELECT seq, external_id, item_id FROM external_mail WHERE source = ? AND seq > ? ORDER BY seq LIMIT ?`).all(source, after, limit) as { seq: number; external_id: string; item_id: string }[];
     return rows.map((r) => {
       const it = this.item(r.item_id)!;
-      return { sequence: r.seq, externalId: r.external_id, itemId: it.id, state: it.state, queuedMessageId: it.queuedMessageId, paused: this.ports.externalEnabled?.(source, it.recipient) === false, deliveredAt: it.deliveredAt, outcome: it.outcome, note: it.note, readAt: null };
+      // readAt: the recipient's digest ack (batched inbox only); wake: the recipient's wake that covers it, while unread
+      const { readAt, wake } = this.batch.receipt(it.id);
+      return { sequence: r.seq, externalId: r.external_id, itemId: it.id, state: it.state, queuedMessageId: it.queuedMessageId, paused: this.ports.externalEnabled?.(source, it.recipient) === false, deliveredAt: it.deliveredAt, outcome: it.outcome, note: it.note, readAt, wake };
     });
   }
 
@@ -899,6 +911,7 @@ export class Engine {
         deliver: (a, text, token) => this.ports.deliver(a.threadId, text, { id: `wake:${token}`, sender: "orchestrator", recipient: a.address, kind: "notice" } as Item),
         log: (text) => this.ports.log(text),
         dead: (recipient, _token, note) => this.wakeDead(recipient, note),
+        paused: (itemId) => this.importPaused(itemId),
       });
       this.ports.changed();
       return;

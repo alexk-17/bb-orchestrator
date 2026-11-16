@@ -52,11 +52,14 @@ and wakes and acknowledge batch unread before opting out. Legacy mode keeps its
 previous steering, reply-ack, resend and supersession behavior. Returning to batch
 mode retains its unread ledger; no migration deletes that history.
 
-This PR is independent of compatibility PR #1 and based on upstream main. Named,
-idempotent batch tables avoid a collision with #1's appended external-mail
-migration. `BatchInbox.record`/`policy` accepts severity, needs-reply and deadline
-policy. Combining #1's external importer requires wiring that policy and its
-integration-route pause checks into batching, plus receipt semantics for
-wake-vs-item delivery. Do not infer external integration compatibility from both
-patches applying: that combination needs its own tests. No external imports,
-providers or adoption behavior are added here.
+External mail (`bb orchestrator integration import`) goes through the same
+ledger. Each import keeps its own policy: INFO without needs-reply wakes nobody
+until its `dueAt`, or never without one; anything else wakes its recipient. That
+holds for mail imported before batching was switched on too: the backfill reads
+the import's policy, not the item's needs-ack. A source/recipient pair removed
+from `integrationRoutes` pauses the import's wake and its retries, as it pauses
+per-message delivery; the import still shows in a digest read for other mail.
+Receipts add `readAt` (the digest ack) and `wake` (the recipient's wake that
+covers an unread import) beside `state` and `outcome`, so woken, read and
+handled stay apart. An import asks for an outcome, so a cursor ack leaves it open
+until `orch_ack(id, outcome)`.
