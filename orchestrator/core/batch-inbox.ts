@@ -161,8 +161,12 @@ export class BatchInbox {
     this.db.prepare(`UPDATE inbox_wakes SET state='sent',last_at=?,queued_id=NULL WHERE queued_id=? AND state='queued'`).run(this.now(), id);
     this.clearAcknowledgedWakes();
   }
-  cancelled(id: string): void {
-    this.db.prepare(`UPDATE inbox_wakes SET state='dead',note='queued wake cancelled; unread mail retained' WHERE queued_id=?`).run(id);
+  /** A queued wake was removed before it went: it is dead. Returns the wake, for the engine to tell the CoS. */
+  cancelled(id: string): { recipient: string; token: string; note: string } | null {
+    const w = this.db.prepare(`SELECT recipient, token FROM inbox_wakes WHERE queued_id=? AND state!='dead'`).get(id) as { recipient: string; token: string } | undefined;
+    const note = "queued wake cancelled; unread mail retained";
+    this.db.prepare(`UPDATE inbox_wakes SET state='dead',note=? WHERE queued_id=?`).run(note, id);
+    return w ? { ...w, note } : null;
   }
   missingQueue(id: string): void {
     // Absence after downtime is not proof of dispatch. Retry the wake after the timeout; never close mail.
@@ -187,6 +191,8 @@ export class BatchInbox {
     held(a: Agent): boolean;
     deliver(a: Agent, text: string, token: string): Promise<DeliverResult>;
     log(text: string): void;
+    /** A wake just died (once per death): the engine surfaces it to the CoS. */
+    dead?(recipient: string, token: string, note: string): void;
   }): Promise<void> {
     this.sync();
     this.clearAcknowledgedWakes();
@@ -213,7 +219,10 @@ export class BatchInbox {
           .prepare(`UPDATE inbox_wakes SET state=?,due_at=?,note=? WHERE recipient=?`)
           .run(state, now, state === "dead" ? "wake unacknowledged after two attempts; unread mail retained" : null, recipient);
         w = this.db.prepare(`SELECT * FROM inbox_wakes WHERE recipient=?`).get(recipient) as Wake;
-        if (state === "dead") o.log(`inbox wake dead for ${recipient}; unread retained; CoS may retry through orch_inbox`);
+        if (state === "dead") {
+          o.log(`inbox wake dead for ${recipient}; unread retained; CoS may retry through orch_inbox`);
+          o.dead?.(recipient, w.token, w.note ?? "wake unacknowledged after two attempts");
+        }
       }
       if (w.state !== "pending" || w.due_at > now) continue;
       this.inflight.add(recipient);

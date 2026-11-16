@@ -898,6 +898,7 @@ export class Engine {
         held: (a) => !!(a.project && this.project(a.project)?.heldAt),
         deliver: (a, text, token) => this.ports.deliver(a.threadId, text, { id: `wake:${token}`, sender: "orchestrator", recipient: a.address, kind: "notice" } as Item),
         log: (text) => this.ports.log(text),
+        dead: (recipient, _token, note) => this.wakeDead(recipient, note),
       });
       this.ports.changed();
       return;
@@ -958,7 +959,8 @@ export class Engine {
 
   /** The user removed a queued row before it went: it isn't delivered, so it becomes a dead letter. */
   cancelled(queuedMessageId: string): void {
-    this.batch.cancelled(queuedMessageId);
+    const wake = this.batch.cancelled(queuedMessageId);
+    if (wake) this.wakeDead(wake.recipient, wake.note);
     const r = this.db.prepare(`SELECT * FROM items WHERE queued_message_id = ? AND state = 'queued'`).get(queuedMessageId) as ItemRow | undefined;
     if (r) this.dead(toItem(r), "its queued message was removed before it was sent");
   }
@@ -990,6 +992,20 @@ export class Engine {
         this.put({ recipient: sup, sender: "orchestrator", kind: "notice", ref: it.id, body: `${it.recipient} never acked ${it.kind} ${it.ref ?? it.id} from ${it.sender} (${why}). It is a dead letter; the CoS handles it.`, needsAck: false });
       }
     });
+    this.ports.changed();
+  }
+
+  /**
+   * A recipient's inbox wake died: its unread mail waits and nothing else will wake it, so the CoS is told (an
+   * actionable notice, which wakes the CoS) to retry it once the recipient can take it. When the dead wake is the CoS's
+   * own, or there is no CoS, the owner's board gets it instead.
+   */
+  private wakeDead(recipient: string, note: string): void {
+    const body = `${recipient}'s inbox wake is dead (${note}). Its unread mail is kept, but nothing will wake ${recipient} for it. Check the thread, then retry with orch_inbox(retry_wake=${JSON.stringify(recipient)}).`;
+    if (recipient !== "cos" && this.agentByAddress("cos")) {
+      const it = this.put({ recipient: "cos", sender: "orchestrator", kind: "notice", body, needsAck: false });
+      this.batch.policy(it.id, { severity: "ACTION" });
+    } else this.boardAdd("notice", "orchestrator", null, `Inbox wake dead for ${recipient}`, body, null);
     this.ports.changed();
   }
 
