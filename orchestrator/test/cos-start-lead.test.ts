@@ -56,6 +56,7 @@ async function server(settings: Record<string, unknown> = {}) {
   const spawns: Record<string, any>[] = [];
   const sends: Record<string, any>[] = [];
   let cli: any;
+  let instructions: (c: { threadId: string }) => string | null = () => null;
   const threadRows = new Map<string, any>();
   const metadata: any[] = [];
   const noop: any = new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : noop), apply: () => noop });
@@ -90,7 +91,7 @@ async function server(settings: Record<string, unknown> = {}) {
             },
           };
         if (k === "storage") return { database: () => db, kv: noop };
-        if (k === "agents") return new Proxy({ registerTool: (t: Tool) => tools.set(t.name, t) }, { get: (a: any, n) => a[n] ?? noop });
+        if (k === "agents") return new Proxy({ registerTool: (t: Tool) => tools.set(t.name, t), contributeInstructions: (f: any) => { instructions = f; } }, { get: (a: any, n) => a[n] ?? noop });
         if (k === "cli") return { register: (c: any) => { cli = c.run; } };
         if (k === "http") return { route: (_m: string, path: string, h: Route) => routes.set(path, h) };
         if (k === "sdk") return new Proxy(sdk, { get: (s: any, n) => s[n] ?? noop });
@@ -117,7 +118,7 @@ async function server(settings: Record<string, unknown> = {}) {
     const r = await t.execute(t.parameters.parse(raw), { threadId });
     return { ok: !r.isError, text: r.content[0]!.text };
   };
-  return { root, projects, repo, engine, tools, spawns, sends, db, button, call, threadRows, metadata, cli: (args: string[], threadId: string | null = null) => cli(args, { threadId, cwd: root }) };
+  return { root, projects, repo, engine, tools, spawns, sends, db, button, call, instructions: (threadId: string) => instructions({ threadId }), threadRows, metadata, cli: (args: string[], threadId: string | null = null) => cli(args, { threadId, cwd: root }) };
 }
 
 const cosStarted = (e: Engine, address: string) => e.board().find((b) => b.title === `cos started ${address}`);
@@ -339,8 +340,8 @@ test("constraints given as lines, and no base, still make a project Start lead c
 });
 
 
-test("server defaults to batched inbox, quiet INFO, snapshot ack and non-steering wake", async () => {
-  const s = await server();
+test("batchInbox on: quiet INFO, snapshot ack and non-steering wake", async () => {
+  const s = await server({ batchInbox: true });
   s.engine.register("T-cos", "cos", null);
   s.engine.register("T-lead", "lead", "demo");
   s.engine.setStatus("T-lead", "idle");
@@ -360,13 +361,17 @@ test("server defaults to batched inbox, quiet INFO, snapshot ack and non-steerin
   assert.equal((await s.call("orch_inbox", {wakes:true}, "T-cos")).ok,true);
 });
 
-test("server keeps the explicit legacy per-message setting", async () => {
-  const s = await server({batchInbox:false});
+// An upgrade must not change how any role gets its mail: batching is the owner's choice, never a default.
+test("by default the server keeps per-message delivery and today's inbox instructions", async () => {
+  const s = await server();
   s.engine.register("T-cos", "cos", null); s.engine.register("T-lead", "lead", "demo");
   await s.call("orch_send",{to:"lead:demo",text:"legacy"},"T-cos");
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(s.sends.length,1); assert.equal(s.sends[0]!.mode,"steer-if-active");
   assert.match((await s.call("orch_inbox",{},"T-lead")).text,/Open items/);
+  assert.match(s.instructions("T-lead") ?? "", /^\[orchestrator\] Your current inbox \(as of [^)]+\):\nYou are lead:demo\./, "the same instructions as before batching existed");
+  assert.equal((s.db.prepare("SELECT COUNT(*) AS n FROM inbox_entries").get() as { n: number }).n, 0, "nothing goes into the batch ledger");
+  assert.equal((await s.call("orch_ack", { through: "x" }, "T-lead")).ok, false, "no cursor acks while batching is off");
 });
 
 for (const by of ["cos", "person"] as const) {

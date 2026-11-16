@@ -105,7 +105,7 @@ export default async function plugin(bb: BbPluginApi) {
     cosTitle: { type: "string", label: "The CoS's name on its thread and in the app", default: "Chief of Staff" },
     stateDir: { type: "string", label: "State folder: decisions/<id>.json, the CoS and Steward folders, dream jobs (empty: state/ in the plugin's data folder)", default: "" },
     escalateMinutes: { type: "number", label: "Untriaged decisions go to you after (minutes)", default: 5 },
-    batchInbox: { type: "boolean", label: "Batched inbox delivery (off: legacy per-message delivery)", default: true },
+    batchInbox: { type: "boolean", label: "Batched inbox: one debounced wake per recipient instead of each message into a turn (off, the default: per-message delivery)", default: false },
     inboxDebounceMs: { type: "number", label: "Inbox wake debounce (milliseconds)", default: 2000 },
     resendMinutes: { type: "number", label: "Unacked items are re-sent after the recipient idles (minutes)", default: 10 },
     diskPct: { type: "number", label: "Disk alarm (%)", default: 85 },
@@ -490,7 +490,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "orch_ack",
-    description: `Batch mode: ack a handled digest using through=<cursor> alone. Decision outcomes still use id/outcome; cursor ack is only mail handling. Close a message (i-…) or an answered decision (d-…) once handled, with an outcome: ${OUTCOMES.join(" | ")}, and an optional note. When the answer is to be carried out only once a PR gets somewhere ("merge when approved", "after CI is green", "when merged"), also give pr (its URL) and when: the orchestrator watches the PR and sends the answer back to you when it is, with a reminder each day until then. No watcher of your own needed.`,
+    description: `Close a message (i-…) or an answered decision (d-…) once handled, with an outcome: ${OUTCOMES.join(" | ")}, and an optional note. When the answer is to be carried out only once a PR gets somewhere ("merge when approved", "after CI is green", "when merged"), also give pr (its URL) and when: the orchestrator watches the PR and sends the answer back to you when it is, with a reminder each day until then. No watcher of your own needed. With batchInbox on: ack a handled digest with through=<cursor> alone; decision outcomes still use id/outcome, and a cursor ack is only mail handling.`,
     presentation: { label: { pending: "Acking", completed: "Acked" } },
     parameters: z.object({
       id: z.string().optional(),
@@ -516,7 +516,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "orch_send",
-    description: "Message another agent by address (cos, steward, lead:<project>, thread:<project>:<n>). A thread may message only its lead; lead-to-lead is copied to the CoS. `key` makes a retry safe; `ref` names the decision a relay is about, or the message (i-…) you are answering: legacy mode closes it as replied. Batch mode never implicitly acknowledges unread mail; use the digest cursor. severity INFO is quiet unless needs_reply or due_at (epoch milliseconds).",
+    description: "Message another agent by address (cos, steward, lead:<project>, thread:<project>:<n>). A thread may message only its lead; lead-to-lead is copied to the CoS. `key` makes a retry safe; `ref` names the decision a relay is about, or the message (i-…) you are answering: that closes it as replied, so a reply needs no separate ack. With batchInbox on: a reply never acknowledges unread mail (use the digest cursor), and severity INFO is quiet unless needs_reply or due_at (epoch milliseconds).",
     presentation: { label: { pending: "Sending a message", completed: "Sent a message" } },
     parameters: z.object({ to: z.string(), text: z.string().min(1).max(4000), key: z.string().max(80).optional(), ref: z.string().optional(), severity: z.enum(["INFO", "ACTION"]).optional(), needs_reply: z.boolean().optional(), due_at: z.number().int().nonnegative().optional() }),
     execute: (p, { threadId }) => run(threadId, (a) => `Queued ${engine.send(a, p.to, p.text, p.key ?? null, p.ref ?? null, { severity: p.severity, needsReply: p.needs_reply, dueAt: p.due_at }).id} to ${p.to}.`),
@@ -524,7 +524,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "orch_inbox",
-    description: "Batch mode: read ALL unread oldest first with full bodies, ids, refs and an ack-through cursor. Reading never acknowledges. CoS may inspect wakes or retry_wake by recipient. Legacy mode: recovery view.",
+    description: "Your recovery view: unread items, decisions waiting for you, your own open decisions, and the standing rules you may cite. With batchInbox on: ALL unread oldest first with full bodies, ids, refs and an ack-through cursor; reading never acknowledges. The CoS may inspect wakes or retry_wake by recipient.",
     presentation: { label: { pending: "Reading the inbox", completed: "Read the inbox" } },
     parameters: z.object({
       id: z.string().regex(/^i-[a-f0-9]+$/).optional().describe("Read the complete text of one item addressed to you, including passive INFO"),
@@ -544,7 +544,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "orch_report",
-    description: "Report finished work (optionally a PR URL). Goes to the board and your lead, never to the CoS. `ref`: your lead's message (i-…) this report answers; legacy mode closes it as replied; batch mode still requires digest acknowledgement.",
+    description: "Report finished work (optionally a PR URL). Goes to the board and your lead, never to the CoS. `ref`: your lead's message (i-…) this report answers; it closes as replied. With batchInbox on, the digest still needs its cursor ack.",
     presentation: { label: { pending: "Reporting", completed: "Reported" } },
     parameters: z.object({ title: z.string().min(1).max(120), body: z.string().max(8000), pr: z.string().url().optional(), ref: z.string().max(80).optional() }),
     execute: (p, { threadId }) => run(threadId, (a) => engine.report(a, p.title, p.body, p.pr ?? null, p.ref ?? null)),
@@ -1166,7 +1166,8 @@ export default async function plugin(bb: BbPluginApi) {
   bb.agents.contributeInstructions(({ threadId }) => {
     const a = threadId ? engine.agentByThread(threadId) : null;
     if (!a) return null;
-    const delivery = engine.settings.batchInbox ? "Batch inbox: on a debounced wake, orch_inbox reads ALL unread oldest first. Handle it, then orch_ack(through=<cursor>). Replies do not ack unread. INFO stays quiet unless needs_reply or due. Decision outcomes still use orch_ack(id,outcome). " : "";
+    if (!engine.settings.batchInbox) return `[orchestrator] Your current inbox (as of ${new Date().toISOString()}):\n${engine.inbox(a).text}`;
+    const delivery = "Batch inbox: on a debounced wake, orch_inbox reads ALL unread oldest first. Handle it, then orch_ack(through=<cursor>). Replies do not ack unread. INFO stays quiet unless needs_reply or due. Decision outcomes still use orch_ack(id,outcome). ";
     return `[orchestrator] ${delivery}Your current recovery view (not a digest read; as of ${new Date().toISOString()}):\n${engine.inbox(a).text}`;
   });
 

@@ -72,7 +72,7 @@ export interface Settings {
   // Pokémon are opt-in (requested 2026-11-13). Off: agents still get one in the database, so switching on shows it, but
   // every Agent the engine hands out has mon null, so no name reaches a brief, a board row, the app or the sidebar.
   pokemon: boolean;
-  batchInbox: boolean; // server defaults true; direct embedded Engine callers retain legacy unless opted in
+  batchInbox: boolean; // off by default, in the server setting and here: per-message delivery until the owner switches it on
   inboxDebounceMs: number;
 }
 export const DEFAULT_SETTINGS: Settings = { escalateMs: 5 * 60_000, resendMs: 10 * 60_000, owner: "", pokemon: false, batchInbox: false, inboxDebounceMs: 2000 };

@@ -8,9 +8,9 @@ description: How agents with an orchestrator role (CoS, Steward, lead, thread) a
 Every agent with a role gets `orch_*` tools and a live inbox in its instructions. Messages from the orchestrator
 start with `[orchestrator] <kind> <id> from <sender>:`.
 
-## Batched inbox (default)
+## Batched inbox (opt-in: `batchInbox=true`)
 
-Sending accumulates unread mail; it does not send each item into a turn. A burst gets
+Off by default: each message is delivered into a turn as described below. When on, sending accumulates unread mail; it does not send each item into a turn. A burst gets
 one debounced wake per recipient. On wake, call `orch_inbox` to read **all unread**
 items oldest first, including full bodies, ids and refs. Handle the digest, then
 `orch_ack(through=<returned cursor>)`. Reads do not ack. A cursor covers only that
@@ -32,9 +32,8 @@ Only wakes retry (one retry after `resendMinutes`, then dead), not message bodie
 CoS inspects `orch_inbox(wakes=true)` and retries a dead recipient wake with
 `orch_inbox(retry_wake="lead:project")`. These calls do not acknowledge any mail.
 
-Set `batchInbox=false` only to retain legacy per-message delivery for existing
-workflows. The per-item retry/reply-ack descriptions below apply to that legacy
-mode. Before changing modes, reconcile queued wakes/messages: changing settings
+With `batchInbox=false` (the default) the per-item retry/reply-ack descriptions
+below apply. Before changing modes, reconcile queued wakes/messages: changing settings
 cannot recall a queued or in-flight dispatch. Batch unread/cursors remain stored;
 read and acknowledge them before opting into legacy mode. See
 `docs/batched-inbox.md` for crash and migration semantics.
@@ -90,7 +89,7 @@ bb orchestrator host
 bb orchestrator decision <id>
 ```
 
-Settings (`bb plugin config orchestrator set <key> <value>`): `batchInbox` (true), `inboxDebounceMs` (2000, capped at 60000), `escalateMinutes` (5), `resendMinutes` (10),
+Settings (`bb plugin config orchestrator set <key> <value>`): `batchInbox` (false), `inboxDebounceMs` (2000, capped at 60000), `escalateMinutes` (5), `resendMinutes` (10),
 `diskPct` (85), `swapPct` (50), `memPct` (90), `cpuPct` (95), `sustainSeconds` (300), `sampleSeconds` (60),
 `diskPath` (/), `cosCompactTokens` (0 = off, the default: Claude Code compacts on its own; a token count opts in), `stateDir` (empty: state/ in the plugin's data folder),
 `ownerName` (empty: agents say "the owner"), `cosTitle` (Chief of Staff), `projectsDir`, `projectRecord` (project.json),

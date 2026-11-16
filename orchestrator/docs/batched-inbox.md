@@ -1,10 +1,10 @@
 # Batched inbox
 
-The plugin defaults to `batchInbox=true` for every registered recipient (CoS,
-Steward, leads and worker threads). Embedded Engine callers retain the legacy
-constructor default; the server explicitly selects the plugin setting. Existing
-users can opt out with `batchInbox=false` while moving agent workflows to cursors.
-No installed plugin or live thread is changed by building this source.
+Batching is opt-in: `batchInbox` defaults to `false`, in the plugin setting and in
+the embedded Engine, so an existing install keeps per-message delivery on upgrade.
+Set `batchInbox=true` to batch for every registered recipient (CoS, Steward, leads
+and worker threads). No installed plugin or live thread is changed by building
+this source.
 
 Mail is written before delivery. `inbox_entries` gives each arrival a durable
 sequence and explicit unread state, separate from the existing item/decision
