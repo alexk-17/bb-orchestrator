@@ -491,7 +491,10 @@ export class Engine {
     this.ports = ports;
     this.settings = { ...DEFAULT_SETTINGS, ...settings };
     migrate(db);
-    this.batch = new BatchInbox(db, () => this.now());
+    this.batch = new BatchInbox(db, () => this.now(), (id) => {
+      const it = this.item(id);
+      return it ? this.render(it, false) : null;
+    });
     if (this.settings.batchInbox) this.batch.sync();
     this.settleThreadMons();
     this.settleRelayedCards();
@@ -1223,7 +1226,6 @@ export class Engine {
    * The sender gets the reply itself, so no ack note goes back.
    */
   private replyCloses(from: Agent, to: string, ref: string | null, reply: { id: string; body: string }): Item | null {
-    if (this.settings.batchInbox) return null;
     const open = (r: ItemRow | undefined) => !!r && r.kind === "message" && r.needs_ack === 1 && r.recipient === from.address && r.sender === to && ["pending", "queued", "delivered", "dead"].includes(r.state);
     let it: Item | null = null;
     let how: string;
@@ -1233,6 +1235,8 @@ export class Engine {
       it = toItem(r!);
       how = `replied in ${reply.id}`;
     } else if (!ref) {
+      // batched, no message is delivered into a turn, so "the same turn" can't be told: only a ref closes
+      if (this.settings.batchInbox) return null;
       const rows = this.db.prepare(`SELECT * FROM items WHERE recipient = ? AND sender = ? AND kind = 'message' AND needs_ack = 1 AND state IN ('pending','queued','delivered','dead')`).all(from.address, to) as ItemRow[];
       const only = rows.length === 1 ? rows[0]! : null;
       const me = this.db.prepare(`SELECT status, last_idle_at FROM agents WHERE address = ? AND retired_at IS NULL`).get(from.address) as { status: string; last_idle_at: number | null } | undefined;

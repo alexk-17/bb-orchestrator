@@ -39,9 +39,12 @@ export class BatchInbox {
   private inflight = new Set<string>();
   private db: Db;
   private now: () => number;
-  constructor(db: Db, now: () => number) {
+  /** An item's text as its recipient reads it (the engine's render): its own ack/reply line and any label. */
+  private render: (itemId: string) => string | null;
+  constructor(db: Db, now: () => number, render: (itemId: string) => string | null = () => null) {
     this.db = db;
     this.now = now;
+    this.render = render;
     // Named, idempotent schema: independent of the numbered migrations in the external-mail PR.
     db.exec(`CREATE TABLE IF NOT EXISTS inbox_entries (
       seq INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT NOT NULL UNIQUE,
@@ -98,11 +101,11 @@ export class BatchInbox {
         cursor,
         count: rows.length,
         text: rows.length
-          ? `${rows.length} unread items, oldest first. Ack only after handling this digest: orch_ack(through=${JSON.stringify(cursor)}). Decision outcomes still use orch_ack(id, outcome).\n` +
+          ? `${rows.length} unread items, oldest first. Ack only after handling this digest: orch_ack(through=${JSON.stringify(cursor)}). That marks them read; it closes only what needs no outcome. A message that asks for one stays open until orch_ack(id, outcome) or a reply with ref=<its id>; decisions still use orch_ack(id, outcome).\n` +
             rows
               .map(
                 (r) =>
-                  `\n[${r.item_id}] ${r.kind} from ${r.sender}; ref=${JSON.stringify(r.ref)}; severity=${r.severity}; needsReply=${!!r.needs_reply}; dueAt=${r.due_at ?? "none"}\n${r.body}`,
+                  `\n[${r.item_id}] ${r.kind} from ${r.sender}; ref=${JSON.stringify(r.ref)}; severity=${r.severity}; needsReply=${!!r.needs_reply}; dueAt=${r.due_at ?? "none"}\n${this.render(r.item_id) ?? r.body}`,
               )
               .join("\n")
           : "No unread mail.",
@@ -119,11 +122,14 @@ export class BatchInbox {
       const rows = this.db.prepare(`SELECT item_id FROM inbox_entries WHERE recipient=? AND seq<=? AND acked_at IS NULL`).all(a.address, r.through_seq) as {
         item_id: string;
       }[];
+      // Read is not handled. What needs no outcome closes, as delivery closes it in per-message mode. What asks for an
+      // outcome (needs_ack) is only marked delivered: its ack note, relay settlement or reply still has to happen.
+      const covered = `(SELECT item_id FROM inbox_entries WHERE recipient=? AND seq<=? AND acked_at IS NULL)`;
       this.db
-        .prepare(
-          `UPDATE items SET state='closed',closed_at=?,outcome=COALESCE(outcome,'read') WHERE id IN
-        (SELECT item_id FROM inbox_entries WHERE recipient=? AND seq<=? AND acked_at IS NULL) AND state IN ('pending','queued','delivered','dead')`,
-        )
+        .prepare(`UPDATE items SET state='closed',closed_at=?,outcome=COALESCE(outcome,'read') WHERE id IN ${covered} AND needs_ack=0 AND state IN ('pending','queued','delivered','dead')`)
+        .run(this.now(), a.address, r.through_seq);
+      this.db
+        .prepare(`UPDATE items SET state='delivered',delivered_at=COALESCE(delivered_at,?) WHERE id IN ${covered} AND needs_ack=1 AND state='pending'`)
         .run(this.now(), a.address, r.through_seq);
       this.db.prepare(`UPDATE inbox_entries SET acked_at=? WHERE recipient=? AND seq<=? AND acked_at IS NULL`).run(this.now(), a.address, r.through_seq);
       // Do not cancel a queued wake: the same queue row can wake for remaining/new mail.

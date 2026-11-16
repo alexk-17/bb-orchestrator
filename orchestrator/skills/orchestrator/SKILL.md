@@ -15,14 +15,16 @@ one debounced wake per recipient. On wake, call `orch_inbox` to read **all unrea
 items oldest first, including full bodies, ids and refs. Handle the digest, then
 `orch_ack(through=<returned cursor>)`. Reads do not ack. A cursor covers only that
 snapshot and is bound to your current thread/address; later arrivals stay unread.
-Cursor ack records mail as read, not a decision outcome. Still use `orch_ack(id,
-outcome)` for decision outcomes or PR waits; then acknowledge the digest.
+Cursor ack records mail as read, not an outcome: it closes only what needs no
+answer (copies, notices). A message that asks for an outcome stays open until you
+`orch_ack(id, outcome)` it or reply with `ref=<its id>`; decisions and PR waits
+still use `orch_ack(id, outcome)`. Then acknowledge the digest.
 
 `orch_send` defaults to actionable (`severity: ACTION`). Use `severity: INFO` for
 passive information: it never wakes by itself. `needs_reply: true` or a `due_at`
 epoch-millisecond deadline makes INFO actionable. Copies and informational notices
 are quiet; decisions/alarms remain actionable. Replies and newer messages never
-implicitly acknowledge unread in batch mode.
+acknowledge unread in batch mode, and only a reply with `ref` closes a message.
 
 Active recipients are left alone until idle. The wake uses `queue-if-active` if a
 turn starts during delivery, never steering or interrupting that turn. The default
