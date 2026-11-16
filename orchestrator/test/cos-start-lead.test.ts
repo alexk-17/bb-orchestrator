@@ -44,7 +44,7 @@ type Tool = { name: string; parameters: { parse(v: unknown): unknown }; execute(
 type Route = (c: unknown) => Promise<Response>;
 
 /** The real server against a fake bb: records tools, routes and spawns; one connected host, one bb project for the repo. */
-async function server() {
+async function server(overrides: Record<string, unknown> = {}) {
   const root = scratch("server");
   const projects = join(root, "projects");
   const repo = join(root, "repo");
@@ -54,6 +54,7 @@ async function server() {
   const tools = new Map<string, Tool>();
   const routes = new Map<string, Route>();
   const spawns: Record<string, any>[] = [];
+  const sends: Record<string, any>[] = [];
   const noop: any = new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : noop), apply: () => noop });
   const sdk = {
     hosts: { list: async () => [{ id: "host-1", status: "connected", lifecycle: { phase: "active" } }] },
@@ -63,6 +64,7 @@ async function server() {
         spawns.push(a);
         return { id: `T-${spawns.length}`, environmentId: `env-${spawns.length}` };
       },
+      send: async (input: Record<string, any>) => { sends.push(input); return { delivery: "sent" }; },
       updatePluginMetadata: async () => ({}),
       get: async () => ({}),
       list: async () => [],
@@ -77,7 +79,7 @@ async function server() {
           return {
             define: (schema: Record<string, { default: unknown }>) => {
               const v: any = Object.fromEntries(Object.entries(schema).map(([key, d]) => [key, d.default]));
-              Object.assign(v, { stateDir: join(root, "state"), projectsDir: projects, projectRecord: RECORD, memoryConfig: "", diskPath: root, ownerName: "" });
+              Object.assign(v, { stateDir: join(root, "state"), projectsDir: projects, projectRecord: RECORD, memoryConfig: "", diskPath: root, ownerName: "", ...overrides });
               return { get: async () => v, onChange: () => {} };
             },
           };
@@ -108,7 +110,7 @@ async function server() {
     const r = await t.execute(t.parameters.parse(raw), { threadId });
     return { ok: !r.isError, text: r.content[0]!.text };
   };
-  return { root, projects, repo, engine, tools, spawns, button, call };
+  return { root, projects, repo, engine, tools, spawns, sends, db, button, call };
 }
 
 const cosStarted = (e: Engine, address: string) => e.board().find((b) => b.title === `cos started ${address}`);
@@ -327,4 +329,35 @@ test("constraints given as lines, and no base, still make a project Start lead c
   assert.match(md, /## Limits\n- one\n- two\n- three\n/);
   assert.deepEqual(primaryRepo(md), { path: repo, base: null });
   assert.equal(JSON.parse(readFileSync(join(p.root, "delta", RECORD), "utf8")).repo.base, null);
+});
+
+
+test("server defaults to batched inbox, quiet INFO, snapshot ack and non-steering wake", async () => {
+  const s = await server();
+  s.engine.register("T-cos", "cos", null);
+  s.engine.register("T-lead", "lead", "demo");
+  s.engine.setStatus("T-lead", "idle");
+  assert.equal((await s.call("orch_send", {to:"lead:demo",text:"quiet",severity:"INFO"}, "T-cos")).ok,true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(s.sends.length,0);
+  await s.call("orch_send", {to:"lead:demo",text:"action",ref:"proof-ref"}, "T-cos");
+  s.db.prepare("UPDATE inbox_wakes SET due_at=0").run();
+  const digest = JSON.parse((await s.call("orch_inbox", {}, "T-lead")).text);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(digest.count,2); assert.match(digest.text,/proof-ref/);
+  assert.equal(s.sends.length,1); assert.equal(s.sends[0]!.mode,"queue-if-active");
+  assert.equal((await s.call("orch_ack", {through:digest.cursor}, "T-cos")).ok,false);
+  assert.equal((await s.call("orch_ack", {through:digest.cursor}, "T-lead")).ok,true);
+  assert.equal(JSON.parse((await s.call("orch_inbox", {}, "T-lead")).text).count,0);
+  assert.equal((await s.call("orch_inbox", {wakes:true}, "T-lead")).ok,false);
+  assert.equal((await s.call("orch_inbox", {wakes:true}, "T-cos")).ok,true);
+});
+
+test("server keeps the explicit legacy per-message setting", async () => {
+  const s = await server({batchInbox:false});
+  s.engine.register("T-cos", "cos", null); s.engine.register("T-lead", "lead", "demo");
+  await s.call("orch_send",{to:"lead:demo",text:"legacy"},"T-cos");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(s.sends.length,1); assert.equal(s.sends[0]!.mode,"steer-if-active");
+  assert.match((await s.call("orch_inbox",{},"T-lead")).text,/Open items/);
 });

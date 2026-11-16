@@ -8,6 +8,37 @@ description: How agents with an orchestrator role (CoS, Steward, lead, thread) a
 Every agent with a role gets `orch_*` tools and a live inbox in its instructions. Messages from the orchestrator
 start with `[orchestrator] <kind> <id> from <sender>:`.
 
+## Batched inbox (default)
+
+Sending accumulates unread mail; it does not send each item into a turn. A burst gets
+one debounced wake per recipient. On wake, call `orch_inbox` to read **all unread**
+items oldest first, including full bodies, ids and refs. Handle the digest, then
+`orch_ack(through=<returned cursor>)`. Reads do not ack. A cursor covers only that
+snapshot and is bound to your current thread/address; later arrivals stay unread.
+Cursor ack records mail as read, not a decision outcome. Still use `orch_ack(id,
+outcome)` for decision outcomes or PR waits; then acknowledge the digest.
+
+`orch_send` defaults to actionable (`severity: ACTION`). Use `severity: INFO` for
+passive information: it never wakes by itself. `needs_reply: true` or a `due_at`
+epoch-millisecond deadline makes INFO actionable. Copies and informational notices
+are quiet; decisions/alarms remain actionable. Replies and newer messages never
+implicitly acknowledge unread in batch mode.
+
+Active recipients are left alone until idle. The wake uses `queue-if-active` if a
+turn starts during delivery, never steering or interrupting that turn. The default
+2-second debounce is checked by the existing 5-second clock. Unread remains until
+cursor acknowledgement, including after restart, failed wake or dead-lettering.
+Only wakes retry (one retry after `resendMinutes`, then dead), not message bodies.
+CoS inspects `orch_inbox(wakes=true)` and retries a dead recipient wake with
+`orch_inbox(retry_wake="lead:project")`. These calls do not acknowledge any mail.
+
+Set `batchInbox=false` only to retain legacy per-message delivery for existing
+workflows. The per-item retry/reply-ack descriptions below apply to that legacy
+mode. Before changing modes, reconcile queued wakes/messages: changing settings
+cannot recall a queued or in-flight dispatch. Batch unread/cursors remain stored;
+read and acknowledge them before opting into legacy mode. See
+`docs/batched-inbox.md` for crash and migration semantics.
+
 ## Addresses
 
 `cos`, `steward`, `lead:<project>`, `thread:<project>:<n>`. The owner (the person the orchestrator works for) is not an address: they answer only
@@ -59,7 +90,7 @@ bb orchestrator host
 bb orchestrator decision <id>
 ```
 
-Settings (`bb plugin config orchestrator set <key> <value>`): `escalateMinutes` (5), `resendMinutes` (10),
+Settings (`bb plugin config orchestrator set <key> <value>`): `batchInbox` (true), `inboxDebounceMs` (2000, capped at 60000), `escalateMinutes` (5), `resendMinutes` (10),
 `diskPct` (85), `swapPct` (50), `memPct` (90), `cpuPct` (95), `sustainSeconds` (300), `sampleSeconds` (60),
 `diskPath` (/), `cosCompactTokens` (0 = off, the default: Claude Code compacts on its own; a token count opts in), `stateDir` (empty: state/ in the plugin's data folder),
 `ownerName` (empty: agents say "the owner"), `cosTitle` (Chief of Staff), `projectsDir`, `projectRecord` (project.json),

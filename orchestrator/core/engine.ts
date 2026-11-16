@@ -3,6 +3,7 @@
 // Every write is a transaction on the store; delivery to a bb thread is a separate step (`flush`) that the server
 // runs through bb's SDK. An item is written before it is sent, so a crash between the two re-sends it, marked
 // "(again)" — never loses it. Nothing here calls a model: escalation, resends and dead letters are the `tick`.
+import { BatchInbox, type MailPolicy } from "./batch-inbox.ts";
 import { randomBytes } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { extname, isAbsolute, sep } from "node:path";
@@ -70,8 +71,10 @@ export interface Settings {
   // Pokémon are opt-in (requested 2026-11-13). Off: agents still get one in the database, so switching on shows it, but
   // every Agent the engine hands out has mon null, so no name reaches a brief, a board row, the app or the sidebar.
   pokemon: boolean;
+  batchInbox: boolean; // server defaults true; direct embedded Engine callers retain legacy unless opted in
+  inboxDebounceMs: number;
 }
-export const DEFAULT_SETTINGS: Settings = { escalateMs: 5 * 60_000, resendMs: 10 * 60_000, owner: "", pokemon: false };
+export const DEFAULT_SETTINGS: Settings = { escalateMs: 5 * 60_000, resendMs: 10 * 60_000, owner: "", pokemon: false, batchInbox: false, inboxDebounceMs: 2000 };
 
 export type DeliverResult = { delivery: "sent" } | { delivery: "queued"; queuedMessageId: string } | { delivery: "held"; why: string };
 
@@ -474,6 +477,7 @@ export function checkMatch(raw: unknown): RuleMatch {
 
 export class Engine {
   settings: Settings;
+  readonly batch: BatchInbox;
   private inflight = new Set<string>();
 
   private db: Db;
@@ -484,6 +488,8 @@ export class Engine {
     this.ports = ports;
     this.settings = { ...DEFAULT_SETTINGS, ...settings };
     migrate(db);
+    this.batch = new BatchInbox(db, () => this.now());
+    if (this.settings.batchInbox) this.batch.sync();
     this.settleThreadMons();
     this.settleRelayedCards();
     // the project page's history: once, from what the older tables say. It must never stop the plugin from starting.
@@ -692,6 +698,7 @@ export class Engine {
    * isn't registered yet) keeps waiting.
    */
   private deadLetterOrphans(): void {
+    if (this.settings.batchInbox) return;
     const rows = this.db
       .prepare(
         `SELECT * FROM items i WHERE i.state = 'pending'
@@ -785,7 +792,9 @@ export class Engine {
         `INSERT INTO items (id, recipient, sender, kind, ref, body, send_key, needs_ack, state, attempts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)`,
       )
       .run(id, p.recipient, p.sender, p.kind, p.ref ?? null, p.body, p.key ?? null, p.needsAck ? 1 : 0, this.now());
-    return this.item(id)!;
+    const item = this.item(id)!;
+    if (this.settings.batchInbox) this.batch.record(item);
+    return item;
   }
 
   private closeItems(where: string, params: unknown[], outcome: string | null, note: string | null): void {
@@ -808,6 +817,18 @@ export class Engine {
 
   /** Send every pending item whose recipient can take it. Safe to call often. */
   async flush(): Promise<void> {
+    if (this.settings.batchInbox) {
+      await this.batch.flush({
+        debounceMs: this.settings.inboxDebounceMs,
+        retryMs: this.settings.resendMs,
+        agent: (address) => this.agentByAddress(address),
+        held: (a) => !!(a.project && this.project(a.project)?.heldAt),
+        deliver: (a, text, token) => this.ports.deliver(a.threadId, text, { id: `wake:${token}`, sender: "orchestrator", recipient: a.address, kind: "notice" } as Item),
+        log: (text) => this.ports.log(text),
+      });
+      this.ports.changed();
+      return;
+    }
     const rows = (this.db.prepare(`SELECT * FROM items WHERE state = 'pending' ORDER BY created_at`).all() as ItemRow[]).map(toItem);
     for (const it of rows) {
       if (this.inflight.has(it.id)) continue;
@@ -851,6 +872,7 @@ export class Engine {
 
   /** bb dispatched a queued row: the item it carried is delivered. */
   dispatched(queuedMessageId: string): void {
+    this.batch.dispatched(queuedMessageId);
     const r = this.db.prepare(`SELECT id FROM items WHERE queued_message_id = ? AND state = 'queued'`).get(queuedMessageId) as { id: string } | undefined;
     if (!r) return;
     this.db.prepare(`UPDATE items SET state = 'delivered', delivered_at = ? WHERE id = ?`).run(this.now(), r.id);
@@ -860,6 +882,7 @@ export class Engine {
 
   /** The user removed a queued row before it went: it isn't delivered, so it becomes a dead letter. */
   cancelled(queuedMessageId: string): void {
+    this.batch.cancelled(queuedMessageId);
     const r = this.db.prepare(`SELECT * FROM items WHERE queued_message_id = ? AND state = 'queued'`).get(queuedMessageId) as ItemRow | undefined;
     if (r) this.dead(toItem(r), "its queued message was removed before it was sent");
   }
@@ -949,6 +972,7 @@ export class Engine {
       this.db
         .prepare(`UPDATE items SET recipient = ?, body = ?, state = 'pending', attempts = 0, queued_message_id = NULL, delivered_at = NULL, on_board = 0, note = ? WHERE id = ?`)
         .run(to, `(re-routed by the CoS from ${it.recipient}${why}) ${it.body}`, `re-routed from ${it.recipient} by ${by.address}`, itemId);
+      this.batch.reroute(itemId, to);
       this.ports.changed();
       return this.item(itemId)!;
     });
@@ -1034,7 +1058,7 @@ export class Engine {
 
   // ---------------------------------------------------------------- mail
 
-  send(from: Agent, to: string, text: string, key: string | null, ref: string | null = null): Item {
+  send(from: Agent, to: string, text: string, key: string | null, ref: string | null = null, policy: MailPolicy = {}): Item {
     const body = text.trim();
     if (!body) throw new EngineError("invalid", "empty message");
     if (body.length > 4000) throw new EngineError("invalid", "a message is at most 4000 characters");
@@ -1042,6 +1066,7 @@ export class Engine {
     return tx(this.db, () => {
       const retry = key ? this.db.prepare(`SELECT 1 FROM items WHERE sender = ? AND send_key = ?`).get(from.address, key) : null;
       const it = this.put({ recipient: to, sender: from.address, kind: "message", ref, body, key, needsAck: true });
+      if (!retry && this.settings.batchInbox) this.batch.policy(it.id, policy);
       if (!retry) this.replyCloses(from, to, ref, it); // a keyed retry is the old reply, not a new answer
 
       const d = ref?.startsWith("d-") ? this.decision(ref) : null;
@@ -1116,6 +1141,7 @@ export class Engine {
    * The sender gets the reply itself, so no ack note goes back.
    */
   private replyCloses(from: Agent, to: string, ref: string | null, reply: { id: string; body: string }): Item | null {
+    if (this.settings.batchInbox) return null;
     const open = (r: ItemRow | undefined) => !!r && r.kind === "message" && r.needs_ack === 1 && r.recipient === from.address && r.sender === to && ["pending", "queued", "delivered", "dead"].includes(r.state);
     let it: Item | null = null;
     let how: string;
@@ -2786,6 +2812,7 @@ export class Engine {
       // one instant for both: the predecessor's retired_at is the successor's created_at (predecessors() links them)
       const at = this.now();
       this.retire(oldThreadId, true, at);
+      this.batch.handoff(old.address);
       this.db
         .prepare(`INSERT INTO agents (thread_id, address, role, project, parent_thread_id, status, created_at, mon, environment_id) VALUES (?, ?, ?, ?, ?, 'unknown', ?, ?, ?)`)
         .run(newThreadId, old.address, old.role, old.project, old.parentThreadId, at, this.rawMon(oldThreadId), old.environmentId);
@@ -3181,6 +3208,7 @@ export class Engine {
     // 4. unacked items whose recipient has been idle long enough: one resend, then a dead letter
     const open = (this.db.prepare(`SELECT * FROM items WHERE state = 'delivered' AND needs_ack = 1`).all() as ItemRow[]).map(toItem);
     for (const it of open) {
+      if (this.settings.batchInbox) continue;
       const a = this.agentByAddress(it.recipient);
       if (!a || a.status !== "idle" || a.idleAt === null) continue;
       const since = Math.max(a.idleAt, it.deliveredAt ?? 0);
