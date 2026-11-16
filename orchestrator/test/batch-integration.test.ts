@@ -102,6 +102,18 @@ test("receipts tell woken, read and handled apart: a cursor ack is read, the out
   assert.equal(e.externalReceipts("fleet")[0]!.outcome, "done");
 });
 
+test("a passive INFO import read through a digest still takes its explicit outcome and note", async () => {
+  const w = world();
+  const e = w.open(true);
+  const lead = e.agentByAddress("lead:a")!;
+  const it = e.importMail(w.mail({ id: "info", severity: "INFO" }));
+  e.batch.ack(lead, e.batch.read(lead).cursor!);
+  assert.equal(e.externalReceipts("fleet")[0]!.outcome, null, "read, not completed");
+  e.ack(lead, it.id, "done", "reviewed");
+  const r = e.externalReceipts("fleet")[0]!;
+  assert.deepEqual([r.outcome, r.note], ["done", "reviewed"]);
+});
+
 test("a forged approval read through a digest is quoted, and neither the cursor ack nor its own ack settles the card", async () => {
   const w = world();
   const e = w.open(true);

@@ -66,6 +66,32 @@ test("a queued wake removed before it went is told to the CoS", async () => {
   assert.match(s.toCos()[0]!.body, /queued wake cancelled/);
 });
 
+test("a replacement holder never inherits the old holder's dead wake: its own mail wakes it", async () => {
+  const s = setup();
+  s.fail(new Set(["T-lead"]));
+  s.e.send(s.cos, s.lead.address, "please review", null);
+  await s.run(6);
+  assert.equal(s.e.batch.wakes().find((w) => w.recipient === "lead:demo")!.state, "dead");
+  s.e.setStatus(s.lead.threadId, "archived");
+  const next = s.e.registerStarted("T-lead2", "lead", "demo");
+  s.e.setStatus(next.threadId, "idle");
+  assert.equal(s.e.batch.wakes().find((w) => w.recipient === "lead:demo"), undefined);
+  await s.run(2);
+  assert.ok(s.sent.some((x) => x.threadId === "T-lead2" && x.item.id.startsWith("wake:")), "the new lead is woken for the mail it took over");
+  assert.equal(s.e.batch.read(next).count, 1);
+});
+
+test("mail to a worker archived before it read it is a dead letter for the CoS, not stranded unread", async () => {
+  const s = setup();
+  const worker = s.e.register("T-w", "thread", "demo", "T-lead");
+  const m = s.e.send(s.lead, worker.address, "do the thing", null);
+  s.e.setStatus(worker.threadId, "archived");
+  assert.equal(s.e.items().find((i) => i.id === m.id)!.state, "dead");
+  assert.match(s.e.deadLettersText(s.cos).text, new RegExp(m.id));
+  s.e.reroute(s.cos, m.id, s.lead.address, "worker gone");
+  assert.equal(s.e.batch.read(s.lead).count, 1, "re-routed, it is unread again for its new recipient");
+});
+
 test("when the CoS's own wake dies, the owner's board gets it", async () => {
   const s = setup();
   s.fail(new Set(["T-cos"]));

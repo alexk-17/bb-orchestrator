@@ -137,13 +137,15 @@ export class BatchInbox {
         item_id: string;
       }[];
       // Read is not handled. What needs no outcome closes, as delivery closes it in per-message mode. What asks for an
-      // outcome (needs_ack) is only marked delivered: its ack note, relay settlement or reply still has to happen.
+      // outcome (needs_ack, and every imported item, which only an explicit ack completes) is only marked delivered: its
+      // ack note, relay settlement, reply or receipt outcome still has to happen.
       const covered = `(SELECT item_id FROM inbox_entries WHERE recipient=? AND seq<=? AND acked_at IS NULL)`;
+      const outcome = `(needs_ack=1 OR id IN (SELECT item_id FROM external_mail))`;
       this.db
-        .prepare(`UPDATE items SET state='closed',closed_at=?,outcome=COALESCE(outcome,'read') WHERE id IN ${covered} AND needs_ack=0 AND state IN ('pending','queued','delivered','dead')`)
+        .prepare(`UPDATE items SET state='closed',closed_at=?,outcome=COALESCE(outcome,'read') WHERE id IN ${covered} AND NOT ${outcome} AND state IN ('pending','queued','delivered','dead')`)
         .run(this.now(), a.address, r.through_seq);
       this.db
-        .prepare(`UPDATE items SET state='delivered',delivered_at=COALESCE(delivered_at,?) WHERE id IN ${covered} AND needs_ack=1 AND state='pending'`)
+        .prepare(`UPDATE items SET state='delivered',delivered_at=COALESCE(delivered_at,?) WHERE id IN ${covered} AND ${outcome} AND state='pending'`)
         .run(this.now(), a.address, r.through_seq);
       this.db.prepare(`UPDATE inbox_entries SET acked_at=? WHERE recipient=? AND seq<=? AND acked_at IS NULL`).run(this.now(), a.address, r.through_seq);
       // Do not cancel a queued wake: the same queue row can wake for remaining/new mail.
@@ -157,6 +159,10 @@ export class BatchInbox {
     this.db
       .prepare(`UPDATE inbox_entries SET recipient=?, seq=(SELECT COALESCE(MAX(seq),0)+1 FROM inbox_entries),acked_at=NULL WHERE item_id=?`)
       .run(recipient, id);
+  }
+  /** A dead letter leaves its address's unread: the CoS handles it, and the next holder never gets it. */
+  dropped(id: string): void {
+    this.db.prepare(`UPDATE inbox_entries SET acked_at=? WHERE item_id=? AND acked_at IS NULL`).run(this.now(), id);
   }
   handoff(address: string): void {
     // A predecessor's queued wake cannot wake its successor; any late predecessor wake carries no mail.

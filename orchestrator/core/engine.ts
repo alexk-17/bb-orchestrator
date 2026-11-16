@@ -730,6 +730,7 @@ export class Engine {
     const a = this.agentByThread(threadId);
     this.db.prepare(`UPDATE agents SET retired_at = ? WHERE thread_id = ? AND retired_at IS NULL`).run(at, threadId);
     if (a) this.event({ at, kind: "retire", project: a.project, address: a.address, threadId });
+    if (a) this.batch.handoff(a.address); // its wake can't wake the next holder, and a dead or queued one would block that holder's wakes
     if (!keepMail) this.deadLetterOrphans();
     this.ports.changed();
   }
@@ -740,7 +741,6 @@ export class Engine {
    * isn't registered yet) keeps waiting.
    */
   private deadLetterOrphans(): void {
-    if (this.settings.batchInbox) return;
     const rows = this.db
       .prepare(
         `SELECT * FROM items i WHERE i.state = 'pending'
@@ -999,6 +999,7 @@ export class Engine {
     tx(this.db, () => {
       const seq = (this.db.prepare(`SELECT COALESCE(MAX(dead_seq), 0) + 1 AS n FROM items`).get() as { n: number }).n;
       this.db.prepare(`UPDATE items SET state = 'dead', note = ?, dead_seq = ?, dead_at = ?, on_board = 0 WHERE id = ?`).run(why, seq, this.now(), it.id);
+      this.batch.dropped(it.id);
       const to = this.agentByAddress(it.recipient);
       const sup = to ? this.supervisorOf(to) : null;
       if (sup && this.agentByAddress(sup)) {
@@ -1028,6 +1029,7 @@ export class Engine {
     if (!this.agentByAddress(it.recipient) && this.db.prepare(`SELECT 1 FROM agents WHERE address = ? AND retired_at IS NOT NULL`).get(it.recipient))
       throw new EngineError("bad_state", `${it.recipient} has no live agent: give the address a role first${by === "person" ? "" : ", or re-route it"}`);
     this.db.prepare(`UPDATE items SET state = 'pending', attempts = 1, queued_message_id = NULL, delivered_at = NULL WHERE id = ?`).run(itemId);
+    this.batch.reroute(itemId, it.recipient); // batched: unread again, as a new arrival
     if (by === "person") this.boardAdd("notice", "person", null, `Resent ${itemId} to ${it.recipient}`, "", itemId);
     this.ports.changed();
     return this.item(itemId)!;
