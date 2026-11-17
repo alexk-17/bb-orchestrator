@@ -54,6 +54,7 @@ import {
 import type { Db } from "./core/db.ts";
 import { type DeliverResult, Engine, OUTPUT_KINDS, parseSince, type PrResult, WAIT_WHEN } from "./core/engine.ts";
 import { PINS_MAX } from "./core/pins.ts";
+import { DAY_MS, prune, pruneSummary } from "./core/retention.ts";
 import { AlarmState, describe as describeAlarm, sample, type Snapshot, type Thresholds } from "./core/host.ts";
 import {
   LIMIT_DEFAULT, LIMIT_MAX, LINES_DEFAULT, LINES_MAX, liveProjects, loadMemory, mapArgv, configEnvName, PROJECT_RECORD, mapOutcome, memoryConfigPath, memoryProjects,
@@ -131,6 +132,9 @@ export default async function plugin(bb: BbPluginApi) {
     memoryConfigEnv: { type: "string", label: "Environment variable that passes the memory config's path to the memory tools (empty: not passed)", default: "MEMORY_CONFIG" },
     memorySearch: { type: "string", label: "memory-search command (empty: the config's memory.search)", default: "" },
     prPollMinutes: { type: "number", label: "Check PRs every (minutes); 0 = never", default: 5 },
+    // Requested 2026-11-17: opt-in retention (core/retention.ts), once a day and with `bb orchestrator prune`. 0 keeps everything.
+    retentionDays: { type: "number", label: "Delete finished mail, settled cards, closed PR waits, Board rows and Steward alarms older than (days); 0 = keep forever", description: "Only what is finished goes: open cards and mail, and anything they still point at, stay whatever their age. Agents, projects, deliverables, outputs, rules and pins are never deleted.", default: 0 },
+    activityRetentionDays: { type: "number", label: "Delete activity-log entries (the project pages' history) older than (days); 0 = keep forever", default: 0 },
     linearWorkspace: { type: "string", label: "Linear workspace (the slug in linear.app/<slug>): Linear ids in the Projects tab link to their issues. Empty: they stay plain text", default: "" },
     linearTeams: { type: "string", label: "Linear team keys that link, comma-separated (empty: every key). Ids of other teams, and look-alikes such as model names, stay plain text", default: "" },
     // Requested 2026-11-17: hide tabs the owner doesn't use, by id or label. Empty (the default) shows every tab.
@@ -1454,6 +1458,16 @@ export default async function plugin(bb: BbPluginApi) {
     }
   };
 
+  /** Retention (core/retention.ts): delete, drop the deleted cards' mirrors, then give the space back to the disk. */
+  const runPrune = (dryRun: boolean): string => {
+    const { counts, decisions } = prune(db, Date.now(), cfg, dryRun);
+    if (dryRun) return `would delete: ${pruneSummary(counts)}`;
+    for (const id of decisions) rmSync(join(stateDir(), "decisions", `${id}.json`), { force: true });
+    // VACUUM can't run inside a transaction; prune has committed by now
+    if (Object.values(counts).some((n) => n > 0)) db.exec("VACUUM");
+    return `deleted: ${pruneSummary(counts)}`;
+  };
+
   bb.background.service("clock", {
     async start(signal) {
       // bb waits 5 s for a stopped service, then fails the reload ("service clock did not stop", 2026-11-14, during a
@@ -1495,6 +1509,7 @@ export default async function plugin(bb: BbPluginApi) {
       let lastPrCheck = 0;
       let lastPlace = 0;
       let lastXp = 0;
+      let lastPrune = 0;
       const pass = async () => {
         try {
           engine.tick();
@@ -1518,6 +1533,11 @@ export default async function plugin(bb: BbPluginApi) {
             lastPlace = Date.now();
             await placeSections();
             await pruneProjectSections();
+          }
+          if (signal.aborted) return;
+          if (Date.now() - lastPrune > DAY_MS && (cfg.retentionDays > 0 || cfg.activityRetentionDays > 0)) {
+            lastPrune = Date.now();
+            bb.log.info(`retention: ${runPrune(false)}`);
           }
           if (signal.aborted) return;
           if (Date.now() - lastCompactCheck > 60_000) {
@@ -2217,6 +2237,7 @@ export default async function plugin(bb: BbPluginApi) {
     "bb orchestrator setup sidebar",
     "bb orchestrator pin <project> <path|url|deliverable> [--title T]",
     "bb orchestrator unpin <project> <path|url|deliverable|pin id>",
+    "bb orchestrator prune [--dry-run]",
   ];
   bb.cli.register({
     name: "orchestrator",
@@ -2363,6 +2384,9 @@ export default async function plugin(bb: BbPluginApi) {
             if (self && !mayRead(self, d)) throw new EngineError("forbidden", `${self.address} reads only its own decisions`);
             return out(JSON.stringify(d, null, 2));
           }
+          case "prune":
+            if (self) throw new EngineError("forbidden", "not from an agent");
+            return out(runPrune(rest.includes("--dry-run")));
           case "tick":
             engine.tick();
             await flush();
@@ -2497,6 +2521,8 @@ export function privileged(cmd: string | undefined, rest: string[]): boolean {
       return rest.includes("--priority") || rest.includes("--hold") || rest.includes("--resume");
     case "dreams":
       return rest[0] === "run-now" && !rest.includes("--dry-run");
+    case "prune":
+      return !rest.includes("--dry-run");
     default:
       return false;
   }

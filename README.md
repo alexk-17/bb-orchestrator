@@ -93,6 +93,8 @@ The Orchestrator's main settings:
 | `memoryUnits`, `memoryTimers` | empty | The daily memory check: systemd user units to watch for failures, and `<unit>.timer=<minutes>` pairs that count as stale when they haven't run for that long. |
 | `dreamsEnabled` | off | The nightly dream batch and the daily memory check. Needs a memory config with `memory.dreamDir`. |
 | `hiddenTabs` | empty | Tabs to hide from the page, comma-separated, by id or label. Empty: every tab shows. |
+| `retentionDays` | 0 | Delete finished mail, settled cards, closed PR waits, old Board rows and Steward alarms after this many days, once a day. Open items, and anything they point at, always stay. 0: keep forever. |
+| `activityRetentionDays` | 0 | The same for the activity log (the project pages' history). 0: keep forever. `bb orchestrator prune --dry-run` shows what either would delete. |
 | `pokemon` | off | Gives each agent a Pokémon that evolves as it levels, and each project a Pokémon type: its lead and threads share the type, and its colour is the project's accent. Off: neutral avatars, no Pokémon name anywhere, and no project accent. See [orchestrator/NOTICE-pokemon.md](orchestrator/NOTICE-pokemon.md). |
 
 Other settings cover how long a question waits before it reaches you, how often PRs are checked, the Steward's host

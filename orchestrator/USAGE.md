@@ -347,6 +347,16 @@ explicit choice the machine's provider can't confirm is refused at start:
 | `slackHandleMap` | A JSON object of GitHub login to Slack handle, e.g. `{"some-login": "slackname"}`. Only mapped logins are tagged. |
 | `prPollMinutes` | How often PRs are checked, in minutes (default 5; 0: one first read, then no refresh). The tab checks only while it is open. |
 
+**Retention** (both off by default: nothing is ever deleted)
+
+| Setting | Default | What it does |
+|---|---|---|
+| `retentionDays` | 0 | Once a day, deletes what finished more than this many days ago: closed mail between agents, settled, moot and merged cards (and their copies in the state folder), closed PR waits, Board rows of retired agents, and old Steward alarms. Anything still open stays, whatever its age, and so does anything an open card, message, wait or deliverable points at. Agents, projects, deliverables, outputs, rules and pins are never deleted. 0: keep forever. |
+| `activityRetentionDays` | 0 | The same for the activity log behind the project pages' history. Each thread's latest status and each live agent's start stay. 0: keep forever. |
+
+`bb orchestrator prune --dry-run` lists how many rows each table would lose; `bb orchestrator prune` deletes them
+now and gives the space back to the disk.
+
 **Timing**
 
 | Setting | Default | What it does |
