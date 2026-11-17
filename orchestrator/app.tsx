@@ -244,7 +244,16 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
       threads: live,
     };
   }, [board.data, needs.data, projects.data, config.data, deliverables.data]);
-  const views = VIEWS.map((v) => ({
+  // fork (Caroline): drop hidden tabs by id or label; never hide every tab
+  const hiddenTabs = new Set(config.data?.hiddenTabs ?? []);
+  const isHidden = (v: (typeof VIEWS)[number]) => hiddenTabs.has(v.id) || hiddenTabs.has(v.label.toLowerCase());
+  const visible = VIEWS.some((v) => !isHidden(v)) ? VIEWS.filter((v) => !isHidden(v)) : VIEWS;
+  // a pane left on a tab that is now hidden moves to the first visible tab
+  useEffect(() => {
+    const stale = panes(layout.root).filter((p) => !visible.some((v) => v.id === p.view));
+    if (stale.length) setLayout((cur) => stale.reduce((l, p) => setView(l, p.id, visible[0]!.id), cur));
+  });
+  const views = visible.map((v) => ({
     id: v.id,
     label: v.label,
     count:

@@ -323,7 +323,7 @@ export type ProjectOrder = z.infer<typeof projectOrderSchema>;
 
 /** Who the page is for: the ownerName setting ("" = the page says "you") and the CoS's name. */
 // linearWorkspace / linearTeams: where a Linear id in the command center links (app/refs.ts); empty: no link
-export const configSchema = z.object({ ownerName: z.string(), cosTitle: z.string(), linearWorkspace: z.string().optional(), linearTeams: z.array(z.string()).optional() });
+export const configSchema = z.object({ ownerName: z.string(), cosTitle: z.string(), linearWorkspace: z.string().optional(), linearTeams: z.array(z.string()).optional(), hiddenTabs: z.array(z.string()).optional() });
 export type Config = z.infer<typeof configSchema>;
 
 export const rpcContract = defineRpcContract({

@@ -9,8 +9,10 @@ import { cloudEmptyState } from "../core/setup.ts";
 test("a default install lists the Cloud tab: the orchestrator page never filters it out", () => {
   const src = readFileSync(new URL("../../app.tsx", import.meta.url), "utf8");
   assert.match(src, /\{ id: "cloud", subPath: "cloud", label: "Cloud" \}/, "Cloud is one of the page's tabs");
-  assert.match(src, /const views = VIEWS\.map\(/, "every tab in VIEWS is shown, whatever cs.available says");
-  assert.doesNotMatch(src, /VIEWS\.filter\(/, "no tab is hidden by a machine check");
+  // fork (Caroline): the only filter is the owner's hiddenTabs setting, and it is empty by default
+  assert.match(src, /VIEWS\.filter\(\(v\) => !isHidden\(v\)\)/, "tabs are hidden only by the owner's choice");
+  assert.match(src, /const isHidden = .*=> hiddenTabs\.has\(v\.id\) \|\| hiddenTabs\.has\(v\.label\.toLowerCase\(\)\);/, "nothing but hiddenTabs decides");
+  assert.doesNotMatch(src, /cs\.available[^\n]*filter|filter[^\n]*cs\.available/, "no tab is hidden by a machine check");
 });
 
 test("without a config file the Cloud tab says what to create and where", () => {
