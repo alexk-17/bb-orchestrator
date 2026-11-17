@@ -132,9 +132,9 @@ export default async function plugin(bb: BbPluginApi) {
     memorySearch: { type: "string", label: "memory-search command (empty: the config's memory.search)", default: "" },
     prPollMinutes: { type: "number", label: "Check PRs every (minutes); 0 = never", default: 5 },
     linearWorkspace: { type: "string", label: "Linear workspace (the slug in linear.app/<slug>): Linear ids in the Projects tab link to their issues. Empty: they stay plain text", default: "" },
-    // fork (Caroline): tabs to hide from the page, by id or label, comma-separated. Empty shows them all.
-    hiddenTabs: { type: "string", label: "Tabs to hide, comma-separated (ids or labels, e.g. gameboy, rules, activity). Empty: show every tab", default: "" },
     linearTeams: { type: "string", label: "Linear team keys that link, comma-separated (empty: every key). Ids of other teams, and look-alikes such as model names, stay plain text", default: "" },
+    // Requested 2026-11-17: hide tabs the owner doesn't use, by id or label. Empty (the default) shows every tab.
+    hiddenTabs: { type: "string", label: "Tabs to hide, comma-separated (ids or labels, e.g. gameboy, rules, activity). Empty: show every tab", default: "" },
     pokemon: { type: "boolean", label: "Pokémon", description: "Give each agent a Pokémon that evolves as it levels: sprites in the app and the sidebar, its name in its brief, evolutions on the board. Each project gets a Pokémon type: its lead and threads share it, and its colour is the project's accent. Sprites load from PokeAPI's public sprite repo at runtime. Pokémon is a trademark of Nintendo, Creatures and GAME FREAK; this plugin is not affiliated with them.", default: false },
     pushNeedsYou: { type: "boolean", label: "Desktop/web push when a card enters Needs you (never sent while mobile push is on)", default: true },
     notifyOnlyOrchestrator: { type: "boolean", label: "Orchestrator notifications only", description: "bb notifies you only for the orchestrator: Needs-you cards, deliveries and the CoS thread. Mutes every other thread by setting push-notifications' defaultLevel and childLevel to muted; switching it off restores them. Card and delivery pushes still need pushNeedsYou on and mobile push off.", default: false },

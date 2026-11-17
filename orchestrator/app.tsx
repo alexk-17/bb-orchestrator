@@ -244,7 +244,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
       threads: live,
     };
   }, [board.data, needs.data, projects.data, config.data, deliverables.data]);
-  // fork (Caroline): drop hidden tabs by id or label; never hide every tab
+  // Requested 2026-11-17: the hiddenTabs setting drops tabs by id or label (lower-cased by the server); it never hides them all
   const hiddenTabs = new Set(config.data?.hiddenTabs ?? []);
   const isHidden = (v: (typeof VIEWS)[number]) => hiddenTabs.has(v.id) || hiddenTabs.has(v.label.toLowerCase());
   const visible = VIEWS.some((v) => !isHidden(v)) ? VIEWS.filter((v) => !isHidden(v)) : VIEWS;

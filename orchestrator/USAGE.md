@@ -311,6 +311,7 @@ Change settings under bb's Settings → Installed plugins → Orchestrator, or f
 |---|---|---|
 | `ownerName` | empty | Your name, as agents and screens say it. Empty: agents say "the owner" and screens say "you". |
 | `pokemon` | off | Gives each agent a Pokémon that evolves as it levels, and each project a Pokémon type whose colour is its accent. Off: neutral avatars and no accent. The screenshots here have it off. |
+| `hiddenTabs` | empty | Tabs to hide from the page, comma-separated, by id or label (e.g. `gameboy, rules, activity`). Empty: every tab shows. A pane left on a hidden tab moves to the first tab shown, and the page never hides them all. |
 
 **Provider, model and reasoning** for the agents started with the Start buttons on Projects (or by the CoS). An
 explicit choice the machine's provider can't confirm is refused at start:

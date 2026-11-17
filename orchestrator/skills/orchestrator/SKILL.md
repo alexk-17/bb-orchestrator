@@ -105,7 +105,8 @@ Settings (`bb plugin config orchestrator set <key> <value>`): `batchInbox` (fals
 `diskPct` (85), `swapPct` (50), `memPct` (90), `cpuPct` (95), `sustainSeconds` (300), `sampleSeconds` (60),
 `diskPath` (/), `cosCompactTokens` (0 = off, the default: Claude Code compacts on its own; a token count opts in), `stateDir` (empty: state/ in the plugin's data folder),
 `ownerName` (empty: agents say "the owner"), `cosTitle` (Chief of Staff), `projectsDir`, `projectRecord` (project.json),
-`memoryConfig` (empty: memory off), `memoryConfigEnv` (MEMORY_CONFIG), `memoryUnits`, `memoryTimers`, `dreamsEnabled` (false).
+`memoryConfig` (empty: memory off), `memoryConfigEnv` (MEMORY_CONFIG), `memoryUnits`, `memoryTimers`, `dreamsEnabled` (false),
+`hiddenTabs` (empty: every tab shows).
 
 ## External fleet integration (opt-in; operator CLI)
 
