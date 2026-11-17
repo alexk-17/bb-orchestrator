@@ -16,7 +16,7 @@ export const OPEN_PRS_QUERY = `query($q: String!, $after: String) {
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
-        number title url body isDraft updatedAt
+        id number title url body isDraft updatedAt
         author { login }
         reviews(first: 100) { pageInfo { hasNextPage } nodes { state author { login __typename } commit { oid } } }
         reviewRequests(first: 100) { pageInfo { hasNextPage } nodes { requestedReviewer { __typename ... on User { login } } } }
@@ -64,6 +64,7 @@ export const recentMergedSearch = (repo: string) => `repo:${repo} is:pr is:merge
 
 /** One open PR as the host hands it to the server: GitHub's fields, flattened. */
 export interface RawPr {
+  nodeId?: string;
   reviewData?: ReviewData;
   url: string;
   number: number;
@@ -110,6 +111,7 @@ export function parseOpenPrsPage(data: Json): { prs: RawPr[]; next: string | nul
       const req = obj(rule?.parameters).requiredApprovingReviewCount;
       const rollup = obj(obj(obj(arr(obj(n.commits).nodes)[0]).commit).statusCheckRollup);
       return {
+        nodeId: str(n.id) ?? "",
         reviewData: {
           author: str(obj(n.author).login) ?? "",
           complete: Array.isArray(obj(n.reviews).nodes) && obj(obj(n.reviews).pageInfo).hasNextPage === false && obj(obj(n.reviewRequests).pageInfo).hasNextPage === false,

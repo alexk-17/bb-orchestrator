@@ -4,6 +4,7 @@ import { z } from "zod";
 import { LOGIN_RE, REPO_RE } from "../core/open-prs.ts";
 
 const rawPr = z.object({
+  nodeId: z.string().optional(),
   reviewData: z.object({ author: z.string(), complete: z.boolean(), requested: z.array(z.string()), reviews: z.array(z.object({ login: z.string(), state: z.string(), sha: z.string() })) }).optional(),
   url: z.string(), number: z.number(), title: z.string(), body: z.string(), repo: z.string(), draft: z.boolean(), updatedAt: z.string(),
   branch: z.string(), sha: z.string(), reviewDecision: z.string().nullable(), mergeable: z.string().nullable(), mergeState: z.string().nullable(),
@@ -11,6 +12,10 @@ const rawPr = z.object({
 });
 
 export const prHostDefs = {
+  "prs.states": {
+    input: z.object({ ids: z.array(z.string().min(1).max(128)).max(750) }).strict(),
+    output: z.record(z.string(), z.enum(["OPEN", "CLOSED", "MERGED"])), experimental_retryable: true,
+  },
   // every open PR the login authored, across repos (archived repos left out); paged, at most 250
   "prs.open": { input: z.object({ login: z.string().regex(LOGIN_RE) }).strict(), output: z.object({ prs: z.array(rawPr), more: z.boolean() }), experimental_retryable: true },
   // one PR's changed files at its head

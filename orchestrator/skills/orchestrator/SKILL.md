@@ -176,3 +176,8 @@ first human review, re-review after a changed head, and an approval on the curre
 Set `peopleFilePath` to a YAML directory on the bb server with `users[].github.login` and `users[].slack.mention`.
 Only mapped, active users get mentions. Copy section / Copy all write HTML links and plain URLs together for Slack
 paste; they never send a message or request reviewers. See the repository README for exact classification and limits.
+
+PR summaries are extracted deterministically from Summary/What body prose (140 characters maximum). After a successful
+clipboard write, local plugin storage remembers the copied section's head/review/CI/title state. The tab and optional
+copy header compare against those baselines; section copies leave other baselines intact. Missing PRs are only called
+merged/closed after GitHub confirms their state. The include-changes checkbox defaults on; it never controls saving.

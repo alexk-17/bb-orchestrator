@@ -239,10 +239,36 @@ path adds no mentions; an unreadable or malformed file shows a note and adds non
 not Open PRs' `slackHandleMap`. For approved PRs, mapped approvers are included as attribution.
 
 Each section has **Copy section**, and **Copy all** copies all three sections. Each PR includes its plain-word title,
-`repo#number`, author, mapped mentions and PR link. Both `text/html` (real anchors and lists) and `text/plain` (bare URLs)
+`repo#number`, author, mapped mentions, a one-sentence body summary and PR link. Both `text/html` (real anchors and lists) and `text/plain` (bare URLs)
 are written in one `ClipboardItem`. No Slack `<url|label>` syntax is generated. Clipboard failure is shown rather than
 silently falling back to another format. Paste into Slack yourself; `@Name` stays plain text and may need resolving
 in Slack before it notifies someone. The plugin never sends messages or requests a review.
+
+#### Summaries and changes since the last copy
+
+Under each title, the PRs tab shows the first sentence from the PR body's **Summary** or **What** section (Markdown
+headings or bold inline labels such as `**What changes.**`). Otherwise it uses the first prose paragraph. Markdown,
+URLs, ticket references, code fences, template labels and task placeholders are stripped. If no usable prose remains,
+it uses the title without its conventional-commit prefix. The result is at most 140 characters and is also copied
+under the PR title in both clipboard formats. There are no model calls. Body edits are picked up at the next GitHub
+poll even when the head SHA is unchanged.
+
+A successful clipboard write saves a snapshot in plugin storage, scoped to the configured GitHub login: PR URL/ID,
+section, head SHA, review state, current human approvers, CI state and title. **Copy section** replaces only that
+section's baseline (even when empty); **Copy all** replaces all three. The first copy establishes the baseline.
+Snapshots survive page and plugin reloads, and other BB windows using that login share them. Overlapping section
+writes are serialized. A clipboard failure never advances a baseline; a save failure is reported separately.
+
+**Since your last copy (time)** lists new PRs in a section, section moves, new commits, review/approver changes, CI
+flips, title changes and disappeared PRs. Changed rows are also marked inline. Each section's copy time is shown
+because section copies can have different baselines; an uncopied section's changes stay pending until it is copied.
+Merged/closed labels require a separate read-only GitHub lookup of the missing PR IDs. Missing/failed lookups are
+shown as **status unconfirmed**, and still-open PRs that fall outside the search are labelled **still open**. A PR
+still in the open list but outside the three sections is shown as **Outside review sections**, not as closed.
+
+**Include changes since last copy in copied text** defaults on. It prepends a short change header (at most six PRs,
+then a count of the rest), limited to the copied section when applicable. Turn it off to copy just the PRs and their
+summaries; the successful copy still updates that section's baseline. Full change details remain visible in the tab.
 
 ## Development
 

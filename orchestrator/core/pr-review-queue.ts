@@ -1,4 +1,5 @@
 // Human review state is independent of branch protection, CI, and bot approvals.
+import type { CopyChange } from "./pr-copy-history.ts";
 import { LOGIN_RE, extractSummary, prRef } from "./open-prs.ts";
 
 export interface HumanReview { login: string; state: string; sha: string }
@@ -48,13 +49,14 @@ export function mentionsFor(logins: string[], directory: Record<string, string>)
 
 export interface ReviewRow {
   url: string; repo: string; number: number; title: string; author: string;
+  copySummary?: string;
   bucket: ReviewBucket | null; reviewers: string[]; mentions: string[];
 }
 export const reviewTitle = (title: string) => extractSummary("", title);
 const escape = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 
 /** Structured HTML for rich paste; plain text has bare URLs. Neither flavor uses Slack mrkdwn. */
-export function formatReviewQueue(prs: ReviewRow[], section?: ReviewBucket): { html: string; text: string } {
+export function formatReviewQueue(prs: ReviewRow[], section?: ReviewBucket, changes?: CopyChange[]): { html: string; text: string } {
   const sections = REVIEW_SECTIONS.filter((s) => !section || s.id === section);
   const blocks = sections.map((s) => {
     const rows = prs.filter((p) => p.bucket === s.id);
@@ -64,12 +66,22 @@ export function formatReviewQueue(prs: ReviewRow[], section?: ReviewBucket): { h
       // Only https PR-shaped URLs become links (including GitHub Enterprise); unexpected URLs stay inert.
       const safeUrl = /^https:\/\/[^\s<>"|]+\/[^\s<>"|]+\/[^\s<>"|]+\/pull\/\d+$/.test(p.url);
       const link = safeUrl ? `<a href="${escape(p.url)}">${escape(prRef(p))}</a>` : escape(p.url);
-      return { text: `${context}${mentions}\n${p.url}`, html: `<li>${escape(reviewTitle(p.title))} — ${link} — by ${escape(p.author)}${escape(mentions)}</li>` };
+      const summary = p.copySummary ? `\n  ${p.copySummary}` : "";
+      return { text: `${context}${mentions}${summary}\n${p.url}`, html: `<li>${escape(reviewTitle(p.title))} — ${link} — by ${escape(p.author)}${escape(mentions)}${p.copySummary ? `<br>${escape(p.copySummary)}` : ""}</li>` };
     });
     return {
       text: `${s.title}\n${lines.length ? lines.map((l) => `• ${l.text}`).join("\n") : "None."}`,
       html: `<p><strong>${escape(s.title)}</strong></p>${lines.length ? `<ul>${lines.map((l) => l.html).join("")}</ul>` : "<p>None.</p>"}`,
     };
   });
+  if (changes) {
+    const selected = changes.filter((c) => !section || c.sections.includes(section));
+    const lines = selected.slice(0, 6).map((c) => `${prRef(c)}: ${c.reasons.join("; ")}`);
+    if (selected.length > 6) lines.push(`${selected.length - 6} more changed PRs — see the PRs tab.`);
+    blocks.unshift({
+      text: `Changes since last copy\n${lines.length ? lines.map((l) => `• ${l}`).join("\n") : "No changes."}`,
+      html: `<p><strong>Changes since last copy</strong></p>${lines.length ? `<ul>${lines.map((l) => `<li>${escape(l)}</li>`).join("")}</ul>` : "<p>No changes.</p>"}`,
+    });
+  }
   return { text: blocks.map((b) => b.text).join("\n\n"), html: blocks.map((b) => b.html).join("") };
 }

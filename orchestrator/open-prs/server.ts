@@ -5,6 +5,9 @@
 // Kept in plugin storage (kv): each PR's summary and changed files, by its head sha, so neither is read or recomputed until
 // the head changes. CODEOWNERS and a repo's recent reviewers are kept in memory for six hours.
 import { mentionsFor, reviewQueue } from "../core/pr-review-queue.ts";
+import { createCopyStore } from "./copy-store.ts";
+import { copySummary } from "../core/pr-copy-summary.ts";
+import type { PrStates } from "../core/pr-copy-history.ts";
 import { readPeopleDirectory } from "./people.ts";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
@@ -55,9 +58,12 @@ interface Snapshot {
   prs: (RawPr & { summary: string; agent: Agent | null })[];
   files: Files;
   areas: Map<string, RepoArea>;
+  departed: PrStates;
+  departedError: boolean;
 }
 
 export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () => OpenPrsSettings) {
+  const copies = createCopyStore(bb.storage.kv);
   const host = bb.hosts.experimental_client({ contract: orchHostContract });
   let snap: Snapshot | null = null;
   let error: string | null = null;
@@ -147,7 +153,15 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
       });
       if (area) areas.set(repo, { at: now, area });
     }
-    snap = { login, at: now, more, prs: withAgents, files, areas: new Map([...areas].map(([k, v]) => [k, v.area])) };
+    const history = await copies.read(login);
+    const openUrls = new Set(prs.map((p) => p.url));
+    const missingIds = [...new Set(Object.values(history).flatMap((b) => b.prs).filter((p) => !openUrls.has(p.url) && p.nodeId).map((p) => p.nodeId))];
+    let departedError = false;
+    const departed = missingIds.length ? await onHost((hostId) => host.call("prs.states", { ids: missingIds }, { hostId })).catch(() => {
+      departedError = true;
+      return {};
+    }) : {};
+    snap = { login, at: now, more, prs: withAgents, files, areas: new Map([...areas].map(([k, v]) => [k, v.area])), departed, departedError };
   }
 
   /** Start a fetch unless one runs; the page hears OPEN_PRS_CHANNEL when it lands. */
@@ -169,6 +183,13 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
   }
 
   bb.rpc.register(openPrsContract, {
+    rememberPrCopy: async (input) => {
+      const login = settings().githubLogin.trim().replace(/^@/, "");
+      if (login.toLowerCase() !== input.login.toLowerCase()) throw new Error("GitHub login changed; refresh the tab before saving a copy baseline.");
+      const history = await copies.remember(input);
+      bb.realtime.publish(OPEN_PRS_CHANNEL, {});
+      return history;
+    },
     openPrs: async (): Promise<OpenPrsView> => {
       const s = settings();
       const login = s.githubLogin.trim().replace(/^@/, "");
@@ -181,7 +202,8 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
         ...(s.reviewChannel.trim() && !channel ? ["reviewChannel is neither a channel name nor an https link."] : []),
       ];
       const excludedList = parseExcluded(s.reviewExcludedProjects);
-      const base = { login, notes, pollMinutes: s.prPollMinutes, channel, excluded: excludedList, more: false, fetchedAt: null, error: null, prs: [] };
+      const copyHistory = LOGIN_RE.test(login) ? await copies.read(login) : {};
+      const base = { copyHistory, departed: {}, login, notes, pollMinutes: s.prPollMinutes, channel, excluded: excludedList, more: false, fetchedAt: null, error: null, prs: [] };
       if (!login) return { ...base, state: "unset" };
       if (!LOGIN_RE.test(login)) return { ...base, state: "error", error: "githubLogin is not a GitHub login." };
       const mine = snap && snap.login === login ? snap : null;
@@ -192,6 +214,7 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
       if (!mine) return { ...base, state: err ? "error" : "loading", error: err };
       const incomplete = mine.prs.filter((p) => !p.draft && !p.reviewData?.complete).length;
       if (incomplete) notes.push(`${incomplete} PR(s) have incomplete review history or reviewer requests (limit 100 each); omitted from the PRs sections.`);
+      if (mine.departedError) notes.push("Could not confirm removed PR statuses; they are marked unconfirmed until the next GitHub check.");
       const excluded = new Set(excludedList);
       const leadOf = (project: string | null) => (project ? (engine.agents().find((a) => a.role === "lead" && a.project === project)?.address ?? null) : null);
       return {
@@ -200,12 +223,17 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
         error: err,
         fetchedAt: mine.at,
         more: mine.more,
+        departed: mine.departed,
         prs: mine.prs.map((p) => {
           const project = p.agent?.project ?? null;
           const needs = needsReview(p);
           const candidates = candidatesFor(mine.files[p.url]?.sha === p.sha ? mine.files[p.url]!.files : [], mine.areas.get(p.repo) ?? null, login, handles.map);
           const queue = reviewQueue(p, candidates.map((c) => c.name));
           return {
+            nodeId: p.nodeId ?? "",
+            sha: p.sha,
+            copySummary: copySummary(p.body, p.title),
+            approvers: queue.bucket === "approved" ? queue.reviewers : [],
             author: p.reviewData?.author ?? login,
             ...queue,
             mentions: mentionsFor(queue.reviewers, directory.mentions),
