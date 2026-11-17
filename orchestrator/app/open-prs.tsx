@@ -86,7 +86,7 @@ ${Object.entries(PR_CHIP_TONES)
 `;
 
 /** The read, refetched when a GitHub read lands, on any orchestrator change, and each minute while the tab is shown. */
-function useOpenPrs() {
+export function useOpenPrs() {
   const q = experimental_useRpcQuery({ contract: openPrsContract, method: "openPrs", input: null });
   const refetch = useRef(q.refetch);
   refetch.current = q.refetch;

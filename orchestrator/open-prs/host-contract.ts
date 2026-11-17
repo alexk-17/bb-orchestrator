@@ -4,6 +4,7 @@ import { z } from "zod";
 import { LOGIN_RE, REPO_RE } from "../core/open-prs.ts";
 
 const rawPr = z.object({
+  reviewData: z.object({ author: z.string(), complete: z.boolean(), requested: z.array(z.string()), reviews: z.array(z.object({ login: z.string(), state: z.string(), sha: z.string() })) }).optional(),
   url: z.string(), number: z.number(), title: z.string(), body: z.string(), repo: z.string(), draft: z.boolean(), updatedAt: z.string(),
   branch: z.string(), sha: z.string(), reviewDecision: z.string().nullable(), mergeable: z.string().nullable(), mergeState: z.string().nullable(),
   checks: z.string().nullable(), approvedBy: z.array(z.string()), required: z.number().nullable(),

@@ -4,6 +4,8 @@
 //
 // Kept in plugin storage (kv): each PR's summary and changed files, by its head sha, so neither is read or recomputed until
 // the head changes. CODEOWNERS and a repo's recent reviewers are kept in memory for six hours.
+import { mentionsFor, reviewQueue } from "../core/pr-review-queue.ts";
+import { readPeopleDirectory } from "./people.ts";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import {
   LOGIN_RE,
@@ -31,6 +33,7 @@ import { OPEN_PRS_CHANNEL, openPrsContract, type OpenPrsView } from "./contract.
 import { orchHostContract } from "../host-contract.ts";
 
 export interface OpenPrsSettings {
+  peopleFilePath?: string;
   githubLogin: string;
   reviewChannel: string;
   reviewExcludedProjects: string;
@@ -121,7 +124,7 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
     const byBranch = await branchAgents();
     const withAgents = summed.map((p) => ({ ...p, agent: agentOf(p, byBranch) }));
     // changed files and repo areas: only for the PRs that need review
-    const wanted = withAgents.filter(needsReview);
+    const wanted = withAgents.filter((p) => needsReview(p) || reviewQueue(p).bucket === "needs-review");
     const files = pruneCache((await bb.storage.kv.get<Files>(FILES)) ?? {}, wanted.map((p) => p.url));
     let reads = 0;
     for (const p of wanted) {
@@ -169,9 +172,11 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
     openPrs: async (): Promise<OpenPrsView> => {
       const s = settings();
       const login = s.githubLogin.trim().replace(/^@/, "");
+      const directory = await readPeopleDirectory(s.peopleFilePath ?? "");
       const handles = parseHandleMap(s.slackHandleMap);
       const channel = channelOf(s.reviewChannel);
       const notes = [
+        ...(directory.error ? [directory.error] : []),
         ...(handles.error ? [`${handles.error}: no one is tagged until it is fixed.`] : []),
         ...(s.reviewChannel.trim() && !channel ? ["reviewChannel is neither a channel name nor an https link."] : []),
       ];
@@ -185,6 +190,8 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
       if (dueToFetch({ hasSnapshot: !!mine, lastAttempt: last, now: Date.now(), pollMs })) kick(login);
       const err = attempt?.login === login ? error : null; // another login's failure isn't this one's
       if (!mine) return { ...base, state: err ? "error" : "loading", error: err };
+      const incomplete = mine.prs.filter((p) => !p.draft && !p.reviewData?.complete).length;
+      if (incomplete) notes.push(`${incomplete} PR(s) have incomplete review history or reviewer requests (limit 100 each); omitted from the PRs sections.`);
       const excluded = new Set(excludedList);
       const leadOf = (project: string | null) => (project ? (engine.agents().find((a) => a.role === "lead" && a.project === project)?.address ?? null) : null);
       return {
@@ -196,7 +203,12 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
         prs: mine.prs.map((p) => {
           const project = p.agent?.project ?? null;
           const needs = needsReview(p);
+          const candidates = candidatesFor(mine.files[p.url]?.sha === p.sha ? mine.files[p.url]!.files : [], mine.areas.get(p.repo) ?? null, login, handles.map);
+          const queue = reviewQueue(p, candidates.map((c) => c.name));
           return {
+            author: p.reviewData?.author ?? login,
+            ...queue,
+            mentions: mentionsFor(queue.reviewers, directory.mentions),
             url: p.url,
             number: p.number,
             title: p.title,
@@ -214,7 +226,7 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
             needsReview: needs,
             excluded: !!project && excluded.has(project),
             updatedAt: p.updatedAt,
-            candidates: needs ? candidatesFor(mine.files[p.url]?.files ?? [], mine.areas.get(p.repo) ?? null, login, handles.map) : [],
+            candidates: needs ? candidates : [],
           };
         }),
       };

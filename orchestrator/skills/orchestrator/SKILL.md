@@ -168,3 +168,11 @@ pending imports, deadline delivery and retries. Receipt reads remain available e
 with all routes disabled. This cannot recall an already-queued bb message or undo
 an in-flight send: reconcile/cancel those through the operator before restoring a
 legacy consumer. A disabled companion alone stops new imports, not accepted mail.
+
+## PRs review queue
+
+The PRs tab shares Open PRs' `githubLogin` and `prPollMinutes` settings and lists that login's authored PRs. It separates
+first human review, re-review after a changed head, and an approval on the current head; drafts and bots don't count.
+Set `peopleFilePath` to a YAML directory on the bb server with `users[].github.login` and `users[].slack.mention`.
+Only mapped, active users get mentions. Copy section / Copy all write HTML links and plain URLs together for Slack
+paste; they never send a message or request reviewers. See the repository README for exact classification and limits.

@@ -8,6 +8,10 @@ export const OPEN_PRS_CHANNEL = "open-prs";
 const candidate = z.object({ name: z.string(), say: z.string(), owner: z.boolean(), recent: z.number() });
 
 export const openPrSchema = z.object({
+  author: z.string().default(""),
+  bucket: z.enum(["needs-review", "needs-rereview", "approved"]).nullable().default(null),
+  reviewers: z.array(z.string()).default([]),
+  mentions: z.array(z.string()).default([]),
   url: z.string(),
   number: z.number(),
   title: z.string(),

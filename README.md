@@ -195,10 +195,61 @@ bb plugin config orchestrator set reviewChannel <channel-name>
 bb plugin config orchestrator set slackHandleMap '{"<github-login>": "<slack-handle>"}'
 ```
 
+### The PRs tab
+
+**PRs** uses the same `githubLogin`, read-only GitHub host path, cache and polling interval as Open PRs: open PRs
+**authored by that login**, across non-archived repositories. It adds three mutually exclusive sections, with these rules:
+
+1. **Has a human approval:** at least one non-author human's latest opinionated review is `APPROVED` on the exact
+   current head SHA. A later comment does not revoke an approval; a change request or dismissal does. This section
+   takes precedence over re-review. It is not merge readiness: other change requests, required approval counts and CI
+   still apply.
+2. **Needs a review:** a non-draft PR has no submitted non-author human reviews. Pending reviews and issue comments
+   do not count. Requested individual reviewers are suggested first; otherwise the existing CODEOWNERS / recent
+   same-area reviewer ranking supplies up to three people.
+3. **Needs a re-review:** without a current approval, at least one human's latest submitted review is on a different
+   head SHA. The ask names those earlier reviewers, including authors of comments, dismissed reviews and change
+   requests. A force-push is also a changed head. Reviews with no commit SHA cannot prove a changed head.
+
+Drafts never enter any section. A PR with only comments, dismissals or change requests on the current head waits for
+an author push; it remains visible in Open PRs. GitHub `Bot` actors, `[bot]` logins, known automation logins (including
+`coderabbitai`), and the PR author never count as human reviewers. CI failures are displayed but do not hide a PR.
+Review history and requested reviewers are bounded to 100 each; a truncated connection is explicitly reported and
+that PR is omitted from these sections rather than classified from partial history. The shared list limit is 250 PRs.
+
+Set **`peopleFilePath`** to a YAML file on the **bb server**. The directory is optional and is read again on each tab
+refresh; unknown fields are ignored. Only active users' login and mention labels are returned to the page; email,
+Linear IDs and other directory details are not. Example:
+
+```yaml
+users:
+  - github:
+      login: octocat
+    slack:
+      mention: '@Octo Cat'
+    active: true
+```
+
+```sh
+bb plugin config orchestrator set peopleFilePath /absolute/path/to/people.yaml
+```
+
+Login matching is case-insensitive; `active: false` entries are skipped. Unmapped people get **no @mention**. An empty
+path adds no mentions; an unreadable or malformed file shows a note and adds none. This tab uses the people directory,
+not Open PRs' `slackHandleMap`. For approved PRs, mapped approvers are included as attribution.
+
+Each section has **Copy section**, and **Copy all** copies all three sections. Each PR includes its plain-word title,
+`repo#number`, author, mapped mentions and PR link. Both `text/html` (real anchors and lists) and `text/plain` (bare URLs)
+are written in one `ClipboardItem`. No Slack `<url|label>` syntax is generated. Clipboard failure is shown rather than
+silently falling back to another format. Paste into Slack yourself; `@Name` stays plain text and may need resolving
+in Slack before it notifies someone. The plugin never sends messages or requests a review.
+
 ## Development
 
 ```sh
 (cd orchestrator && npm install && npm test && npm run typecheck)
+# Installed-plugin browser proof (real GitHub data); --demo uses example PRs for shareable screenshots:
+(cd orchestrator && node test/e2e/pr-review-queue.mjs --out /tmp/prs-proof)
 (cd usage-meter && npm install)
 bb plugin install path:$PWD/orchestrator   # run your checkout in bb; bb plugin reload orchestrator after a change
 ```

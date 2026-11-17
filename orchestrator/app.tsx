@@ -22,6 +22,7 @@ import { NeedsYouView, ZONE } from "./app/needs-you.tsx";
 import { ProjectsView } from "./app/projects.tsx";
 import type { SharedRefs } from "./app/ref-text.tsx";
 import { DeliverablesView, inReview } from "./app/deliverables.tsx";
+import { PrReviewQueueView } from "./app/pr-review-queue.tsx";
 import { OpenPrsView } from "./app/open-prs.tsx";
 import { pointerPressed } from "./app/store.ts";
 import { EmptyState } from "./app/affect/empty-state-clean.tsx";
@@ -42,6 +43,7 @@ const VIEWS = [
   { id: "chat", subPath: "chat", label: "Chat" },
   { id: "projects", subPath: "projects", label: "Projects" },
   // Requested 2026-11-16: the owner's open PRs, which need review, and the review ask to paste in Slack
+  { id: "prs", subPath: "prs", label: "PRs" },
   { id: "open-prs", subPath: "open-prs", label: "Open PRs" },
   // Requested 2026-11-13: Cloud Switch moved in as a tab. Always listed (2026-11-16): without a cloud config it says what to
   // set up, instead of vanishing with no reason.
@@ -286,6 +288,8 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
         return <CosChat agents={board.data?.agents} width={pane.width} />;
       case "projects":
         return <ProjectsView q={projects} refetchAll={refetchAll} agents={board.data?.agents} lanesFrom={agents.data} needs={needs.data} openCard={openCard} detail={detail} onDetail={onDetail} refs={refs} />;
+      case "prs":
+        return <PrReviewQueueView />;
       case "open-prs":
         return <OpenPrsView />;
       case "board":
@@ -333,7 +337,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
           compact={compact}
           render={render}
           fill={(v) => v === "chat" || v === "cloud" || v === "gameboy"}
-          wide={(v) => v === "projects" || v === "deliverables" || v === "open-prs"}
+          wide={(v) => v === "projects" || v === "deliverables" || v === "prs" || v === "open-prs"}
           onView={(id, v) => {
             setLayout((l) => setView(l, id, v));
             follow(v);

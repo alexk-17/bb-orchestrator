@@ -6,6 +6,8 @@
 // No model call anywhere: the summary is the body's TL;DR section (else its first paragraph), cut to about 200
 // characters, and recomputed only when the PR's head commit changes.
 
+import type { ReviewData } from "./pr-review-queue.ts";
+
 // ---------------------------------------------------------------- what the host reads from GitHub (read-only GraphQL)
 
 /** The search for one login's open PRs, a page at a time. Read-only: a query, never a mutation. */
@@ -14,7 +16,11 @@ export const OPEN_PRS_QUERY = `query($q: String!, $after: String) {
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
-        number title url body isDraft updatedAt headRefName headRefOid reviewDecision mergeable mergeStateStatus
+        number title url body isDraft updatedAt
+        author { login }
+        reviews(first: 100) { pageInfo { hasNextPage } nodes { state author { login __typename } commit { oid } } }
+        reviewRequests(first: 100) { pageInfo { hasNextPage } nodes { requestedReviewer { __typename ... on User { login } } } }
+        headRefName headRefOid reviewDecision mergeable mergeStateStatus
         repository { nameWithOwner }
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
         latestOpinionatedReviews(first: 30) { nodes { state author { login __typename } } }
@@ -58,6 +64,7 @@ export const recentMergedSearch = (repo: string) => `repo:${repo} is:pr is:merge
 
 /** One open PR as the host hands it to the server: GitHub's fields, flattened. */
 export interface RawPr {
+  reviewData?: ReviewData;
   url: string;
   number: number;
   title: string;
@@ -103,6 +110,12 @@ export function parseOpenPrsPage(data: Json): { prs: RawPr[]; next: string | nul
       const req = obj(rule?.parameters).requiredApprovingReviewCount;
       const rollup = obj(obj(obj(arr(obj(n.commits).nodes)[0]).commit).statusCheckRollup);
       return {
+        reviewData: {
+          author: str(obj(n.author).login) ?? "",
+          complete: Array.isArray(obj(n.reviews).nodes) && obj(obj(n.reviews).pageInfo).hasNextPage === false && obj(obj(n.reviewRequests).pageInfo).hasNextPage === false,
+          reviews: arr(obj(n.reviews).nodes).map(obj).filter((r) => obj(r.author).__typename === "User").map((r) => ({ login: str(obj(r.author).login) ?? "", state: str(r.state) ?? "", sha: str(obj(r.commit).oid) ?? "" })),
+          requested: arr(obj(n.reviewRequests).nodes).map((r) => obj(obj(r).requestedReviewer)).filter((r) => r.__typename === "User").map((r) => str(r.login) ?? "").filter((login) => !!login),
+        },
         url: String(n.url),
         number: n.number as number,
         title: str(n.title) ?? "",
