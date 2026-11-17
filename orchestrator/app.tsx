@@ -22,6 +22,7 @@ import { NeedsYouView, ZONE } from "./app/needs-you.tsx";
 import { ProjectsView } from "./app/projects.tsx";
 import type { SharedRefs } from "./app/ref-text.tsx";
 import { DeliverablesView, inReview } from "./app/deliverables.tsx";
+import { ReviewQueueView } from "./review-queue/app.tsx";
 import { OpenPrsView } from "./app/open-prs.tsx";
 import { ScopeView } from "./app/scope.tsx";
 import { pointerPressed } from "./app/store.ts";
@@ -47,6 +48,7 @@ const VIEWS = [
   { id: "scope", subPath: "scope", label: "Scope" },
   // Requested 2026-11-16: the owner's open PRs, which need review, and the review ask to paste in Slack
   { id: "open-prs", subPath: "open-prs", label: "Open PRs" },
+  { id: "review-queue", subPath: "review-queue", label: "Review queue" },
   // Requested 2026-11-13: Cloud Switch moved in as a tab. Always listed (2026-11-16): without a cloud config it says what to
   // set up, instead of vanishing with no reason.
   { id: "cloud", subPath: "cloud", label: "Cloud" },
@@ -314,6 +316,8 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
         return <ProjectsView q={projects} refetchAll={refetchAll} agents={board.data?.agents} lanesFrom={agents.data} needs={needs.data} openCard={openCard} detail={detail} onDetail={onDetail} refs={refs} />;
       case "scope":
         return <ScopeView q={scope} projects={projects.data} deliverables={deliverables.data} refetchAll={refetchAll} mons={mons} accents={accents} focus={scopeFocus} />;
+      case "review-queue":
+        return <ReviewQueueView />;
       case "open-prs":
         return <OpenPrsView />;
       case "board":
@@ -360,7 +364,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
           compact={compact}
           render={render}
           fill={(v) => v === "chat" || v === "cloud" || v === "gameboy"}
-          wide={(v) => v === "projects" || v === "deliverables" || v === "open-prs" || v === "scope"}
+          wide={(v) => v === "projects" || v === "deliverables" || v === "open-prs" || v === "review-queue" || v === "scope"}
           onView={(id, v) => {
             setLayout((l) => setView(l, id, v));
             follow(v);

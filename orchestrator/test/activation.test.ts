@@ -47,7 +47,7 @@ function fakeHost(failAt: "cli" | null, hangSdk = false) {
           };
         if (k === "storage") return { database: () => db, kv: noop };
         if (k === "sdk" && hangSdk) return hanging;
-        if (k === "background") return { service: (name: string, s: Service) => rec.services.set(name, s) };
+        if (k === "background") return { service: (name: string, s: Service) => rec.services.set(name, s), schedule: () => {} };
         if (k === "onDispose") return (h: () => unknown) => rec.dispose.push(h);
         if (k === "realtime") return { publish: () => rec.published++, subscribe: noop };
         if (k === "log") return { info: (m: string) => rec.logs.push(m), warn: (m: string) => rec.logs.push(m), error: (m: string) => rec.logs.push(m) };

@@ -191,7 +191,7 @@ function host(settings: Record<string, unknown>) {
         if (k === "storage") return { database: () => db, kv: { get: async (key: string) => kv.get(key), set: async (key: string, v: unknown) => void kv.set(key, v), delete: async (key: string) => void kv.delete(key) } };
         if (k === "sdk") return new Proxy(sdk as any, { get: (t, a) => t[a] ?? noop });
         if (k === "agents") return new Proxy({ registerTool: (t: Tool) => rec.tools.set(t.name, t) } as any, { get: (t, a) => t[a] ?? noop });
-        if (k === "background") return { service: (name: string, s: Service) => rec.services.set(name, s) };
+        if (k === "background") return { service: (name: string, s: Service) => rec.services.set(name, s), schedule: () => {} };
         if (k === "log") return { info: () => {}, warn: () => {}, error: () => {} };
         return noop;
       },

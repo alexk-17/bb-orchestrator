@@ -72,6 +72,7 @@ import { cosTitleOf, ownerWords, type OwnerWords } from "./core/owner.ts";
 import { type DreamOptions, Dreams, loadDreamConfig, parseTimers, parseUnits, realDreamPorts, toolsDir } from "./core/dreams.ts";
 // the Cloud tab
 import { registerCloud } from "./cloud/server.ts";
+import { registerReviewQueue } from "./review-queue/server.ts";
 import { registerOpenPrs } from "./open-prs/server.ts";
 // the Game Boy tab
 import { registerGameboy } from "./gameboy/server.ts";
@@ -172,6 +173,7 @@ export default async function plugin(bb: BbPluginApi) {
   /** The owner in tool descriptions, as at load: a changed ownerName reaches them on the next plugin reload. */
   const O = ownerWords(cfg.ownerName);
   registerCloud(bb, () => cfg);
+  await registerReviewQueue(bb);
   const dataDir = dirname(bb.storage.database().name);
   registerGameboy(bb, join(dataDir, "gameboy"));
   /** The state folder: the setting, else state/ beside the plugin's database. */

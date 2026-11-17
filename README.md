@@ -64,6 +64,8 @@ never retagged: a fix ships as a new version.
    (`project.json`, which can be `{}`). Put the absolute path of the project's repo in backticks under a `## Repos`
    heading in `PROJECT.md`. The project then shows in the Projects tab with a **Start lead** button.
 
+The optional **Review queue** tab schedules one CodeRabbit review at a time, with ordering, pinning, auto discovery and a provider-neutral picker. It starts in dry-run; see [Review queue](orchestrator/review-queue/README.md) for setup and cutover.
+
 For day-to-day use (answering cards, reviewing deliverables, messaging a lead, standing rules and the settings that
 matter), see the usage guide: [orchestrator/USAGE.md](orchestrator/USAGE.md).
 

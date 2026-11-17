@@ -95,7 +95,7 @@ async function server(settings: Record<string, unknown> = {}) {
         if (k === "cli") return { register: (c: any) => { cli = c.run; } };
         if (k === "http") return { route: (_m: string, path: string, h: Route) => routes.set(path, h) };
         if (k === "sdk") return new Proxy(sdk, { get: (s: any, n) => s[n] ?? noop });
-        if (k === "background") return { service: () => {} };
+        if (k === "background") return { service: () => {}, schedule: () => {} };
         if (k === "log") return { info: () => {}, warn: () => {}, error: () => {} };
         return noop;
       },
