@@ -6,26 +6,35 @@ your yes. It runs on Gemini Live through Vertex AI, using your own Google Cloud 
 
 ## Turn it on (about 5 minutes)
 
-1. **Sign in to Google on the bb host.** In a terminal on the machine that runs your bb server, run
-   `gcloud auth application-default login`. Each person uses their own Google login, so there is no shared key.
-   (Or paste a service-account JSON key, with only the *Vertex AI User* role, into **Voice: service-account key**.)
-2. **Check access.** Your Google account needs the *Vertex AI User* role (`roles/aiplatform.user`) on the project,
-   and the project needs the Vertex AI API on: `gcloud services enable aiplatform.googleapis.com --project <project>`.
-3. **Fill in the settings.** Open the Orchestrator's plugin settings and set **Voice: Google Cloud project ID**. Check
-   **Voice: Vertex AI location**, **Voice: Live model** and **Voice: speaking voice** (the defaults are a starting point).
+1. **Get the team's voice key.** Your team shares one Google Cloud service account, granted only the *Vertex AI User*
+   role (`roles/aiplatform.user`) on the team's project. An admin creates it once and hands out its JSON key; treat the
+   key as a secret (a password manager, never chat or a repository). Admin, once:
+   `gcloud iam service-accounts create bb-voice --project <project>`, then
+   `gcloud projects add-iam-policy-binding <project> --member serviceAccount:bb-voice@<project>.iam.gserviceaccount.com --role roles/aiplatform.user`,
+   then `gcloud iam service-accounts keys create bb-voice.json --iam-account bb-voice@<project>.iam.gserviceaccount.com`.
+   The project also needs the Vertex AI API on: `gcloud services enable aiplatform.googleapis.com --project <project>`.
+2. **Paste the key into the secret setting.** Open the Orchestrator's plugin settings and paste the whole JSON key into
+   **Voice: service-account key**. bb keeps it in a 0600 file on your bb server; it is never sent to the page or logged.
+3. **Fill in the rest.** Set **Voice: Google Cloud project ID** to the team's project. Check **Voice: Vertex AI
+   location**, **Voice: Live model** and **Voice: speaking voice** (the defaults are a starting point).
 4. **Turn on "Voice mode"** in the same settings, then reload the plugin (or restart bb). It takes a reload: while voice is
    off, its routes don't exist at all.
 5. **Open the Orchestrator page and click the mic** beside "Message the Chief of Staff…". Allow the microphone. If
-   voice can't start, a status line beside the mic says why: no credential found, permission denied, or the model isn't
-   enabled.
+   voice can't start, the mic's popover says why: no credential found, permission denied, or the model isn't enabled.
+
+**Or use your own Google login instead of the shared key.** Leave **Voice: service-account key** empty and, on the
+machine that runs your bb server, run `gcloud auth application-default login`. Voice then uses that host's Application
+Default Credentials, and your own account needs *Vertex AI User* on the project. A pasted key always wins over the
+host's login.
 
 ## Using it
 
 - **Click the mic** to start a call: the mic is live until you hang up. **Hold Space** (outside a text box) for
   push-to-talk: the mic is live only while it's held. **Esc** or a second click hangs up. The mic is never live
   otherwise.
-- It opens with a short briefing, then follows your lead: "what's waiting on me?", "what did the API lead say?", "next
-  card", "go back to the billing one". Talk over it to interrupt.
+- It says nothing until you speak. It has the board in mind, and answers, acts and gives context only when you ask:
+  "what's waiting on me?", "what did the API lead say?", "next card", "go back to the billing one". Talk over it to
+  interrupt.
 - **Actions need your yes.** The voice can only propose. A confirm card appears, the voice reads it back word for word,
   and it's sent only after you say "yes" (or tap **Send**), after a 3-second "Cancel" window. **Merges, production, money
   and secrets always need a tap**: voice alone never sends them.
@@ -34,8 +43,8 @@ your yes. It runs on Gemini Live through Vertex AI, using your own Google Cloud 
   question to the Chief needs no confirm.
 - At hang-up, one short summary (what you decided, what you asked, what's still open) is posted to the Chief of Staff's
   thread.
-- The panel shows the transcript, the confirm card, the call's length and a cost estimate (set your rates in
-  **Voice: price estimate**).
+- While a call is live, the mic shows a small pulsing dot and the call's time (m:ss). Its popover, just below it, shows
+  the last few transcript lines and a confirm card when one is waiting.
 
 ## How it works
 

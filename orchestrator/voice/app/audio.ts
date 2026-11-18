@@ -39,6 +39,10 @@ export async function startCapture(onFrame: (pcm: ArrayBuffer, peak: number) => 
   const node = new AudioWorkletNode(ctx, "pcm16-capture");
   node.port.onmessage = (e: MessageEvent<{ pcm: ArrayBuffer; peak: number }>) => onFrame(e.data.pcm, e.data.peak);
   src.connect(node);
+  // a node with no path to the destination may never be run: route it out through a muted gain
+  const mute = ctx.createGain();
+  mute.gain.value = 0;
+  node.connect(mute).connect(ctx.destination);
   return {
     stop() {
       node.port.onmessage = null;

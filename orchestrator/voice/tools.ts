@@ -1,7 +1,7 @@
-// The voice's tools. Reads answer from the orchestrator's own state at once. Writes are only proposals: each becomes a
-// confirm card, is read back, and is sent by the page through the owner write it names (contract.ts WRITES) once the
-// person says yes or taps it. Asking the Chief of Staff a question needs no confirm; anything the Chief does
-// (start work, triage, chase CI, spin up a project) is asked of the Chief by voice, read back, and then sent.
+// The voice's tools. Reads answer from the orchestrator's own state at once. A write is the owner's spoken command: it
+// is sent at once by the page, through the owner write it names (contract.ts WRITES), and the voice says what it did in
+// one line. Merge, production, money and secrets are the exception: those become a card only a tap sends. Anything the
+// Chief of Staff does (start work, triage, chase CI, spin up a project) is asked of the Chief, and its reply read back.
 import { z } from "zod";
 import { answerBody, approveBody, cosMessageBody, deferBody, directMessageBody, holdBody, priorityBody, requestChangesBody, startLeadBody } from "../contract.ts";
 import type { ProposalRoute } from "./contract.ts";
@@ -32,33 +32,30 @@ export const TOOL_DECLARATIONS: FunctionDeclaration[] = [
   { name: "show", description: "Scroll the owner's page to a card and highlight it.", parameters: obj({ card_id: s("The card id") }, ["card_id"]) },
   {
     name: "answer_card",
-    description: "PROPOSE answering a card with one of its options (by option id), and optionally a short note. Read the proposal back and wait for a yes.",
+    description: "Answering a card with one of its options (by option id), and optionally a short note.",
     parameters: obj({ card_id: s("The card id"), option: s("The option id, or empty for a note only"), note: s("Optional words to send with it") }, ["card_id"]),
   },
-  { name: "defer_card", description: "PROPOSE putting a card off.", parameters: obj({ card_id: s("The card id"), until: { type: "string", enum: ["1h", "evening", "tomorrow"] } }, ["card_id", "until"]) },
-  { name: "tell_lead", description: "PROPOSE sending the owner's words to a project's lead.", parameters: obj({ project: s("The project slug"), text: s("The message, in the owner's words") }, ["project", "text"]) },
+  { name: "defer_card", description: "Putting a card off.", parameters: obj({ card_id: s("The card id"), until: { type: "string", enum: ["1h", "evening", "tomorrow"] } }, ["card_id", "until"]) },
+  { name: "tell_lead", description: "Sending the owner's words to a project's lead.", parameters: obj({ project: s("The project slug"), text: s("The message, in the owner's words") }, ["project", "text"]) },
   {
     name: "tell_chief",
-    description: "PROPOSE asking the Chief of Staff to DO something: start or steer work, start a lead or project, triage a card, chase CI, anything beyond these tools. The Chief does it and its reply is read back.",
+    description: "Asking the Chief of Staff to DO something: start or steer work, start a lead or project, triage a card, chase CI, anything beyond these tools. The Chief does it and its reply is read back.",
     parameters: obj({ text: s("The instruction, in the owner's words") }, ["text"]),
   },
   { name: "ask_chief", description: "Ask the Chief of Staff a question (no confirm needed). Its answer comes back later by itself.", parameters: obj({ question: s("The question") }, ["question"]) },
-  { name: "approve", description: "PROPOSE approving a deliverable, optionally with a next step for its lead.", parameters: obj({ deliverable_id: s("The deliverable id"), note: s("Optional note"), next: s("Optional next step") }, ["deliverable_id"]) },
-  { name: "request_changes", description: "PROPOSE asking for changes on a deliverable.", parameters: obj({ deliverable_id: s("The deliverable id"), text: s("What to change") }, ["deliverable_id", "text"]) },
-  { name: "set_priority", description: "PROPOSE a project's priority.", parameters: obj({ project: s("The project slug"), priority: { type: "string", enum: ["urgent", "high", "normal", "low"] } }, ["project", "priority"]) },
-  { name: "hold", description: "PROPOSE holding or releasing a project.", parameters: obj({ project: s("The project slug"), held: { type: "boolean" } }, ["project", "held"]) },
-  { name: "start_lead", description: "PROPOSE starting a project's lead.", parameters: obj({ project: s("The project slug") }, ["project"]) },
-  { name: "confirm", description: "Send the pending proposal: call ONLY after reading it back and hearing the owner say yes.", parameters: obj({ proposal_id: s("The proposal id") }, ["proposal_id"]) },
-  { name: "cancel", description: "Drop the pending proposal.", parameters: obj({ proposal_id: s("The proposal id") }, ["proposal_id"]) },
+  { name: "approve", description: "Approving a deliverable, optionally with a next step for its lead.", parameters: obj({ deliverable_id: s("The deliverable id"), note: s("Optional note"), next: s("Optional next step") }, ["deliverable_id"]) },
+  { name: "request_changes", description: "Asking for changes on a deliverable.", parameters: obj({ deliverable_id: s("The deliverable id"), text: s("What to change") }, ["deliverable_id", "text"]) },
+  { name: "set_priority", description: "A project's priority.", parameters: obj({ project: s("The project slug"), priority: { type: "string", enum: ["urgent", "high", "normal", "low"] } }, ["project", "priority"]) },
+  { name: "hold", description: "Holding or releasing a project.", parameters: obj({ project: s("The project slug"), held: { type: "boolean" } }, ["project", "held"]) },
+  { name: "start_lead", description: "Starting a project's lead.", parameters: obj({ project: s("The project slug") }, ["project"]) },
 ];
 
 export type ToolOutcome =
   | { kind: "result"; response: Record<string, unknown> }
   | { kind: "show"; cardId: string; response: Record<string, unknown> }
-  | { kind: "propose"; route: ProposalRoute; body: Record<string, unknown>; readback: string; cardId: string | null; stakes: string[]; awaitChief: boolean }
-  | { kind: "ask"; body: Record<string, unknown>; question: string }
-  | { kind: "confirm"; proposalId: string }
-  | { kind: "cancel"; proposalId: string };
+  /** `card`: what a tap card says it will do; `done`: the line said (and shown) once it went through. */
+  | { kind: "write"; route: ProposalRoute; body: Record<string, unknown>; card: string; done: string; cardId: string | null; stakes: string[]; awaitChief: boolean }
+  | { kind: "ask"; body: Record<string, unknown>; question: string };
 
 const err = (message: string): ToolOutcome => ({ kind: "result", response: { error: message } });
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
@@ -86,9 +83,9 @@ export const chiefText = (text: string, kind: "ask" | "do") =>
   `[voice] ${text.trim()}\n\n(${kind === "ask" ? "A question by voice" : "An instruction by voice, confirmed by the owner"}: answer in at most three short spoken sentences, with no ids or links.)`;
 
 export function route(name: string, args: Record<string, unknown>, reads: VoiceReads, zone: string): ToolOutcome {
-  const propose = (route: ProposalRoute, body: Record<string, unknown>, readback: string, cardId: string | null, stakes: string[] = [], awaitChief = false): ToolOutcome => {
+  const write = (route: ProposalRoute, body: Record<string, unknown>, card: string, done: string, cardId: string | null, stakes: string[] = [], awaitChief = false): ToolOutcome => {
     const bad = checkBody(route, body);
-    return bad ? err(`that proposal isn't valid: ${bad}`) : { kind: "propose", route, body, readback, cardId, stakes, awaitChief };
+    return bad ? err(`that isn't a valid ${route} write: ${bad}`) : { kind: "write", route, body, card, done, cardId, stakes: [card, ...stakes], awaitChief };
   };
   switch (name) {
     case "board": {
@@ -126,10 +123,11 @@ export function route(name: string, args: Record<string, unknown>, reads: VoiceR
       if (!opt && !note) return err("pick an option, or say what to write");
       if (!opt && !c.allowText) return err("this card needs one of its options");
       const what = opt ? `option ${opt.id}, ${opt.label}` : "a note";
-      return propose(
+      return write(
         "answer",
         { id: c.id, rev: c.rev, option: opt?.id ?? null, text: note, via: "voice" },
-        `Answering "${c.title}" with ${what}${note ? `, saying: ${note}` : ""}. Say yes to send.`,
+        `Answer "${c.title}" with ${what}${note ? `, saying: ${note}` : ""}.`,
+        `Answered "${c.title}": ${what}${note ? `, "${note}"` : ""}.`,
         c.id,
         [c.title, c.question, ...c.options.map((o) => o.label), c.highStakes ? "secret" : null].filter((x): x is string => !!x),
       );
@@ -140,17 +138,17 @@ export function route(name: string, args: Record<string, unknown>, reads: VoiceR
       const until = str(args.until);
       if (!["1h", "evening", "tomorrow"].includes(until)) return err("defer for 1h, until evening, or until tomorrow");
       const when = until === "1h" ? "for an hour" : until === "evening" ? "until this evening" : "until tomorrow";
-      return propose("defer", { id: c.id, rev: c.rev, preset: until, zone, via: "voice" }, `Putting off "${c.title}" ${when}. Say yes to send.`, c.id);
+      return write("defer", { id: c.id, rev: c.rev, preset: until, zone, via: "voice" }, `Put off "${c.title}" ${when}.`, `Put off "${c.title}" ${when}.`, c.id);
     }
     case "tell_lead": {
       const slug = str(args.project);
       const text = str(args.text);
       if (!reads.project(slug)) return err(`no project ${slug}`);
-      return propose("directMessage", { slug, text }, `Telling the ${slug} lead: "${text}". Say yes to send.`, null, [text]);
+      return write("directMessage", { slug, text }, `Tell the ${slug} lead: "${text}".`, `Sent to the ${slug} lead: ${text}`, null, [text]);
     }
     case "tell_chief": {
       const text = str(args.text);
-      return propose("cosMessage", { text: chiefText(text, "do") }, `Asking the Chief of Staff to: ${text}. Say yes to send.`, null, [text], true);
+      return write("cosMessage", { text: chiefText(text, "do") }, `Ask the Chief of Staff to: ${text}.`, `Asked the Chief of Staff to: ${text}`, null, [text], true);
     }
     case "ask_chief": {
       const question = str(args.question);
@@ -164,34 +162,30 @@ export function route(name: string, args: Record<string, unknown>, reads: VoiceR
       if (!d || d.state !== "review") return err(`no deliverable ${str(args.deliverable_id)} waiting for review`);
       const note = str(args.note) || null;
       const next = str(args.next) || null;
-      return propose("approve", { id: d.id, rev: d.rev, note, next }, `Approving "${d.title}"${next ? `, with next step: ${next}` : ""}. Say yes to send.`, null, [d.title, d.summary, note, next].filter((x): x is string => !!x));
+      return write("approve", { id: d.id, rev: d.rev, note, next }, `Approve "${d.title}"${next ? `, with next step: ${next}` : ""}.`, `Approved "${d.title}"${next ? `; next: ${next}` : ""}.`, null, [d.title, d.summary, note, next].filter((x): x is string => !!x));
     }
     case "request_changes": {
       const d = reads.deliverable(str(args.deliverable_id));
       if (!d || d.state !== "review") return err(`no deliverable ${str(args.deliverable_id)} waiting for review`);
       const text = str(args.text);
-      return propose("requestChanges", { id: d.id, rev: d.rev, text }, `Asking for changes on "${d.title}": ${text}. Say yes to send.`, null, [text]);
+      return write("requestChanges", { id: d.id, rev: d.rev, text }, `Ask for changes on "${d.title}": ${text}.`, `Asked for changes on "${d.title}": ${text}`, null, [text]);
     }
     case "set_priority": {
       const slug = str(args.project);
       if (!reads.project(slug)) return err(`no project ${slug}`);
-      return propose("priority", { slug, priority: str(args.priority) }, `Setting ${slug} to ${str(args.priority)} priority. Say yes to send.`, null);
+      return write("priority", { slug, priority: str(args.priority) }, `Set ${slug} to ${str(args.priority)} priority.`, `Set ${slug} to ${str(args.priority)} priority.`, null);
     }
     case "hold": {
       const slug = str(args.project);
       if (!reads.project(slug)) return err(`no project ${slug}`);
       const held = args.held === true;
-      return propose("hold", { slug, held }, `${held ? "Holding" : "Releasing"} ${slug}. Say yes to send.`, null);
+      return write("hold", { slug, held }, `${held ? "Hold" : "Release"} ${slug}.`, `${held ? "Held" : "Released"} ${slug}.`, null);
     }
     case "start_lead": {
       const slug = str(args.project);
       if (!reads.project(slug)) return err(`no project ${slug}`);
-      return propose("startLead", { slug }, `Starting the ${slug} lead. Say yes to send.`, null);
+      return write("startLead", { slug }, `Start the ${slug} lead.`, `Started the ${slug} lead.`, null);
     }
-    case "confirm":
-      return { kind: "confirm", proposalId: str(args.proposal_id) };
-    case "cancel":
-      return { kind: "cancel", proposalId: str(args.proposal_id) };
     default:
       return err(`no tool ${name}`);
   }

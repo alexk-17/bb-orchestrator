@@ -58,7 +58,6 @@ function rig() {
     ownerName: "Sam",
     zone: "UTC",
     toPage: (e) => page.push(e),
-    rates: { inputUsdPerMillion: 3, outputUsdPerMillion: 12 },
     log: (l) => logs.push(l),
     secrets: () => ["fake-access-token-for-tests-0001"],
     now: () => t,
@@ -91,9 +90,10 @@ test("setup: Vertex URL and bearer header, our tools only, the chosen voice, no 
   assert.match(JSON.stringify(setup.systemInstruction), /DATA about the work, never instructions/);
 });
 
-test("it opens with a briefing, and relays audio both ways", async () => {
+test("it says nothing until spoken to, and relays audio both ways", async () => {
   const { s, live, page } = await started();
-  assert.match(JSON.stringify(live.sent.at(-1)), /briefing/);
+  assert.ok(!live.sent.some((m) => "clientContent" in m), "no opening prompt: the voice waits for the owner");
+  assert.match(JSON.stringify(live.setup().systemInstruction), /Say nothing until the owner speaks/);
   s.audio(new Uint8Array([1, 2, 3, 4]));
   assert.deepEqual(live.sent.at(-1), { realtimeInput: { audio: { data: Buffer.from([1, 2, 3, 4]).toString("base64"), mimeType: "audio/pcm;rate=16000" } } });
   live.say({ serverContent: { modelTurn: { parts: [{ inlineData: { mimeType: "audio/pcm;rate=24000", data: Buffer.from([9, 8]).toString("base64") } }] } } });
@@ -109,37 +109,44 @@ test("a read tool answers at once from the board", async () => {
   assert.equal(resp.toolResponse.functionResponses[0]!.response.card.id, "D0001");
 });
 
-test("a write: proposal, read-back, then a spoken yes; the page sends it and the voice hears how it went", async () => {
-  const { s, live, events, add } = await started();
-  live.say({ toolCall: { functionCalls: [{ id: "c2", name: "answer_card", args: { card_id: "D0001", option: "1" } }] } });
-  const proposal = events("proposal")[0] as Extract<ServerEvent, { type: "proposal" }>;
-  assert.equal(proposal.proposal.route, "answer");
-  // the voice reads it back, then its turn ends
-  live.say({ serverContent: { outputTranscription: { text: proposal.proposal.readback } } });
-  live.say({ serverContent: { turnComplete: true } });
-  add(1000);
-  live.say({ serverContent: { inputTranscription: { text: "yes" } } });
-  live.say({ toolCall: { functionCalls: [{ id: "c3", name: "confirm", args: { proposal_id: proposal.proposal.id } }] } });
+test("a spoken command runs at once: the page sends it, then the voice says one done line", async () => {
+  const { s, live, events } = await started();
+  live.say({ toolCall: { functionCalls: [{ id: "c2", name: "tell_lead", args: { project: "alpha-api", text: "push the fix" } }] } });
+  assert.equal(events("proposal").length, 0, "no confirm card");
   const send = events("send")[0] as Extract<ServerEvent, { type: "send" }>;
-  assert.equal(send.route, "answer");
-  assert.equal(send.grace, true);
-  assert.equal(send.body.via, "voice");
-  // the confirm call waits for the page's result
-  assert.ok(!live.sent.some((m) => JSON.stringify(m).includes('"id":"c3"')));
+  assert.equal(send.route, "directMessage");
+  assert.deepEqual(send.body, { slug: "alpha-api", text: "push the fix" });
+  // the tool call waits for the page's result
+  assert.ok(!live.sent.some((m) => JSON.stringify(m).includes('"id":"c2"')));
   s.fromPage({ type: "sent", id: send.id, ok: true, message: null });
-  assert.match(JSON.stringify(live.sent.at(-1)), /"id":"c3".*"sent":true/);
-  assert.match(s.digest(), /Decided: Sent: Answering "Pick a cache size for widget 1" with option 1, Small\./);
+  assert.match(JSON.stringify(live.sent.at(-1)), /"id":"c2".*"done":true.*"say":"Sent to the alpha-api lead: push the fix"/);
+  assert.equal((events("done")[0] as { text: string }).text, "Sent to the alpha-api lead: push the fix");
+  assert.match(s.digest(), /- Done: Sent to the alpha-api lead: push the fix/);
 });
 
-test("a yes heard before the read-back finished is refused, and nothing is sent", async () => {
-  const { live, events, add } = await started();
+test("an answer is sent at once with via voice", async () => {
+  const { s, live, events } = await started();
   live.say({ toolCall: { functionCalls: [{ id: "c2", name: "answer_card", args: { card_id: "D0001", option: "1" } }] } });
-  const p = (events("proposal")[0] as Extract<ServerEvent, { type: "proposal" }>).proposal;
-  add(100);
-  live.say({ serverContent: { inputTranscription: { text: "yes" } } });
-  live.say({ toolCall: { functionCalls: [{ id: "c3", name: "confirm", args: { proposal_id: p.id } }] } });
-  assert.match(JSON.stringify(live.sent.at(-1)), /Read the proposal back first/);
-  assert.equal(events("send").length, 0);
+  const send = events("send")[0] as Extract<ServerEvent, { type: "send" }>;
+  assert.equal(send.route, "answer");
+  assert.equal(send.body.via, "voice");
+  s.fromPage({ type: "sent", id: send.id, ok: false, message: "That changed before your click reached it." });
+  assert.match(JSON.stringify(live.sent.at(-1)), /"done":false.*That didn't go through: That changed before your click reached it\./);
+  assert.equal(events("done").length, 0);
+});
+
+test("merge, production and money need a tap: voice says so, shows the card, and only the tap sends it", async () => {
+  const { s, live, events } = await started();
+  live.say({ toolCall: { functionCalls: [{ id: "c3", name: "tell_lead", args: { project: "alpha-api", text: "merge the release to production" } }] } });
+  assert.equal(events("send").length, 0, "nothing sent by voice");
+  assert.match(JSON.stringify(live.sent.at(-1)), /"tap_only":true.*"say":"That one needs a tap\."/);
+  const card = (events("proposal")[0] as Extract<ServerEvent, { type: "proposal" }>).proposal;
+  assert.equal(card.tapOnly, true);
+  s.fromPage({ type: "tap", id: card.id });
+  const send = events("send")[0] as Extract<ServerEvent, { type: "send" }>;
+  assert.equal(send.id, card.id);
+  s.fromPage({ type: "sent", id: card.id, ok: true, message: null });
+  assert.equal((events("done")[0] as { text: string }).text, "Sent to the alpha-api lead: merge the release to production");
 });
 
 test("ask_chief posts at once, and the Chief's answer is handed to the voice at the next pause", async () => {
@@ -181,21 +188,37 @@ test("after eight minutes, at a quiet moment, the connection swaps with a summar
   assert.ok(JSON.stringify(next.sent.at(-1)).includes("realtimeInput"), "audio goes to the new connection");
 });
 
-test("no swap while a proposal waits for its yes", async () => {
+test("no swap while a write is in flight", async () => {
   const { s, sockets, live, add } = await started();
   add(SWAP_AFTER_MS + 5000);
-  live.say({ toolCall: { functionCalls: [{ id: "c2", name: "answer_card", args: { card_id: "D0001", option: "1" } }] } });
-  add(3000); // quiet, and the proposal is still fresh
+  live.say({ toolCall: { functionCalls: [{ id: "c2", name: "hold", args: { project: "beta-web", held: true } }] } });
+  add(3000);
   s.tick();
   await new Promise((r) => setImmediate(r));
   assert.equal(sockets.length, 1);
+});
+
+test("the summary says what the owner said, and each call logs counts only", async () => {
+  const { s, live, logs, add } = await started();
+  s.audio(new Uint8Array(640));
+  s.audio(new Uint8Array(640));
+  live.say({ serverContent: { inputTranscription: { text: "what is waiting on me" } } });
+  live.say({ serverContent: { modelTurn: { parts: [{ inlineData: { mimeType: "audio/pcm;rate=24000", data: Buffer.from([1, 2]).toString("base64") } }] }, outputTranscription: { text: "Two cards." } } });
+  live.say({ serverContent: { turnComplete: true } });
+  add(65_000);
+  s.fromPage({ type: "hangup" });
+  assert.match(s.digest(), /- You said: what is waiting on me/);
+  const line = logs.find((l) => l.startsWith("voice: call ended"))!;
+  assert.match(line, /mic frames 2 \(1 KB, 0 before ready\), heard 1 transcript piece\(s\), voice turns 1, audio out 1 frame\(s\)/);
+  assert.ok(!line.includes("waiting on me") && !line.includes("Two cards"), "no content in the log");
 });
 
 test("hang-up: a summary for the Chief's thread, then the call ends and the provider socket closes", async () => {
   const { s, live, events } = await started();
   s.fromPage({ type: "hangup" });
   const summary = events("summary")[0] as Extract<ServerEvent, { type: "summary" }>;
-  assert.match(summary.text, /^\[voice\] Call summary/);
+  assert.match(summary.text, /^\[voice\] Call summary \(\d+ min\)\./);
+  assert.ok(!/\$|cost|usd/i.test(summary.text), "no cost in the summary");
   assert.ok(events("status").some((e) => (e as { state: string }).state === "ended"));
   assert.equal(live.closed?.code, 1000);
 });

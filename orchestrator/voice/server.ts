@@ -118,7 +118,6 @@ export async function registerVoice(bb: BbPluginApi, deps: VoiceDeps): Promise<{
                 if (sock.readyState === 1) sock.close(1000, "ended");
               }
             },
-            rates: { inputUsdPerMillion: cfg.voiceInputUsdPerMillion, outputUsdPerMillion: cfg.voiceOutputUsdPerMillion },
             log: (line) => log("info", line),
             secrets,
           });
@@ -130,7 +129,8 @@ export async function registerVoice(bb: BbPluginApi, deps: VoiceDeps): Promise<{
         onMessage(_sock, data) {
           if (!session) return;
           if (typeof data !== "string") {
-            session.audio(data);
+            // mic audio: a Uint8Array, or an ArrayBuffer from some runtimes
+            session.audio(data instanceof Uint8Array ? data : new Uint8Array(data as unknown as ArrayBuffer));
             return;
           }
           let parsed: unknown;

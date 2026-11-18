@@ -16,11 +16,9 @@ export const VOICE_SETTINGS = {
   voiceCredential: {
     type: "string",
     secret: true,
-    label: "Voice: service-account key (optional)",
-    description: "Empty (recommended): the bb host's Application Default Credentials, so each person uses their own Google login (gcloud auth application-default login). Set: a service-account JSON key with only the Vertex AI User role. Kept by bb in a 0600 file, read only by the server, never sent to the page or logged.",
+    label: "Voice: service-account key",
+    description: "Paste your team's service-account JSON key (a service account with only the Vertex AI User role). Kept by bb in a 0600 file, read only by the server, never sent to the page or logged. Empty: the bb host's own Application Default Credentials (gcloud auth application-default login) are used instead.",
   },
-  voiceInputUsdPerMillion: { type: "number", label: "Voice: price estimate, input tokens (USD per million)", description: "Only for the live cost meter.", default: 3 },
-  voiceOutputUsdPerMillion: { type: "number", label: "Voice: price estimate, output tokens (USD per million)", description: "Only for the live cost meter.", default: 12 },
 } as const;
 
 export type VoiceSettings = {
@@ -30,8 +28,6 @@ export type VoiceSettings = {
   voiceModel: string;
   voiceName: string;
   voiceCredential?: string;
-  voiceInputUsdPerMillion: number;
-  voiceOutputUsdPerMillion: number;
 };
 
 export function defineVoiceSettings(bb: BbPluginApi) {

@@ -28,14 +28,14 @@ export const voiceContract = defineRpcContract({
 export const PROPOSAL_ROUTES = ["answer", "defer", "directMessage", "cosMessage", "approve", "requestChanges", "priority", "hold", "startLead"] as const;
 export type ProposalRoute = (typeof PROPOSAL_ROUTES)[number];
 
-/** A write the voice proposed: the page shows it, the voice reads `readback` aloud, and the page sends `body` to `route`. */
+/** A tap-only write (merge, production, money, secrets): the page shows `readback` on a card, and a tap sends `body` to `route`. */
 export const proposalSchema = z.object({
   id: z.string(),
   route: z.enum(PROPOSAL_ROUTES),
   body: z.record(z.string(), z.unknown()),
-  /** The exact words read back, and shown on the confirm card. */
+  /** What the card says it will do. */
   readback: z.string(),
-  /** Merge, production, money or secrets: voice reads it, but only a tap sends it. */
+  /** Always true for a card: only a tap sends it. */
   tapOnly: z.boolean(),
   /** The card it acts on, for the page to point at. */
   cardId: z.string().nullable(),
@@ -50,10 +50,11 @@ export type ServerEvent =
   | { type: "interrupted" }
   | { type: "proposal"; proposal: Proposal }
   | { type: "proposal_gone"; id: string; reason: "sent" | "cancelled" | "expired" | "replaced" }
-  /** Send it now: a confirmed proposal (after the page's short grace), or an ask to the Chief, which needs no confirm. */
+  /** Send it now: the owner's spoken command, an ask to the Chief, or a tapped card. */
   | { type: "send"; id: string; route: ProposalRoute; body: Record<string, unknown>; grace: boolean }
   | { type: "show"; cardId: string }
-  | { type: "cost"; usd: number; seconds: number }
+  /** An action that just went through, in one past-tense line, for the transcript. */
+  | { type: "done"; text: string }
   | { type: "summary"; text: string };
 
 /** Page → server, as JSON text frames. Microphone audio goes as binary frames (PCM16, 16 kHz, mono). */
