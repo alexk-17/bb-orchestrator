@@ -2,7 +2,7 @@
 // shapes for the snapshot and the read tools. Read-only: nothing here writes.
 import type { Engine } from "../core/engine.ts";
 import type { Decision } from "../core/model.ts";
-import { statusLine, stepHeadline, waitsOf } from "../core/status.ts";
+import { position, statusLine, stepHeadline, waitsOf } from "../core/status.ts";
 import type { BoardData, CardLite, DeliverableLite, MessageLite, ProjectLite, WaitLite } from "./snapshot.ts";
 import type { VoiceReads } from "./tools.ts";
 
@@ -27,6 +27,14 @@ export function voicePorts(engine: Engine, ownerName: () => string) {
     if (!row) return null;
     const s = engine.leadStatus(slug);
     const waits = s ? waitsOf(s) : [];
+    const lead = engine.agents().find((a) => a.role === "lead" && a.project === slug && a.status !== "archived") ?? null;
+    let next: string | null = null;
+    if (s) {
+      const at = position(s);
+      const after = at.kind === "current" ? s.steps.slice(at.at).find((x) => x.state === "next") : null;
+      next = after?.title ?? (at.kind === "next" ? at.title : null);
+    }
+    const idleFor = lead?.idleAt ? Math.round((Date.now() - lead.idleAt) / 60_000) : null;
     return {
       slug: row.slug,
       priority: row.priority,
@@ -35,6 +43,11 @@ export function voicePorts(engine: Engine, ownerName: () => string) {
       status: s ? statusLine(s, ownerName()) || s.goal || null : null,
       step: s ? stepHeadline(s) || null : null,
       waitingOn: waits.length ? waits.map((w) => w.label ?? w.ref ?? w.kind).filter(Boolean).join("; ") : null,
+      blockers: s?.blockers?.length ? s.blockers.slice(0, 3) : [],
+      next,
+      lead: lead ? (lead.status === "idle" ? `idle${idleFor !== null ? ` ${idleFor < 60 ? `${idleFor}m` : `${Math.round(idleFor / 60)}h`}` : ""}` : lead.status) : "not running",
+      cards: engine.needsYou().cards.filter((c) => c.project === slug).length,
+      prs: engine.watchList().filter((w) => projectOf(w.owner) === slug).length,
     };
   };
   const projects = (): ProjectLite[] =>

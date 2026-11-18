@@ -5,7 +5,7 @@ import { NOW, board, card } from "./voice-fixtures.ts";
 
 test("the snapshot carries cards, projects, PR waits, deliverables and messages", () => {
   const s = buildSnapshot(board(), NOW);
-  for (const want of ["card D0001 (rev 1)", "options: 1=Small (recommended); 2=Large", "alpha-api: high", "beta-web: normal, held", "Waits on: a design review", "W1 [alpha-api] export endpoint", "passing, approved", "deliverable X1 (rev 1) [beta-web] New settings page", "Ship the export behind a flag", "Choose a logo: The blue one"]) {
+  for (const want of ["card D0001 (rev 1)", "options: 1=Small (recommended); 2=Large", "alpha-api: high", "beta-web: normal, held", "waits on: a design review", "W1 [alpha-api] export endpoint", "passing, approved", "deliverable X1 (rev 1) [beta-web] New settings page", "Ship the export behind a flag", "Choose a logo: The blue one"]) {
     assert.ok(s.includes(want), `missing: ${want}\n${s}`);
   }
 });

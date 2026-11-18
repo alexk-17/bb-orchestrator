@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { experimental_useRpcQuery } from "@get-bb/plugin-sdk/app";
-import { Check, Loader2, Mic, MicOff, X } from "lucide-react";
+import { Check, Loader2, Mic, MicOff, PhoneOff, X } from "lucide-react";
 import { WRITE_BASE, WRITES } from "../../contract.ts";
 import { stage } from "../../app/store.ts";
 import { Button } from "../../app/ui/button.tsx";
@@ -52,6 +52,7 @@ export function VoiceMic({ disabled = false }: { disabled?: boolean }) {
   micRef.current = mic;
   const graceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const anchor = useRef<HTMLSpanElement | null>(null);
+  const body = useRef<HTMLDivElement | null>(null);
   const [place, setPlace] = useState<{ side: "above" | "below"; edge: number; right: number; maxHeight: number } | null>(null);
 
   const sendJson = (e: unknown) => ws.current?.readyState === WebSocket.OPEN && ws.current.send(JSON.stringify(e));
@@ -175,6 +176,10 @@ export function VoiceMic({ disabled = false }: { disabled?: boolean }) {
           if (peak > BARGE_IN_PEAK && player.current?.playing) player.current.stop();
           if (sock.readyState === WebSocket.OPEN) sock.send(pcm);
         });
+        const info = cap.current.info();
+        const report = () => sock.readyState === WebSocket.OPEN && sock.send(JSON.stringify({ type: "mic", ...info }));
+        if (sock.readyState === WebSocket.OPEN) report();
+        else sock.addEventListener("open", report, { once: true });
       } catch (e) {
         setProblem(`The microphone isn't available: ${e instanceof Error ? e.message : String(e)}`);
         setState("error");
@@ -256,6 +261,12 @@ export function VoiceMic({ disabled = false }: { disabled?: boolean }) {
     };
   }, [open, on, lines.length, pending, problem]);
 
+  // the latest line always in view
+  useEffect(() => {
+    const b = body.current;
+    if (b) b.scrollTop = b.scrollHeight;
+  }, [lines, pending, open]);
+
   if (!enabled) return null; // off (the read doesn't exist), or not loaded yet
   const live = micLive(mic);
   const connecting = on && state === "connecting";
@@ -306,14 +317,14 @@ export function VoiceMic({ disabled = false }: { disabled?: boolean }) {
           aria-label="Voice"
           aria-live="polite"
           style={{ position: "fixed", right: place.right, maxHeight: place.maxHeight, ...(place.side === "above" ? { bottom: place.edge } : { top: place.edge }) }}
-          className="z-50 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-y-auto rounded-md border bg-popover p-2 text-xs text-popover-foreground shadow-md"
+          className="z-50 flex w-[360px] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-xl border bg-card text-sm text-card-foreground shadow-sm"
         >
-          <div className="flex items-center gap-2">
-            <span aria-hidden className={cx("size-1.5 flex-none rounded-full", on && !connecting ? "bg-primary" : "bg-muted-foreground", live && "animate-pulse")} />
-            <span className="flex-1 truncate text-muted-foreground">{label}</span>
+          <div className="flex flex-none items-center gap-2 border-b px-3 py-2">
+            <span aria-hidden className={cx("size-2 flex-none rounded-full", on && !connecting ? "bg-primary" : "bg-muted-foreground/50", live && "animate-pulse")} />
+            <span className="flex-1 truncate text-xs text-muted-foreground tabular-nums">{on && !connecting && since !== null ? clock(now - since) : label}</span>
             {on ? (
-              <Button type="button" variant="ghost" size="xs" onClick={hangup} data-voice-hangup="">
-                Hang up
+              <Button type="button" variant="ghost" size="icon-xs" aria-label="Hang up" title="Hang up (Esc)" onClick={hangup} data-voice-hangup="">
+                <PhoneOff aria-hidden />
               </Button>
             ) : (
               <Button type="button" variant="ghost" size="icon-xs" aria-label="Close" onClick={() => setOpen(false)}>
@@ -321,41 +332,39 @@ export function VoiceMic({ disabled = false }: { disabled?: boolean }) {
               </Button>
             )}
           </div>
-          {why ? (
-            <p data-voice-problem="" className="m-0 text-(--orch-danger)">
-              {why}
-            </p>
-          ) : null}
-          {pending ? (
-            <div data-voice-confirm="" data-tap-only="" className="flex flex-col gap-2 rounded-md border p-2">
-              <p className="m-0 text-sm">{pending.proposal.readback}</p>
-              <div className="flex items-center gap-2">
-                <span className="flex-1 text-muted-foreground">Needs your tap</span>
-                <Button type="button" variant="ghost" size="xs" disabled={pending.sending} onClick={() => sendJson({ type: "cancel", id: pending.proposal.id })}>
-                  Dismiss
-                </Button>
+          <div ref={body} className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto px-3 py-2.5">
+            {why ? (
+              <p data-voice-problem="" className="m-0 text-xs text-(--orch-danger)">
+                {why}
+              </p>
+            ) : null}
+            {lines.length ? (
+              <ol data-voice-transcript="" className="m-0 flex list-none flex-col gap-1.5 p-0">
+                {lines.map((l, i) => (
+                  <li key={i} data-who={l.who} className={l.who === "you" ? "ml-8 text-right text-muted-foreground" : l.who === "done" ? "flex items-start gap-1.5 text-muted-foreground" : "mr-8 text-foreground"}>
+                    {l.who === "done" ? (
+                      <>
+                        <Check aria-hidden className="mt-0.5 size-3.5 flex-none text-primary" />
+                        <span>{l.text}</span>
+                      </>
+                    ) : (
+                      l.text
+                    )}
+                  </li>
+                ))}
+              </ol>
+            ) : on && !connecting && !why ? (
+              <p className="m-0 text-xs text-muted-foreground">{live ? "Listening…" : "Hold Space to talk"}</p>
+            ) : null}
+            {pending ? (
+              <div data-voice-confirm="" data-tap-only="" className="mt-1 flex items-center gap-2 rounded-lg border px-2.5 py-2">
+                <span className="flex-1 text-sm">{pending.proposal.readback}</span>
                 <Button type="button" size="xs" disabled={pending.sending} onClick={() => sendJson({ type: "tap", id: pending.proposal.id })} data-voice-tap="">
                   Send
                 </Button>
               </div>
-            </div>
-          ) : null}
-          {shown.length ? (
-            <ol data-voice-transcript="" className="m-0 flex max-h-40 list-none flex-col gap-1 overflow-y-auto p-0">
-              {shown.map((l, i) => (
-                <li key={i} data-who={l.who} className={l.who === "you" ? "text-foreground" : l.who === "done" ? "flex gap-1 text-foreground" : "text-muted-foreground"}>
-                  {l.who === "done" ? (
-                    <>
-                      <Check aria-hidden className="mt-0.5 size-3 flex-none text-primary" />
-                      <span>{l.text}</span>
-                    </>
-                  ) : (
-                    l.text
-                  )}
-                </li>
-              ))}
-            </ol>
-          ) : null}
+            ) : null}
+          </div>
         </div>,
         root,
       ) : null}

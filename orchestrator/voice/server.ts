@@ -99,7 +99,14 @@ export async function registerVoice(bb: BbPluginApi, deps: VoiceDeps): Promise<{
             return;
           }
           const s = new VoiceSession({
-            config: { project: cfg.voiceProject.trim(), location: cfg.voiceLocation.trim() || "us-central1", model: cfg.voiceModel.trim(), voice: cfg.voiceName.trim() },
+            config: {
+              project: cfg.voiceProject.trim(),
+              location: cfg.voiceLocation.trim() || "us-central1",
+              model: cfg.voiceModel.trim(),
+              voice: cfg.voiceName.trim(),
+              sensitivity: (["low", "medium", "high"] as const).find((x) => x === (cfg.voiceSensitivity ?? "").trim().toLowerCase()) ?? "low",
+              language: /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test((cfg.voiceLanguage ?? "").trim()) ? cfg.voiceLanguage.trim() : "en-US",
+            },
             token: async () => {
               const t = await auth.token();
               return { token: t.token, quotaProject: t.quotaProject };

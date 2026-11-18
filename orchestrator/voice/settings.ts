@@ -13,6 +13,8 @@ export const VOICE_SETTINGS = {
   voiceLocation: { type: "string", label: "Voice: Vertex AI location", description: "A region such as us-central1, or global.", default: "us-central1" },
   voiceModel: { type: "string", label: "Voice: Live model", description: "A Gemini Live model your project can use.", default: "gemini-3.8-live" },
   voiceName: { type: "string", label: "Voice: speaking voice", description: "A prebuilt Gemini voice name. Empty: the model's default voice.", default: "Erinome" },
+  voiceLanguage: { type: "string", label: "Voice: language (BCP-47, e.g. en-US)", description: "What the voice listens for and speaks. Default en-US.", default: "en-US" },
+  voiceSensitivity: { type: "string", label: "Voice: how easily it hears you start talking (low, medium or high)", description: "Low (the default) ignores more background noise; high catches quiet speech sooner.", default: "low" },
   voiceCredential: {
     type: "string",
     secret: true,
@@ -27,6 +29,8 @@ export type VoiceSettings = {
   voiceLocation: string;
   voiceModel: string;
   voiceName: string;
+  voiceSensitivity: string;
+  voiceLanguage: string;
   voiceCredential?: string;
 };
 

@@ -16,7 +16,9 @@ your yes. It runs on Gemini Live through Vertex AI, using your own Google Cloud 
 2. **Paste the key into the secret setting.** Open the Orchestrator's plugin settings and paste the whole JSON key into
    **Voice: service-account key**. bb keeps it in a 0600 file on your bb server; it is never sent to the page or logged.
 3. **Fill in the rest.** Set **Voice: Google Cloud project ID** to the team's project. Check **Voice: Vertex AI
-   location**, **Voice: Live model** and **Voice: speaking voice** (the defaults are a starting point).
+   location**, **Voice: Live model** and **Voice: speaking voice** (the defaults are a starting point). **Voice:
+   language** (default `en-US`) pins what it listens for and speaks; **Voice: how easily it hears you start talking**
+   (default `low`) ignores more background noise, and `medium` or `high` catch quiet speech sooner.
 4. **Turn on "Voice mode"** in the same settings, then reload the plugin (or restart bb). It takes a reload: while voice is
    off, its routes don't exist at all.
 5. **Open the Orchestrator page and click the mic** beside "Message the Chief of Staff…". Allow the microphone. If

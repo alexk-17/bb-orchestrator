@@ -1,7 +1,18 @@
 // Gemini Live on Vertex AI (the BidiGenerateContent WebSocket), behind one small interface so the provider stays
 // swappable. Zero data retention as far as the session can choose it: no sessionResumption (Google keeps no session
 // state between connections), and the only tools are our own function declarations (no Google Search grounding).
-export type LiveConfig = { project: string; location: string; model: string; voice: string };
+export type Sensitivity = "low" | "medium" | "high";
+export type LiveConfig = { project: string; location: string; model: string; voice: string; sensitivity?: Sensitivity; language?: string };
+
+/** The call's language, BCP-47 (en-US by default): pinned for both what the model hears and what it says. */
+export const languageOf = (c: Pick<LiveConfig, "language">) => (c.language ?? "").trim() || "en-US";
+
+/** How eagerly the model decides someone is talking. Low (the default) ignores more background noise. */
+export function activityDetection(s: Sensitivity = "low"): Record<string, unknown> {
+  if (s === "high") return { startOfSpeechSensitivity: "START_SENSITIVITY_HIGH", endOfSpeechSensitivity: "END_SENSITIVITY_HIGH", prefixPaddingMs: 100, silenceDurationMs: 400 };
+  if (s === "medium") return { prefixPaddingMs: 200, silenceDurationMs: 600 };
+  return { startOfSpeechSensitivity: "START_SENSITIVITY_LOW", endOfSpeechSensitivity: "END_SENSITIVITY_LOW", prefixPaddingMs: 400, silenceDurationMs: 900 };
+}
 
 export type FunctionDeclaration = { name: string; description: string; parameters?: Record<string, unknown> };
 
@@ -43,15 +54,18 @@ export function modelPath(c: LiveConfig): string {
 /** The first message on a connection. Deliberately absent: sessionResumption and any googleSearch tool. */
 export function setupMessage(c: LiveConfig, systemText: string, tools: FunctionDeclaration[]): Record<string, unknown> {
   const generationConfig: Record<string, unknown> = { responseModalities: ["AUDIO"] };
-  if (c.voice.trim()) generationConfig.speechConfig = { voiceConfig: { prebuiltVoiceConfig: { voiceName: c.voice.trim() } } };
+  const speechConfig: Record<string, unknown> = { languageCode: languageOf(c) };
+  if (c.voice.trim()) speechConfig.voiceConfig = { prebuiltVoiceConfig: { voiceName: c.voice.trim() } };
+  generationConfig.speechConfig = speechConfig;
   return {
     setup: {
       model: modelPath(c),
       generationConfig,
       systemInstruction: { parts: [{ text: systemText }] },
       tools: tools.length ? [{ functionDeclarations: tools }] : [],
-      inputAudioTranscription: {},
+      inputAudioTranscription: { languageCodes: [languageOf(c)] },
       outputAudioTranscription: {},
+      realtimeInputConfig: { automaticActivityDetection: activityDetection(c.sensitivity) },
     },
   };
 }

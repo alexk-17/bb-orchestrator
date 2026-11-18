@@ -63,5 +63,16 @@ export const clientEventSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("cancel"), id: z.string().max(80) }).strict(),
   z.object({ type: z.literal("sent"), id: z.string().max(80), ok: z.boolean(), message: z.string().max(500).nullable() }).strict(),
   z.object({ type: z.literal("hangup") }).strict(),
+  /** The page's mic, once capture starts: for diagnosis only, no device names. */
+  z
+    .object({
+      type: z.literal("mic"),
+      contextRate: z.number(),
+      trackRate: z.number().nullable(),
+      trackState: z.string().max(20),
+      muted: z.boolean(),
+      enabled: z.boolean(),
+    })
+    .strict(),
 ]);
 export type ClientEvent = z.infer<typeof clientEventSchema>;

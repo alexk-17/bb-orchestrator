@@ -13,7 +13,24 @@ export type CardLite = {
   allowText: boolean;
   askedAt: number;
 };
-export type ProjectLite = { slug: string; priority: string; held: boolean; mode: string; status: string | null; step: string | null; waitingOn: string | null };
+export type ProjectLite = {
+  slug: string;
+  priority: string;
+  held: boolean;
+  mode: string;
+  status: string | null;
+  step: string | null;
+  waitingOn: string | null;
+  /** What blocks it, in the lead's words. */
+  blockers?: string[];
+  /** The lead's next step, when it has one. */
+  next?: string | null;
+  /** The lead: idle, working, or none running. */
+  lead?: string | null;
+  /** Open cards waiting on the owner, and PR waits. */
+  cards?: number;
+  prs?: number;
+};
 export type WaitLite = { id: string; project: string | null; about: string; ref: string; state: string | null; checks: string | null; review: string | null };
 export type DeliverableLite = { id: string; rev: number; project: string | null; title: string; summary: string; state: string; updatedAt: number };
 export type MessageLite = { at: number; from: string; to: string; text: string };
@@ -64,8 +81,18 @@ function render(d: BoardData, now: number, level: number): string {
   cards.forEach((c, i) => lines.push(cardLine(c, now, i < fullCount)));
   if (d.deferred.length) lines.push(`Deferred: ${d.deferred.map((c) => `${c.id} ${one(c.title, 60)}`).join("; ")}`);
   lines.push(`\n## Projects (${d.projects.length})`);
-  for (const p of d.projects)
-    lines.push(`- ${p.slug}: ${p.priority}${p.held ? ", held" : ""}${p.mode === "scoping" ? ", scoping" : ""}${p.status ? `. ${one(p.status, 160)}` : ""}${p.step ? `. Step: ${one(p.step, 100)}` : ""}${p.waitingOn ? `. Waits on: ${one(p.waitingOn, 100)}` : ""}`);
+  for (const p of d.projects) {
+    const bits = [`${p.priority}${p.held ? ", held" : ""}${p.mode === "scoping" ? ", scoping" : ""}`];
+    if (p.status) bits.push(one(p.status, 160));
+    if (p.step) bits.push(`now: ${one(p.step, 100)}`);
+    if (p.blockers?.length) bits.push(`blocked by: ${one(p.blockers.join("; "), 160)}`);
+    if (p.waitingOn) bits.push(`waits on: ${one(p.waitingOn, 100)}`);
+    if (p.next) bits.push(`next: ${one(p.next, 100)}`);
+    if (p.lead) bits.push(`lead ${p.lead}`);
+    const counts = [p.cards ? `${p.cards} card(s) waiting on the owner` : "", p.prs ? `${p.prs} PR wait(s)` : ""].filter(Boolean).join(", ");
+    if (counts) bits.push(counts);
+    lines.push(`- ${p.slug}: ${bits.join(". ")}`);
+  }
   lines.push(`\n## PR waits (${d.waits.length})`);
   for (const w of d.waits) lines.push(`- ${w.id} [${w.project ?? "-"}] ${one(w.about, 100)} (${w.ref}): ${[w.state, w.checks, w.review].filter(Boolean).join(", ") || "not read yet"}`);
   const review = d.deliverables.filter((x) => x.state === "review");

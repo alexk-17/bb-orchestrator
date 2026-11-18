@@ -23,7 +23,7 @@ class Pcm16 extends AudioWorkletProcessor {
 registerProcessor("pcm16-capture", Pcm16);
 `;
 
-export type Capture = { stop(): void };
+export type Capture = { stop(): void; info: () => { contextRate: number; trackRate: number | null; trackState: string; muted: boolean; enabled: boolean } };
 
 /** Start the mic. `onFrame` gets 40 ms of PCM16 and its peak level (0..1). */
 export async function startCapture(onFrame: (pcm: ArrayBuffer, peak: number) => void): Promise<Capture> {
@@ -43,7 +43,15 @@ export async function startCapture(onFrame: (pcm: ArrayBuffer, peak: number) => 
   const mute = ctx.createGain();
   mute.gain.value = 0;
   node.connect(mute).connect(ctx.destination);
+  const track = stream.getAudioTracks()[0];
   return {
+    info: () => ({
+      contextRate: ctx.sampleRate,
+      trackRate: track?.getSettings().sampleRate ?? null,
+      trackState: track?.readyState ?? "none",
+      muted: track?.muted ?? true,
+      enabled: track?.enabled ?? false,
+    }),
     stop() {
       node.port.onmessage = null;
       src.disconnect();
