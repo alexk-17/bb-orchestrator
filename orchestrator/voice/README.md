@@ -35,21 +35,20 @@ host's login.
 - It says nothing until you speak. It has the board in mind, and answers, acts and gives context only when you ask:
   "what's waiting on me?", "what did the API lead say?", "next card", "go back to the billing one". Talk over it to
   interrupt.
-- **Actions need your yes.** The voice can only propose. A confirm card appears, the voice reads it back word for word,
-  and it's sent only after you say "yes" (or tap **Send**), after a 3-second "Cancel" window. **Merges, production, money
-  and secrets always need a tap**: voice alone never sends them.
+- **Commands run at once.** Say "tell the API lead to push the fix" and it's sent, through the same route as a click;
+  the voice says what it did in one line, and the transcript shows it as a done line. **Merges, production, money and
+  secrets always need a tap**: the voice says "That one needs a tap" and shows a card that only your tap sends.
 - **Anything the Chief of Staff can do** (start a lead, spin up a project, steer a thread, triage, chase CI) is asked of
-  the Chief: the voice proposes the instruction, you confirm, the Chief does it, and its reply is read back. A plain
-  question to the Chief needs no confirm.
-- At hang-up, one short summary (what you decided, what you asked, what's still open) is posted to the Chief of Staff's
-  thread.
-- While a call is live, the mic shows a small pulsing dot and the call's time (m:ss). Its popover, just below it, shows
-  the last few transcript lines and a confirm card when one is waiting.
+  the Chief: the Chief does it, and its reply is read back. A question for the Chief works the same way.
+- At hang-up, one short summary (what was done, what you asked, what's still open, and what you said) is posted to the
+  Chief of Staff's thread.
+- While a call is live, the mic shows a small pulsing dot and the call's time (m:ss). Its popover shows the last few
+  transcript lines, and a tap card when one is waiting.
 
 ## How it works
 
 ```
-Browser (mic, speaker, confirm card)
+Browser (mic, speaker, tap card)
    │  one WebSocket: PCM16 16 kHz up, 24 kHz down; bb "local" auth + the page's own Origin
 bb server: voice/ (holds the Google credential, runs the read tools, gates writes, keeps the call's ledger)
    │  WebSocket to Vertex AI (BidiGenerateContent)
