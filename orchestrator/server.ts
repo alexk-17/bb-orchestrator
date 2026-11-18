@@ -90,6 +90,8 @@ import { registerOpenPrs } from "./open-prs/server.ts";
 import { OPEN_PRS_COPIED, OPEN_PRS_POST, openPrsCopiedBody, openPrsPostBody } from "./open-prs/contract.ts";
 // the CodeRabbit review queue (review-queue/)
 import { registerReviewQueue } from "./review-queue/server.ts";
+// voice mode (voice/), off by default
+import { registerVoice } from "./voice/server.ts";
 import { REVIEW_QUEUE_WRITE, queueActionSchema } from "./review-queue/contract.ts";
 import { uncoveredWaitUrls } from "./core/open-prs.ts";
 import { JOB_IDS, jobRefusal, jobsView, watchText } from "./core/watchers.ts";
@@ -2114,6 +2116,8 @@ export default async function plugin(bb: BbPluginApi) {
   };
   const notFromScreens = (c: { req: { url: string; header(name: string): string | undefined } }) =>
     writeOriginProblem({ origin: c.req.header("origin"), secFetchSite: c.req.header("sec-fetch-site"), requestUrl: c.req.url, appUrls: appUrls() });
+  // voice mode (voice/README.md): off by default, and while off nothing is registered; its socket has the writes' guard
+  await registerVoice(bb, { engine, ownerName: () => cfg.ownerName, originProblem: (h) => writeOriginProblem({ ...h, appUrls: appUrls() }) });
   const write = <S extends z.ZodTypeAny>(path: string, schema: S, fn: (body: z.infer<S>) => unknown) =>
     bb.http.route("POST", path, async (c) => {
       const why = notFromScreens(c);
@@ -2135,7 +2139,7 @@ export default async function plugin(bb: BbPluginApi) {
     });
 
   // A code the owner pastes: written to a 0600 file, never into the decision (personSecret)
-  const keepSecret = (id: string, rev: number, value: string, via: "desktop" | "phone", typed: boolean) => {
+  const keepSecret = (id: string, rev: number, value: string, via: "desktop" | "phone" | "voice", typed: boolean) => {
     const dir = join(stateDir(), "secrets");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);

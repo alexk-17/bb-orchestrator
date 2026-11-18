@@ -3056,7 +3056,7 @@ export class Engine {
 
   // ---------------------------------------------------------------- the owner's writes (from the screens only)
 
-  personAnswer(id: string, rev: number, option: string | null, text: string | null, via: "desktop" | "phone"): Decision {
+  personAnswer(id: string, rev: number, option: string | null, text: string | null, via: "desktop" | "phone" | "voice"): Decision {
     return tx(this.db, () => {
       const d = this.mustDecision(id);
       this.refuseMoot(d);
@@ -3099,7 +3099,7 @@ export class Engine {
    * command. The file goes when the asker acks, or after SECRET_TTL_MS.
    */
   /** `typed`: the code came through "Other" (looksLikeCode), so the card needn't have asked for one with a login block. */
-  personSecret(id: string, rev: number, file: string, via: "desktop" | "phone", typed = false): Decision {
+  personSecret(id: string, rev: number, file: string, via: "desktop" | "phone" | "voice", typed = false): Decision {
     return tx(this.db, () => {
       const d = this.mustDecision(id);
       this.refuseMoot(d);
@@ -3119,7 +3119,7 @@ export class Engine {
     });
   }
 
-  personDefer(id: string, rev: number, preset: string, until: number | null, via: "desktop" | "phone"): Decision {
+  personDefer(id: string, rev: number, preset: string, until: number | null, via: "desktop" | "phone" | "voice"): Decision {
     return tx(this.db, () => {
       const d = this.mustDecision(id);
       this.refuseMoot(d);

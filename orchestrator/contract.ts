@@ -452,8 +452,8 @@ export const rpcContract = defineRpcContract({
 
 // ---- the write routes (POST, JSON body). Each answers { ok: true } or { ok: false, error: { kind, message } }.
 export const secretBody = z.object({ id: z.string(), rev: z.number().int(), value: z.string().min(1).max(4000), via: z.enum(["desktop", "phone"]) }).strict();
-export const answerBody = z.object({ id: z.string(), rev: z.number().int(), option: z.string().nullable(), text: z.string().max(4000).nullable(), via: z.enum(["desktop", "phone"]) }).strict();
-export const deferBody = z.object({ id: z.string(), rev: z.number().int(), preset: z.enum(["1h", "evening", "tomorrow", "manual"]), zone: z.string().max(64), via: z.enum(["desktop", "phone"]) }).strict();
+export const answerBody = z.object({ id: z.string(), rev: z.number().int(), option: z.string().nullable(), text: z.string().max(4000).nullable(), via: z.enum(["desktop", "phone", "voice"]) }).strict();
+export const deferBody = z.object({ id: z.string(), rev: z.number().int(), preset: z.enum(["1h", "evening", "tomorrow", "manual"]), zone: z.string().max(64), via: z.enum(["desktop", "phone", "voice"]) }).strict();
 export const returnBody = z.object({ id: z.string(), rev: z.number().int() }).strict();
 export const ruleAddBody = z.object({ text: z.string().min(1).max(300), project: z.string().nullable(), kinds: z.array(z.enum(["question", "plan"])).min(1), expiresInDays: z.number().positive().nullable(), source: z.string().min(1).max(200) }).strict();
 export const ruleRevokeBody = z.object({ id: z.string() }).strict();

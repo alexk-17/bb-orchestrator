@@ -1,0 +1,39 @@
+// Voice mode's settings: off by default, and nothing in them is tied to one person or server. The project, location,
+// model and voice are each server's own; the credential is optional (Application Default Credentials come first).
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
+
+export const VOICE_SETTINGS = {
+  voiceEnabled: {
+    type: "boolean",
+    label: "Voice mode (off by default)",
+    description: "A mic button beside the Chief of Staff box: talk to your board through Gemini Live on Vertex AI. Turning it on or off takes a plugin reload. See voice/README.md.",
+    default: false,
+  },
+  voiceProject: { type: "string", label: "Voice: Google Cloud project ID", description: "The project whose Vertex AI the voice uses. Empty: voice can't start.", default: "" },
+  voiceLocation: { type: "string", label: "Voice: Vertex AI location", description: "A region such as us-central1, or global.", default: "us-central1" },
+  voiceModel: { type: "string", label: "Voice: Live model", description: "A Gemini Live model your project can use.", default: "gemini-3.8-live" },
+  voiceName: { type: "string", label: "Voice: speaking voice", description: "A prebuilt Gemini voice name. Empty: the model's default voice.", default: "Erinome" },
+  voiceCredential: {
+    type: "string",
+    secret: true,
+    label: "Voice: service-account key (optional)",
+    description: "Empty (recommended): the bb host's Application Default Credentials, so each person uses their own Google login (gcloud auth application-default login). Set: a service-account JSON key with only the Vertex AI User role. Kept by bb in a 0600 file, read only by the server, never sent to the page or logged.",
+  },
+  voiceInputUsdPerMillion: { type: "number", label: "Voice: price estimate, input tokens (USD per million)", description: "Only for the live cost meter.", default: 3 },
+  voiceOutputUsdPerMillion: { type: "number", label: "Voice: price estimate, output tokens (USD per million)", description: "Only for the live cost meter.", default: 12 },
+} as const;
+
+export type VoiceSettings = {
+  voiceEnabled: boolean;
+  voiceProject: string;
+  voiceLocation: string;
+  voiceModel: string;
+  voiceName: string;
+  voiceCredential?: string;
+  voiceInputUsdPerMillion: number;
+  voiceOutputUsdPerMillion: number;
+};
+
+export function defineVoiceSettings(bb: BbPluginApi) {
+  return bb.settings.define(VOICE_SETTINGS);
+}

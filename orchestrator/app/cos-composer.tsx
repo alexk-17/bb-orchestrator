@@ -18,6 +18,7 @@ import { Kbd } from "./ui/kbd.tsx";
 import { Textarea } from "./ui/textarea.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx";
 import { Btn, cx } from "./ui.tsx";
+import { VoiceMic } from "../voice/app/voice-mic.tsx"; // voice mode (voice/README.md): draws nothing while it is off
 
 /** The box's placeholder: who it reaches on a desktop page, just "Message…" on the phone-width page. */
 const PLACEHOLDER = { full: "Message the Chief of Staff…", compact: "Message…" };
@@ -116,6 +117,7 @@ export function CosComposer({ agents, refetchAll, compact = false }: { agents: B
         <span className="mt-1.5 flex-none">
           <AttachButton onFiles={attach} disabled={!cos || staging} data={{ "data-cos-attach": "" }} />
         </span>
+        <VoiceMic disabled={!cos} />
         <Tooltip>
           <TooltipTrigger asChild>
             <Btn tone="primary" className="flex-none" data-cos-send="" disabled={busy || staging || !cos || !canSend(text, images.length)} onClick={() => void send()}>
