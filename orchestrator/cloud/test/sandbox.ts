@@ -102,7 +102,7 @@ export function sandbox(): Box {
   };
   for (const [k, v] of Object.entries(env)) {
     if (k === "PATH") continue;
-    if ((process.env.HOME && v.startsWith(process.env.HOME + "/")) || !v.startsWith(root)) {
+    if (v !== root && !v.startsWith(root + "/")) {
       if (k !== "USER" && k !== "CLOUD_SWITCH_FAKE_LOGIN_MS") throw new Error(`sandbox path ${k}=${v} escapes the sandbox`);
     }
   }
