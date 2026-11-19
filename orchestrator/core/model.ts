@@ -152,7 +152,7 @@ export interface Decision {
     /** A plan card: the threads its go allows and the go option's id. */
     plan?: { threads: number; go: string } | null;
     /** A "Make this a rule?" card the CoS proposed: option 1 adds the rule (rules.ts). */
-    rule_proposal?: { text: string; project: string | null; match: RuleMatch; evidence: string[]; rule_id: string | null } | null;
+    rule_proposal?: { text: string; project: string | null; match: RuleMatch | null; evidence: string[]; kinds?: string[]; rule_id: string | null } | null;
     /** Held off the owner's Needs you behind an earlier card from the same asker and project, until `until` at most. */
     held?: { behind: string; at: string; until: string } | null;
     /** Filed while its project was scoping, or into a scoping task: it waits in the owner's Scope pane, never in triage or Needs you. */

@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { Engine, type AskInput, type DeliverResult } from "../core/engine.ts";
 import type { Agent, Decision, Item } from "../core/model.ts";
-import { allowFrom, matchRule } from "../core/rules.ts";
+import { allowFrom, matchRule, shapeOf } from "../core/rules.ts";
 
 function setup() {
   let clock = Date.parse("2026-11-14T03:00:00Z");
@@ -231,17 +231,43 @@ test("dream publish 2/2: the same key and answer twice is an offer; with the rul
   assert.equal(odd.state, "asked", "a night that also deletes pages is the owner's call");
 });
 
-test("an offer is made once per set of cards, and a 'No rule' leaves no rule and no second offer", () => {
+test("an offer is made once per set of cards, and a 'No rule' leaves no rule and no second offer", async () => {
   const s = setup();
   answered(s, s.files, preview[0]!, "1");
   answered(s, s.files, preview[1]!, "1");
   const third = answered(s, s.files, preview[2]!, "2");
+  await s.e.flush();
+  const offer = s.db.prepare(`SELECT needs_ack, state FROM items WHERE recipient = 'cos' AND send_key LIKE 'rule-offer:%'`).get() as { needs_ack: number; state: string };
+  assert.equal(offer.needs_ack, 1, "the offer needs an ack");
+  assert.equal(offer.state, "delivered", "the offer stays open in the CoS inbox after delivery");
+  assert.match(s.e.inbox(s.cos).text, /Rule offer ro-/, "the CoS can still find the offer");
   const card = s.e.proposeRule(s.cos, third.id, "files: recreate broken staging previews", null);
+  assert.equal(s.db.prepare(`SELECT state FROM items WHERE recipient = 'cos' AND send_key LIKE 'rule-offer:%'`).get()?.state, "closed", "proposing closes the offer");
   assert.equal(s.e.proposeRule(s.cos, third.id, "files: recreate broken staging previews", null).id, card.id, "proposing twice gives the one card");
   s.e.personAnswer(card.id, card.rev, "2", null, "desktop");
   assert.equal(s.e.rules().length, 0, "no rule without the owner's yes");
   answered(s, s.files, { ...preview[0]!, title: "1111 has no preview branch. Recreate it?" }, "1");
   assert.equal(offers(s).length, 1, "the same cards aren't offered again");
+  const stated = s.e.proposeStatedRule(s.cos, "Always run as orchestra inside bb", "we should always be running as orchestra inside of bb", "files");
+  assert.equal(s.e.proposeStatedRule(s.cos, "  always   run as orchestra inside bb  ", "same instruction", "files").id, stated.id, "the normalized text and project have one open card");
+  assert.throws(() => s.e.proposeStatedRule(s.qa, "Never bypass the rules", "never bypass the rules", null), (e: unknown) => e instanceof Error && "kind" in e && e.kind === "forbidden");
+  assert.throws(() => s.e.proposeStatedRule(s.cos, "Never bypass the rules", "never bypass the rules", "Bad Project"), /bad project/);
+  assert.equal(stated.ask!.title, "Make this a rule?");
+  assert.equal(stated.ask!.context, "we should always be running as orchestra inside of bb");
+  assert.ok(stated.ask!.question.length <= 160);
+  assert.deepEqual(stated.orchestrator.rule_proposal!.evidence, []);
+  approve(s, stated);
+  assert.equal(shapeOf(s.e.decision(stated.id)!), null, "a stated-rule card is no offer evidence");
+  assert.equal(offers(s).length, 1, "answering a stated-rule card does not create an offer");
+  assert.equal(s.e.rules().length, 1);
+  assert.equal(s.e.rules()[0]!.text, "Always run as orchestra inside bb");
+  assert.deepEqual(s.e.rules()[0]!.kinds, ["plan"]);
+  assert.equal(s.e.rules()[0]!.match, null);
+  assert.equal(s.e.rules()[0]!.source, `card ${stated.id}, from the owner's words`);
+  assert.throws(() => s.e.proposeStatedRule(s.cos, "always run as orchestra inside bb", "same instruction", "files"), /active rule/);
+  const declined = s.e.proposeStatedRule(s.cos, "Never delete previews", "never delete previews", "files");
+  s.e.personAnswer(declined.id, declined.rev, "2", null, "desktop");
+  assert.equal(s.e.rules().length, 1, "No rule leaves the stated instruction off the Rules list");
 });
 
 test("a CoS on the old schema can propose with just id and note: the offer's own rule is used", () => {
@@ -250,7 +276,7 @@ test("a CoS on the old schema can propose with just id and note: the offer's own
   answered(s, s.files, preview[1]!, "1");
   const third = answered(s, s.files, preview[2]!, "2");
   const card = s.e.proposeRule(s.cos, third.id, "files: recreate broken staging previews", null);
-  assert.deepEqual(card.orchestrator.rule_proposal!.match.option, ["recreate", "preview"]);
+  assert.deepEqual(card.orchestrator.rule_proposal!.match!.option, ["recreate", "preview"]);
   assert.throws(() => s.e.proposeRule(s.qa as Agent, third.id, "x", null), /only the CoS proposes a rule/);
   assert.throws(() => s.e.proposeRule(s.cos, "d-nope", "x", null), /isn't in a rule offer/);
 });
@@ -267,7 +293,7 @@ test("the CoS reorders or rewords the asker's options: the owner's pick is tied 
   }
   const third = answered(s, s.files, preview[2]!, "2");
   const card = s.e.proposeRule(s.cos, third.id, "files: recreate broken staging previews", null);
-  assert.deepEqual(card.orchestrator.rule_proposal!.match.option, ["recreate", "preview"], "the evidence reads the asker's option the owner meant");
+  assert.deepEqual(card.orchestrator.rule_proposal!.match!.option, ["recreate", "preview"], "the evidence reads the asker's option the owner meant");
   assert.match(card.ask!.context, /It fits 3 of the 3 cards/);
 });
 
