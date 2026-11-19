@@ -214,6 +214,18 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
     assert.equal(noLink.map?.source, "orchestrator");
     assert.deepEqual(noLink.map?.firstPath, ["STEP-3", "STEP-4", "STEP-5"]);
 
+    writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha", linearProjectId: "proj-alpha" }));
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({ errors: [{ message: "Unauthorized" }] }), { status: 401 })) as typeof fetch;
+    try {
+      const unauth = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+      assert.match(unauth.error ?? "", /linearApiKey/);
+      assert.match(unauth.error ?? "", /401/);
+    } finally {
+      globalThis.fetch = realFetch;
+      writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha" }));
+    }
+
     writeFileSync(join(root, "projects", "empty", "project.json"), "{bad-json");
     const badRecord = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "empty", refresh: true }));
     assert.equal(badRecord.map, null);

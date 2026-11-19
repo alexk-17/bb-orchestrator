@@ -2272,7 +2272,11 @@ export default async function plugin(bb: BbPluginApi) {
         const retro = { ...summarizePathwaysRetro(map, decisions.map((decision) => ({ id: decision.id, title: decision.request.title, state: decision.state })), Date.now()), doc: retroDoc ? join(retroLibrary, retroDoc) : null, hostId: retroDoc ? await onlyHost().catch(() => null) : null };
         return { error: null, map, retro };
       } catch (error) {
-        const reason = error instanceof Error && (/^HTTP \d+$/.test(error.message) || error.message === "GraphQL error") ? error.message : "network error";
+        const msg = error instanceof Error ? error.message : "";
+        if (msg === "HTTP 401" || msg === "HTTP 403") {
+          return failure(`Linear rejected linearApiKey (${msg}). Update linearApiKey in Orchestrator plugin settings, then click Refresh.`);
+        }
+        const reason = /^HTTP \d+$/.test(msg) || msg === "GraphQL error" ? msg : "network error";
         return failure(`Pathways Linear request failed: ${reason}. Check the connection and try Refresh.`);
       } };
       return pathwaysSnapshots.view(slug, refresh ?? false, read);
