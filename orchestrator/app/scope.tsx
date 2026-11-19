@@ -1387,8 +1387,9 @@ function PathwaysSection({ slug }: { slug: string }) {
               }
               fallback={
                 <>
-                  <span className="font-mono">{map.identifier}</span> · Built
-                  from this project's plan, threads and cards
+                  <span className="font-mono">{map.identifier}</span>
+                  {map.title && map.title !== map.identifier ? ` · ${map.title}` : ""}
+                  {" "}· Built from this project's plan, threads and cards
                 </>
               }
             >
@@ -1944,11 +1945,29 @@ function PathwaysSection({ slug }: { slug: string }) {
               <div className="flex items-baseline justify-between">
                 <h4 className="m-0 text-base font-semibold">What’s next</h4>
                 <span className="text-xs text-muted-foreground">
-                  {visible.length}{" "}
-                  {map.source === "orchestrator" ? "items" : "tickets"}
+                  {(() => {
+                    const doneCount = map.tickets.filter((t) => t.displayState === "done").length;
+                    const openCount = map.tickets.length - doneCount;
+                    const noun = map.source === "orchestrator" ? "items" : "tickets";
+                    if (openCount === 0 && doneCount > 0) return `All ${doneCount} done`;
+                    if (doneCount > 0) return `${openCount} open · ${doneCount} done`;
+                    return `${visible.length} ${noun}`;
+                  })()}
                 </span>
               </div>
               <Separator />
+              {map.tickets.length > 0 && map.tickets.every((t) => t.displayState === "done") && (
+                <div className="rounded-lg bg-muted/30 p-3 text-xs" data-pathways-all-done="">
+                  <div className="font-semibold">All done</div>
+                  <p className="mb-0 mt-1 text-muted-foreground">
+                    All {map.tickets.length}{" "}
+                    {map.source === "orchestrator"
+                      ? map.tickets.length === 1 ? "item" : "items"
+                      : map.tickets.length === 1 ? "ticket" : "tickets"}{" "}
+                    complete — nothing left open.
+                  </p>
+                </div>
+              )}
               {!!map.firstPath.length && (
                 <div className="rounded-lg bg-muted/30 p-3">
                   <h5 className="m-0 text-sm font-semibold">
