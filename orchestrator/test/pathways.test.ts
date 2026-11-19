@@ -233,6 +233,10 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
       const timedOut = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
       assert.equal(sawSignal, true);
       assert.match(timedOut.error ?? "", /timed out/i);
+      globalThis.fetch = (async () => new Response("Internal Server Error", { status: 500 })) as typeof fetch;
+      const serverErr = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+      assert.match(serverErr.error ?? "", /server error/i);
+      assert.match(serverErr.error ?? "", /500/);
     } finally {
       globalThis.fetch = realFetch;
       writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha" }));

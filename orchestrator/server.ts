@@ -2296,6 +2296,10 @@ export default async function plugin(bb: BbPluginApi) {
         if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
           return failure("Linear request timed out after 12s. Check Linear status or your connection, then click Refresh.");
         }
+        const serverErr = /^HTTP (5\d\d)$/.exec(msg);
+        if (serverErr) {
+          return failure(`Linear returned a server error (HTTP ${serverErr[1]}). Try Refresh again shortly.`);
+        }
         const reason = /^HTTP \d+$/.test(msg) || msg === "GraphQL error" ? msg : "network error";
         return failure(`Pathways Linear request failed: ${reason}. Check the connection and try Refresh.`);
       } };

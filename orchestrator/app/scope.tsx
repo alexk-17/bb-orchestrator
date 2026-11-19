@@ -1435,6 +1435,9 @@ function PathwaysSection({ slug }: { slug: string }) {
         <p className="m-0 text-xs text-muted-foreground" data-pathways-freshness="">
           Updated {pathwaysAge(q.data.fetchedAt)}
           {q.data.refreshing ? " · refreshing" : ""}
+          {q.data.error && !q.data.refreshing ? (
+            <span className="font-medium text-destructive"> · stale (refresh failed)</span>
+          ) : null}
         </p>
       )}
       {q.error ? (
@@ -1480,8 +1483,10 @@ function PathwaysSection({ slug }: { slug: string }) {
       ) : (
         <>
           {q.data?.error && (
-            <Alert className="mt-3 py-2 text-xs" data-pathways-refresh-error="">
-              <AlertDescription>Refresh failed; showing the last map. {q.data.error}</AlertDescription>
+            <Alert variant="destructive" className="mt-3 py-2 text-xs" data-pathways-refresh-error="">
+              <AlertDescription>
+                Showing stale cached data{q.data.fetchedAt != null ? ` from ${pathwaysAge(q.data.fetchedAt)}` : ""}. {q.data.error}
+              </AlertDescription>
             </Alert>
           )}
           {q.data?.notice && (
@@ -1624,16 +1629,19 @@ function PathwaysSection({ slug }: { slug: string }) {
                     external blocker
                   </span>
                 )}
-                <span className="flex items-center gap-1">
-                  <span
-                    aria-hidden
-                    className="inline-block w-3 border-t border-dashed border-muted-foreground"
-                  />
-                  open blocker
-                </span>
-                {!!visible.some(
-                  (ticket) => ticket.displayState === "needs-you",
-                ) && (
+                {visibleEdges.some((edge) => {
+                  const b = tickets.get(edge.from) ?? map.external.find((item) => item.identifier === edge.from);
+                  return edge.type === "blocks" && b?.state.type !== "completed" && b?.state.type !== "canceled";
+                }) && (
+                  <span className="flex items-center gap-1">
+                    <span
+                      aria-hidden
+                      className="inline-block w-3 border-t border-dashed border-muted-foreground"
+                    />
+                    open blocker
+                  </span>
+                )}
+                {visibleEdges.some((edge) => edge.type === "blocks" && tickets.get(edge.from)?.displayState === "needs-you") && (
                   <span className="flex items-center gap-1">
                     <span
                       aria-hidden
@@ -1643,14 +1651,19 @@ function PathwaysSection({ slug }: { slug: string }) {
                     needs-you blocker
                   </span>
                 )}
-                <span className="flex items-center gap-1">
-                  <span
-                    aria-hidden
-                    className="inline-block w-3 border-t border-dotted"
-                    style={{ borderColor: pathwaysColors.done }}
-                  />
-                  done dependency
-                </span>
+                {visibleEdges.some((edge) => {
+                  const b = tickets.get(edge.from) ?? map.external.find((item) => item.identifier === edge.from);
+                  return edge.type !== "blocks" || b?.state.type === "completed" || b?.state.type === "canceled";
+                }) && (
+                  <span className="flex items-center gap-1">
+                    <span
+                      aria-hidden
+                      className="inline-block w-3 border-t border-dotted"
+                      style={{ borderColor: pathwaysColors.done }}
+                    />
+                    done dependency
+                  </span>
+                )}
               </div>
               <Separator className="mb-2" />
               <div className="relative">
@@ -2021,7 +2034,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                 </div>
               )}
               {!!map.claimed.length && (
-                <details className="rounded-lg border p-3">
+                <details className="rounded-lg border p-3" open={!map.firstPath.length && !map.ownerActions.length}>
                   <summary className="cursor-pointer text-sm font-semibold">
                     Claimed · {map.claimed.length}
                   </summary>
