@@ -59,7 +59,7 @@ function toPathwaysPr(item: LocalPathwaysPr, url: string, now: number): Pathways
   const review = item.review ?? "not recorded";
   const ready = !draft && (item.attention === "ready_to_merge" || (review === "approved" && checks === "passing"));
   const state: PathwaysPr["state"] = rawState === "merged" ? "merged" : rawState === "closed" ? "closed" : ready ? "ready" : "blocked";
-  const reason = item.attention || (state === "ready" ? "Ready to merge" : rawState || "open");
+  const reason = item.attention || (state === "ready" ? "Ready to merge" : draft ? "Draft PR" : checks === "failing" ? "Checks failing" : review === "changes_requested" ? "Changes requested" : review === "review_required" ? "Review required" : checks === "pending" ? "Checks pending" : rawState || "open");
   return {
     url,
     state,
@@ -271,9 +271,10 @@ export function localPathwaysMap(input: LocalPathwaysInput): PathwaysMap {
     tickets.push(prTicket);
   }
 
+  const prRank = { unavailable: 0, blocked: 1, ready: 2, merged: 3, closed: 4 };
   for (const ticket of tickets) {
     if (!ticket.prs.length) continue;
-    ticket.prs.sort((a, b) => a.pr.url.localeCompare(b.pr.url));
+    ticket.prs.sort((a, b) => prRank[a.pr.state] - prRank[b.pr.state] || a.pr.url.localeCompare(b.pr.url));
     const primary = ticket.prs[0]!;
     ticket.pr = primary.pr;
     ticket.proof = primary.proof;

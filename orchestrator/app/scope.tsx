@@ -828,7 +828,7 @@ function PathwaysPrItem({ ticket, entry }: { ticket: PathwaysTicketView; entry: 
         {pr.reason !== "Merged" && <span>{pr.reason}</span>}
       </div>
       <div className="mt-1 text-muted-foreground">
-        Via {ticket.prLink.source ?? "source not recorded"} · Read{" "}
+        {ticket.prLink.source ? `Via ${ticket.prLink.source} · ` : ""}Read{" "}
         {new Date(pr.retrievedAt).toLocaleString()}
       </div>
       {proofState !== "unrecorded" && (
@@ -1327,7 +1327,10 @@ function PathwaysSection({ slug }: { slug: string }) {
       ticket.prLink.state === "linked" &&
       ticket.pr &&
       ticket.pr.state !== "unavailable"
-        ? `PR #${ticket.pr.number ?? "linked"} ${ticket.pr.state}`
+        ? (() => {
+            const openCount = ticket.prs.filter(({ pr }) => pr.state !== "merged" && pr.state !== "closed").length;
+            return `PR #${ticket.pr.number ?? "linked"} ${ticket.pr.state}${openCount > 1 ? ` (+${openCount - 1})` : ""}`;
+          })()
         : "",
       ticket.decision.waiting ? "decision awaiting answer" : "",
       ticket.preflight.state === "needs access" ? "proof needs access" : "",
@@ -1880,7 +1883,11 @@ function PathwaysSection({ slug }: { slug: string }) {
                             {ticket.prLink.state === "linked" &&
                               ticket.pr && (
                                 <PathwaysNodeGlyph
-                                  label={ticket.pr.state === "unavailable" ? "GitHub unavailable" : `PR ${ticket.pr.state}`}
+                                  label={(() => {
+                                    const openCount = ticket.prs.filter(({ pr }) => pr.state !== "merged" && pr.state !== "closed").length;
+                                    if (ticket.pr.state === "unavailable") return "GitHub unavailable";
+                                    return openCount > 1 ? `${openCount} PRs · ${ticket.pr.state}` : `PR ${ticket.pr.state}`;
+                                  })()}
                                   meaning={ticket.pr.state === "unavailable" ? "Linked PR state could not be read" : `Linked PR ${ticket.pr.number ?? "number not recorded"} is ${ticket.pr.state}`}
                                 />
                               )}

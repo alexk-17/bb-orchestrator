@@ -61,7 +61,7 @@ export function reducePathwaysWaitLane(pr: PathwaysPr, proof: PathwaysProof, wai
   const lastApproval = [...latestReviews.values()].filter((review) => review.state === "APPROVED").sort((a, b) => (b.submittedAt ?? 0) - (a.submittedAt ?? 0))[0];
   const reviewFreshness = !lastApproval || !pr.head || !lastApproval.sha ? "unknown" : lastApproval.sha === pr.head ? "current" : pr.staleReviewDismissal === true ? "stale" : pr.staleReviewDismissal === false ? "older accepted" : "unknown";
   const checksState = pr.checks === "passing" ? "done" : pr.checks === "failing" ? "blocked" : pr.checks === "pending" ? "pending" : "unknown";
-  const reviewState = reviewFreshness === "stale" ? "pending" : pr.review === "approved" && (reviewFreshness === "current" || reviewFreshness === "older accepted") ? "done" : pr.review === "review_required" || pr.review === "changes_requested" || pr.review === "none" && (pr.requiredApprovals ?? 0) > 0 ? "pending" : "unknown";
+  const reviewState = pr.review === "changes_requested" ? "blocked" : reviewFreshness === "stale" ? "pending" : pr.review === "approved" && (reviewFreshness === "current" || reviewFreshness === "older accepted") ? "done" : pr.review === "review_required" || pr.review === "none" && (pr.requiredApprovals ?? 0) > 0 ? "pending" : "unknown";
   const qaState = proof.state === "verified" ? "done" : proof.state === "blocked" ? "blocked" : proof.state === "stale" || proof.state === "partial" ? "pending" : "unknown";
   const draftState = pr.draft === true ? "pending" : pr.draft === false ? "done" : "unknown";
   const mergeState = pr.state === "merged" ? "done" : mergeCard && (mergeCard.state === "open" || mergeCard.state === "asked") ? "pending" : "unknown";
