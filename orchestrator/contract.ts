@@ -429,6 +429,7 @@ export type Scope = z.infer<typeof scopeSchema>;
 
 export const pathwaysSchema = z.object({
   error: z.string().nullable(),
+  notice: z.string().nullable().optional(),
   map: z.object({
     identifier: z.string(), title: z.string(), url: z.string(),
     source: z.enum(["linear", "orchestrator"]).optional(),

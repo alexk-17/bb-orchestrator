@@ -2222,7 +2222,8 @@ export default async function plugin(bb: BbPluginApi) {
             waits,
             now,
           });
-          return { error: null, map, retro: null };
+          const notice = linearProjectId && !apiKey ? "Linear project is linked (linearProjectId is set), but linearApiKey is unset in Orchestrator plugin settings. Showing the local map until you set linearApiKey and refresh." : null;
+          return { error: null, notice, map, retro: null };
         };
         return pathwaysSnapshots.view(slug, refresh ?? false, readLocal);
       }

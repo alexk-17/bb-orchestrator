@@ -1473,6 +1473,11 @@ function PathwaysSection({ slug }: { slug: string }) {
               <AlertDescription>Refresh failed; showing the last map. {q.data.error}</AlertDescription>
             </Alert>
           )}
+          {q.data?.notice && (
+            <Alert className="mt-3 py-2 text-xs" data-pathways-notice="">
+              <AlertDescription>{q.data.notice}</AlertDescription>
+            </Alert>
+          )}
           {!!map.cycles?.length && (
             <Alert variant="destructive" className="mt-3 py-2 text-xs" data-pathways-cycles="">
               <AlertDescription>
@@ -1948,7 +1953,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                   {(() => {
                     const doneCount = map.tickets.filter((t) => t.displayState === "done").length;
                     const openCount = map.tickets.length - doneCount;
-                    const noun = map.source === "orchestrator" ? "items" : "tickets";
+                    const noun = map.source === "orchestrator" ? (visible.length === 1 ? "item" : "items") : (visible.length === 1 ? "ticket" : "tickets");
                     if (openCount === 0 && doneCount > 0) return `All ${doneCount} done`;
                     if (doneCount > 0) return `${openCount} open · ${doneCount} done`;
                     return `${visible.length} ${noun}`;

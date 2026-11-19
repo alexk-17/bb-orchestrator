@@ -202,6 +202,12 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
     const prOnly = pathwaysViewSchema.parse(await callNoKey({ slug: "empty", refresh: true }));
     assert.equal(prOnly.map?.tickets.some((t) => t.identifier === "PR-77"), true);
 
+    writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha", linearProjectId: "proj-alpha" }));
+    const linkedNoKey = pathwaysViewSchema.parse(await callNoKey({ slug: "alpha", refresh: true }));
+    assert.equal(linkedNoKey.map?.source, "orchestrator");
+    assert.match(linkedNoKey.notice ?? "", /linearApiKey/);
+    writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha" }));
+
     const callWithKeyNoLink = await boot("lin_api_test");
     const noLink = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
     assert.equal(noLink.error, null);
