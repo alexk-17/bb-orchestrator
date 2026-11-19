@@ -17,9 +17,11 @@
 // scoping, what they are on now, what is done so far, what comes next), in a slim column beside the chat when the pane
 // is wide, so no column stands blank. With anything waiting the entry is as before.
 import { useEffect, useRef, useState } from "react";
+import { select } from "d3-selection";
+import { zoom, zoomIdentity, type ZoomBehavior } from "d3-zoom";
 import type { z } from "zod";
 import { experimental_useRpcQuery, useBbNavigate } from "@get-bb/plugin-sdk/app";
-import { Check, ChevronRight, Hourglass, UserRound } from "lucide-react";
+import { Check, ChevronRight, Hourglass, Minus, Plus, UserRound } from "lucide-react";
 import { WRITES, rpcContract, type Card, type Deliverables, type Projects, type Scope, type Pathways, type answerBody, type secretBody } from "../contract.ts";
 import { layout } from "./diagram-layout.ts";
 import { openInBb, PANEL_PATH } from "./open-proof.ts";
@@ -1036,6 +1038,10 @@ export function PathwaysTab({
 }
 
 function PathwaysSection({ slug }: { slug: string }) {
+  const graphViewport = useRef<SVGSVGElement>(null);
+  const graphContent = useRef<SVGGElement>(null);
+  const graphZoom = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null);
+  const graphFit = useRef<(() => void) | null>(null);
   const [refresh, setRefresh] = useState(false);
   const refreshSeen = useRef(false);
   const [retroOpen, setRetroOpen] = useState(false);
@@ -1148,6 +1154,50 @@ function PathwaysSection({ slug }: { slug: string }) {
         narrowGraph ? 54 : 100,
       )
     : null;
+  const graphIdentity = `${slug}:${hideDone}:${narrowGraph}:${graphNodes.map((node) => node.id).join(",")}:${visibleEdges.map((edge) => `${edge.from}:${edge.to}`).join(",")}`;
+  useEffect(() => {
+    const svg = graphViewport.current;
+    const content = graphContent.current;
+    if (!svg || !content || !graph) return;
+    const selection = select(svg);
+    const behavior = zoom<SVGSVGElement, unknown>()
+      .clickDistance(4)
+      .translateExtent([[0, 0], [graph.width, graph.height]])
+      .on("zoom", (event) => {
+        content.setAttribute("transform", event.transform.toString());
+      });
+    graphZoom.current = behavior;
+    const fit = () => {
+      const { width, height } = svg.getBoundingClientRect();
+      if (!width || !height) return;
+      const scale = Math.min(width / graph.width, height / graph.height) * 0.9;
+      behavior.extent([[0, 0], [width, height]]).scaleExtent([scale / 2, scale * 4]);
+      selection.call(behavior).call(
+        behavior.transform,
+        zoomIdentity.translate((width - graph.width * scale) / 2, (height - graph.height * scale) / 2).scale(scale),
+      );
+    };
+    const observer = new ResizeObserver(fit);
+    graphFit.current = fit;
+    observer.observe(svg);
+    fit();
+    return () => {
+      observer.disconnect();
+      selection.on(".zoom", null);
+      graphZoom.current = null;
+      graphFit.current = null;
+    };
+  }, [graphIdentity, graph?.width, graph?.height]);
+  const zoomAtCenter = (factor: number) => {
+    const svg = graphViewport.current;
+    if (svg && graphZoom.current) {
+      const { width, height } = svg.getBoundingClientRect();
+      select(svg).call(graphZoom.current.scaleBy, factor, [width / 2, height / 2]);
+    }
+  };
+  const fitGraph = () => {
+    graphFit.current?.();
+  };
   const rows = (ids: string[]) =>
     ids
       .map((id) => tickets.get(id))
@@ -1347,7 +1397,7 @@ function PathwaysSection({ slug }: { slug: string }) {
           )}
           <div className="mt-3 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(390px,420px)]">
             <div
-              className="order-1 min-w-0 self-start overflow-auto rounded-lg border p-2 max-[1100px]:p-1"
+              className="order-1 min-w-0 self-start rounded-lg border p-2 max-[1100px]:p-1"
               data-pathways-graph=""
             >
               <div
@@ -1450,14 +1500,19 @@ function PathwaysSection({ slug }: { slug: string }) {
                 </span>
               </div>
               <Separator className="mb-2" />
+              <div className="relative">
+              <div className="absolute right-2 top-2 z-10 flex gap-1 rounded-md border bg-background/95 p-1 shadow-sm">
+                <Button variant="outline" size="icon" aria-label="Zoom in" onClick={() => zoomAtCenter(1.4)}><Plus className="size-4" /></Button>
+                <Button variant="outline" size="icon" aria-label="Zoom out" onClick={() => zoomAtCenter(1 / 1.4)}><Minus className="size-4" /></Button>
+                <Button variant="outline" size="sm" aria-label="Fit to view" onClick={fitGraph}>Fit</Button>
+              </div>
               <svg
-                className="mx-auto block h-auto w-full max-w-[720px]"
+                ref={graphViewport}
+                className="block w-full min-h-[320px] h-[min(70vh,720px)] cursor-grab active:cursor-grabbing"
                 role="img"
                 aria-label="Pathways map graph"
-                width={graph.width}
-                height={graph.height}
-                viewBox={`0 0 ${graph.width} ${graph.height}`}
               >
+                <g ref={graphContent}>
                 {graph.lines.map((line, i) => {
                   const blockerTicket = tickets.get(line.from);
                   const blocker =
@@ -1736,7 +1791,9 @@ function PathwaysSection({ slug }: { slug: string }) {
                     </a>
                   );
                 })}
+                </g>
               </svg>
+              </div>
             </div>
             <div
               className="order-2 grid min-w-0 content-start gap-3 overflow-hidden rounded-xl border bg-card p-3"

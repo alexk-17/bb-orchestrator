@@ -280,6 +280,7 @@ tab's picker remembers the last one. Hide the tab with `hiddenTabs: pathways`.
 - **The map:** one Linear issue labelled `wayfinder:map` and its sub-issues, drawn as a graph with blockers as edges, the
   first path numbered, and a What's next column (First path, Needs you, Claimed, Blocked on, Open questions). Click a
   ticket for its readiness, owner actions, linked PR and wait lane, proof at the PR's head, preflight and decision impact.
+  Wheel or pinch to zoom around the pointer, drag to pan, and use +, −, or Fit to control the view.
 - **Links fail closed:** a ticket links to a PR only through a GitHub PR URL in its Linear attachments or description,
   never by a similar title. Linked PR state is read through a connected machine's own `gh` login; without one the tab
   says "GitHub unavailable" rather than guessing. A ticket can show several open linked PRs, each with its own state,

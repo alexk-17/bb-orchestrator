@@ -33,12 +33,16 @@
     "@get-bb/plugin-sdk": "0.6.132",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
+    "d3-selection": "^3.0.1",
+    "d3-zoom": "^3.0.1",
     "lucide-react": "1.66.0",
     "radix-ui": "1.8.1",
     "tailwind-merge": "3.7.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@types/d3-selection": "^3.0.12",
+    "@types/d3-zoom": "^3.0.9",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
