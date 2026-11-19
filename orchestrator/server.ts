@@ -2229,7 +2229,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
       const read = async (): Promise<Pathways> => { try {
         const request = async <T,>(query: string, id: string, after: string | null = null): Promise<T> => {
-          const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables: { id, after } }) });
+          const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables: { id, after } }), signal: AbortSignal.timeout(12_000) });
           if (!response.ok) {
             if (response.status === 429) {
               const rawRetry = response.headers.get("retry-after")?.trim();
@@ -2287,6 +2287,9 @@ export default async function plugin(bb: BbPluginApi) {
         if (rateLimit) {
           const wait = rateLimit[1] ? `about ${rateLimit[1]}s` : "a minute";
           return failure(`Linear rate limit reached (HTTP 429). Wait ${wait} before clicking Refresh.`);
+        }
+        if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+          return failure("Linear request timed out after 12s. Check Linear status or your connection, then click Refresh.");
         }
         const reason = /^HTTP \d+$/.test(msg) || msg === "GraphQL error" ? msg : "network error";
         return failure(`Pathways Linear request failed: ${reason}. Check the connection and try Refresh.`);

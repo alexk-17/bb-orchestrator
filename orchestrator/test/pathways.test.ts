@@ -225,6 +225,14 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
       const rateLimited = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
       assert.match(rateLimited.error ?? "", /rate limit/i);
       assert.match(rateLimited.error ?? "", /60s/);
+      let sawSignal = false;
+      globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+        sawSignal = !!init?.signal;
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      }) as typeof fetch;
+      const timedOut = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+      assert.equal(sawSignal, true);
+      assert.match(timedOut.error ?? "", /timed out/i);
     } finally {
       globalThis.fetch = realFetch;
       writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha" }));

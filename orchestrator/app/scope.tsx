@@ -1449,6 +1449,8 @@ function PathwaysSection({ slug }: { slug: string }) {
                 ? "Linear authentication failed"
                 : q.data.error.includes("rate limit")
                   ? "Linear rate limit reached"
+                  : q.data.error.includes("timed out")
+                    ? "Linear request timed out"
                 : q.data.error.includes("linearProjectId") ||
                     q.data.error.includes("Linear project link")
                   ? "No Linear map linked"
