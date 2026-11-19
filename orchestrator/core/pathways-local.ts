@@ -130,12 +130,11 @@ export function localPathwaysMap(input: LocalPathwaysInput): PathwaysMap {
   };
 
   const stepTickets: { ticket: PathwaysTicket; stepState: "done" | "current" | "next" }[] = [];
-  let firstNextSeen = false;
   let prevStep: PathwaysTicket | null = null;
   for (const [index, step] of (input.status?.steps ?? []).entries()) {
     if (step.state === "skipped") continue;
-    const displayState: PathwaysState = step.state === "done" ? "done" : step.state === "current" ? "claimed" : firstNextSeen ? "blocked" : "ready";
-    if (step.state === "next") firstNextSeen = true;
+    const blockedByPrev = !!prevStep && !isClosed(prevStep.state.type);
+    const displayState: PathwaysState = step.state === "done" ? "done" : step.state === "current" ? "claimed" : blockedByPrev ? "blocked" : "ready";
     const state = step.state === "done" ? { type: "completed", name: "Done" } : step.state === "current" ? { type: "started", name: "In Progress" } : { type: "unstarted", name: "Next" };
     const ticket = emptyTicket({
       identifier: `STEP-${index + 1}`,
@@ -167,8 +166,9 @@ export function localPathwaysMap(input: LocalPathwaysInput): PathwaysMap {
     const num = /^thread:[^:]+:(\d+)$/.exec(thread.address)?.[1];
     const statusLabel = thread.status.trim() || "idle";
     const cleanTitle = thread.title.trim() || thread.address;
-    const displayState: PathwaysState = statusLabel === "error" ? "blocked" : statusLabel === "stopped" ? "done" : "claimed";
-    const state = statusLabel === "stopped" ? { type: "completed", name: statusLabel } : { type: "started", name: statusLabel };
+    const displayState: PathwaysState = statusLabel === "error" ? "blocked" : statusLabel === "stopped" ? "unknown" : "claimed";
+    const state = statusLabel === "stopped" ? { type: "unstarted", name: statusLabel } : { type: "started", name: statusLabel };
+    const reason = statusLabel === "error" ? "Thread errored — inspect or restart" : statusLabel === "stopped" ? "Thread stopped (not confirmed complete)" : `Thread ${statusLabel}`;
     const ticket = emptyTicket({
       identifier: `THR-${num ?? thread.threadId}`,
       title: `${cleanTitle} · ${statusLabel}`,
@@ -177,7 +177,7 @@ export function localPathwaysMap(input: LocalPathwaysInput): PathwaysMap {
       type: "thread",
       assignee: thread.address,
       displayState,
-      reasons: [`Thread ${statusLabel}`],
+      reasons: [reason],
     });
     addEdge(input.slug, ticket.identifier, "sub-issue");
     if (anchorStep) addEdge(anchorStep.identifier, ticket.identifier, "related");
@@ -250,7 +250,25 @@ export function localPathwaysMap(input: LocalPathwaysInput): PathwaysMap {
       for (const threadTicket of matchedThreads) attachPr(threadTicket, canonical, raw);
       continue;
     }
-    if (anchorStep) attachPr(anchorStep, canonical, raw);
+    if (anchorStep) {
+      attachPr(anchorStep, canonical, raw);
+      continue;
+    }
+    const prPreview = toPathwaysPr(raw, canonical, input.now);
+    const prTicket = emptyTicket({
+      identifier: `PR-${raw.number}`,
+      title: `PR #${raw.number} · ${prPreview.reason}`,
+      state: { type: "started", name: prPreview.state === "ready" ? "Ready" : "Open" },
+      priority: 2,
+      type: "pr",
+      assignee: null,
+      displayState: prPreview.state === "ready" ? "ready" : "blocked",
+      reasons: [prPreview.reason],
+    });
+    prTicket.url = canonical;
+    addEdge(input.slug, prTicket.identifier, "sub-issue");
+    attachPr(prTicket, canonical, raw);
+    tickets.push(prTicket);
   }
 
   for (const ticket of tickets) {

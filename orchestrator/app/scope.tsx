@@ -412,15 +412,56 @@ export function ScopeView({ q, projects, deliverables, refetchAll, mons, accents
 const pathwaysPathColor = "teal";
 const pathwaysColors = { ready: "var(--success)", claimed: "royalblue", blocked: "var(--muted-foreground)", unknown: "blueviolet", "needs-you": "var(--warning-text)", done: "color-mix(in srgb, var(--success) 65%, var(--muted-foreground))" } as const;
 
+function charWidth(ch: string): number {
+  const cp = ch.codePointAt(0) ?? 0;
+  return cp >= 0x1100 && (cp <= 0x115f || cp >= 0x2e80 && cp <= 0xa4cf || cp >= 0xac00 && cp <= 0xd7a3 || cp >= 0xf900 && cp <= 0xfaff || cp >= 0x1f300) ? 2 : 1;
+}
+
+function fitText(text: string, limit: number): { head: string; rest: string } {
+  let width = 0;
+  const chars = [...text];
+  let index = 0;
+  while (index < chars.length) {
+    const w = charWidth(chars[index]!);
+    if (width + w > limit && index > 0) break;
+    width += w;
+    index++;
+  }
+  return { head: chars.slice(0, index).join(""), rest: chars.slice(index).join("") };
+}
+
 function titleLines(title: string, limit = 27, count = 2): string[] {
   const lines: string[] = [];
-  for (const word of title.split(/\s+/)) {
-    const last = lines.length - 1;
-    if (last < 0 || lines[last]!.length + word.length + 1 > limit) lines.push(word);
-    else lines[last] += ` ${word}`;
-  }
-  if (lines.length <= count) return lines;
-  return [...lines.slice(0, count - 1), `${lines.slice(count - 1).join(" ").slice(0, limit - 1)}…`];
+  let overflow = false;
+  const pushWord = (word: string) => {
+    let remaining = word;
+    while (remaining) {
+      const last = lines.length - 1;
+      const current = last >= 0 ? lines[last]! : "";
+      const currentW = [...current].reduce((sum, ch) => sum + charWidth(ch), 0);
+      const wordW = [...remaining].reduce((sum, ch) => sum + charWidth(ch), 0);
+      if (last >= 0 && currentW + 1 + wordW <= limit) {
+        lines[last] = `${current} ${remaining}`;
+        return;
+      }
+      if (lines.length >= count) {
+        overflow = true;
+        return;
+      }
+      if (wordW <= limit) {
+        lines.push(remaining);
+        return;
+      }
+      const { head, rest } = fitText(remaining, limit);
+      lines.push(head);
+      remaining = rest;
+    }
+  };
+  for (const word of title.trim().split(/\s+/).filter(Boolean)) pushWord(word);
+  if (!overflow || !lines.length) return lines;
+  const last = lines.length - 1;
+  lines[last] = `${fitText(lines[last]!, Math.max(1, limit - 1)).head.trimEnd()}…`;
+  return lines;
 }
 
 type PathwaysTicketView = NonNullable<Pathways["map"]>["tickets"][number];
@@ -1238,7 +1279,9 @@ function PathwaysSection({ slug }: { slug: string }) {
   const pathIds = new Set(map?.firstPath ?? []);
   const pathHead = tickets.get(map?.firstPath[0] ?? "");
   const needsYouNow = visible.find(
-    (ticket) => ticket.displayState === "needs-you",
+    (ticket) =>
+      ticket.displayState === "needs-you" &&
+      ticket.identifier !== pathHead?.identifier,
   );
   const pathEdges = new Set(
     (map?.firstPath ?? [])
@@ -1266,12 +1309,12 @@ function PathwaysSection({ slug }: { slug: string }) {
           />
         )}
         <span className="min-w-0 flex-1">
-          <span className="block text-balance">
+          <span className="block whitespace-normal [overflow-wrap:anywhere]">
             <span className="font-mono">{ticket.identifier}</span> ·{" "}
             {ticket.title}
           </span>
           {detail && (
-            <span className="mt-0.5 block whitespace-normal text-muted-foreground">
+            <span className="mt-0.5 block whitespace-normal [overflow-wrap:anywhere] text-muted-foreground">
               {detail}
             </span>
           )}
@@ -1295,9 +1338,15 @@ function PathwaysSection({ slug }: { slug: string }) {
     [
       ticket.type === "research"
         ? "Investigate this research question first"
-        : ticket.blockers.length
-          ? `Waits on ${ticket.blockers.join(", ")}`
-          : "Ready to start",
+        : ticket.displayState === "needs-you"
+          ? "Needs you"
+          : ticket.blockers.length
+            ? `Waits on ${ticket.blockers.join(", ")}`
+            : ticket.displayState === "claimed"
+              ? ticket.assignee
+                ? `In progress · ${ticket.assignee}`
+                : "In progress"
+              : "Ready to start",
       ticketFact(ticket),
     ]
       .filter(Boolean)
@@ -1325,7 +1374,7 @@ function PathwaysSection({ slug }: { slug: string }) {
     >
       <style>{`@keyframes pathways-flow { to { stroke-dashoffset: -20; } } @media (prefers-reduced-motion: no-preference) { [data-pathways] .pathways-flow { animation: pathways-flow 1s linear infinite; } }`}</style>
       <div className="flex items-center justify-between gap-3">
-        <div>
+        <div className="min-w-0 [overflow-wrap:anywhere]">
           {map && (
             <PathwaysLink
               href={map.source === "orchestrator" ? null : map.url}
@@ -1407,9 +1456,9 @@ function PathwaysSection({ slug }: { slug: string }) {
           <EmptyHeader>
             <EmptyTitle>No plan or active work yet</EmptyTitle>
             <EmptyDescription>
-              Built from this project's plan, threads and cards. Publish a lead
-              status, start a thread, open a PR, or raise a decision card to see
-              what&apos;s next here.
+              Publish a lead status, start a thread, open a PR, or raise a
+              decision card to populate this local map — or set linearProjectId
+              in project.json with a Linear API key to map Linear issues.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -1420,7 +1469,17 @@ function PathwaysSection({ slug }: { slug: string }) {
               <AlertDescription>Refresh failed; showing the last map. {q.data.error}</AlertDescription>
             </Alert>
           )}
+          {!!map.cycles?.length && (
+            <Alert variant="destructive" className="mt-3 py-2 text-xs" data-pathways-cycles="">
+              <AlertDescription>
+                Dependency cycle detected:{" "}
+                {map.cycles.map((cycle) => [...cycle, cycle[0]].join(" → ")).join("; ")}.
+                {" "}Remove one blocking relation to unblock these tickets.
+              </AlertDescription>
+            </Alert>
+          )}
           {(pathHead ||
+            needsYouNow ||
             visible.some((ticket) => ticket.pr?.state === "unavailable")) && (
             <Alert
               className="mt-3 py-2 text-xs"
@@ -1431,22 +1490,32 @@ function PathwaysSection({ slug }: { slug: string }) {
               }
             >
               <AlertDescription>
-                {pathHead && (
+                {pathHead ? (
                   <>
                     Do now:{" "}
-                    {pathHead.type === "decision"
-                      ? "answer"
+                    {pathHead.displayState === "needs-you"
+                      ? pathHead.type === "decision"
+                        ? "answer"
+                        : "complete"
                       : pathHead.type === "research"
                         ? "investigate"
-                        : pathHead.readiness.state === "ready"
-                          ? "start"
-                          : "resolve scope for"}{" "}
+                        : pathHead.displayState === "claimed"
+                          ? "continue"
+                          : pathHead.readiness.state === "ready"
+                            ? "start"
+                            : "resolve scope for"}{" "}
                     {pathHead.identifier}.
                     {needsYouNow && (
                       <> In parallel, {needsYouNow.type === "decision" ? "answer" : "complete"} {needsYouNow.identifier}.</>
                     )}
                   </>
-                )}
+                ) : needsYouNow ? (
+                  <>
+                    Do now:{" "}
+                    {needsYouNow.type === "decision" ? "answer" : "complete"}{" "}
+                    {needsYouNow.identifier}.
+                  </>
+                ) : null}
                 {visible.some(
                   (ticket) => ticket.pr?.state === "unavailable",
                 ) && (
@@ -1593,11 +1662,13 @@ function PathwaysSection({ slug }: { slug: string }) {
                         d={line.path}
                         fill="none"
                         stroke={
-                          first
-                            ? pathwaysPathColor
-                            : blockerTicket
-                              ? pathwaysColors[blockerTicket.displayState]
-                              : "var(--muted-foreground)"
+                          line.back
+                            ? "var(--destructive)"
+                            : first
+                              ? pathwaysPathColor
+                              : blockerTicket
+                                ? pathwaysColors[blockerTicket.displayState]
+                                : "var(--muted-foreground)"
                         }
                         strokeWidth={first ? 2 : 1.25}
                         strokeDasharray={
@@ -1874,7 +1945,7 @@ function PathwaysSection({ slug }: { slug: string }) {
               {!!map.firstPath.length && (
                 <div className="rounded-lg bg-muted/30 p-3">
                   <h5 className="m-0 text-sm font-semibold">
-                    First path · {map.firstPath.length} steps
+                    First path · {map.firstPath.length} {map.firstPath.length === 1 ? "step" : "steps"}
                   </h5>
                   <div className="mt-2 grid gap-1">
                     {rows(map.firstPath).map((ticket) =>
@@ -2101,7 +2172,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                       >
                         {selected.identifier}
                       </PathwaysLink>
-                      <DialogTitle className="mt-1 text-lg">
+                      <DialogTitle className="mt-1 text-lg [overflow-wrap:anywhere]">
                         {selected.title}
                       </DialogTitle>
                       <DialogDescription>

@@ -45,7 +45,7 @@ export type PathwaysTicket = Pick<PathwaysIssue, "identifier" | "title" | "url" 
   decision: PathwaysDecision;
   preflight: PathwaysPreflight;
 };
-export type PathwaysMap = { identifier: string; title: string; url: string; source?: "linear" | "orchestrator"; tickets: PathwaysTicket[]; external: PathwaysRelationIssue[]; edges: PathwaysEdge[]; fog: string[]; frontier: string[]; claimed: string[]; blocked: string[]; firstPath: string[]; ownerActions: PathwaysOwnerAction[] };
+export type PathwaysMap = { identifier: string; title: string; url: string; source?: "linear" | "orchestrator"; tickets: PathwaysTicket[]; external: PathwaysRelationIssue[]; edges: PathwaysEdge[]; fog: string[]; frontier: string[]; claimed: string[]; blocked: string[]; firstPath: string[]; ownerActions: PathwaysOwnerAction[]; cycles?: string[][] };
 
 export function summarizePathwaysRetro(map: PathwaysMap, decisions: { id: string; title: string; state: string }[], now: number) {
   const finished = map.tickets.filter((ticket) => ticket.state.type === "completed").map((ticket) => ({ label: ticket.identifier, url: ticket.url, prUrl: ticket.prs.find((entry) => entry.pr.state === "merged")?.pr.url ?? (ticket.pr?.state === "merged" ? ticket.pr.url : null) }));
@@ -137,7 +137,33 @@ export function pathwaysGraph(tickets: PathwaysTicket[], edges: PathwaysEdge[]) 
       return { identifier: ticket.identifier, url: ticket.url, action: ticket.title, kind, affected, next, neededBefore: position < 0 ? null : position + 1, onlyOpenBlocker: next ? byId.get(next)?.blockers.length === 1 && byId.get(next)?.blockers[0] === ticket.identifier : false };
     });
   };
-  return { byId, outgoing, openTargets, visit, ownerActions };
+  const cycles = (): string[][] => {
+    const state = new Map<string, 0 | 1 | 2>();
+    const stack: string[] = [];
+    const seen = new Set<string>();
+    const found: string[][] = [];
+    const dfs = (id: string) => {
+      state.set(id, 1);
+      stack.push(id);
+      for (const next of openTargets(id)) {
+        if (state.get(next) === 1) {
+          const raw = stack.slice(stack.indexOf(next));
+          let minIdx = 0;
+          for (let i = 1; i < raw.length; i++) if (raw[i]!.localeCompare(raw[minIdx]!) < 0) minIdx = i;
+          const rotated = [...raw.slice(minIdx), ...raw.slice(0, minIdx)];
+          const key = rotated.join("->");
+          if (!seen.has(key)) { seen.add(key); found.push(rotated); }
+        } else if (!state.get(next)) {
+          dfs(next);
+        }
+      }
+      stack.pop();
+      state.set(id, 2);
+    };
+    for (const ticket of tickets) if (!closed(ticket.state.type) && !state.get(ticket.identifier)) dfs(ticket.identifier);
+    return found;
+  };
+  return { byId, outgoing, openTargets, visit, ownerActions, cycles };
 }
 
 export function pathwaysMap(map: PathwaysIssue, children: PathwaysIssue[]): PathwaysMap {
@@ -172,7 +198,7 @@ export function pathwaysMap(map: PathwaysIssue, children: PathwaysIssue[]): Path
     const displayState: PathwaysState = closed(issue.state.type) ? "done" : labels.includes("wayfinder:needs-you") ? "needs-you" : blockers.length ? "blocked" : issue.assignee ? "claimed" : unknown.length ? "unknown" : "ready";
     return { identifier: issue.identifier, title: issue.title, url: issue.url, state: issue.state, priority: issue.priority, estimate: issue.estimate, type: labels.find((label) => /^wayfinder:(research|prototype|grilling|task)$/.test(label))?.slice(10) ?? "untyped", assignee: issue.assignee?.name ?? null, unknown, blockers, displayState, waitsOnYou: false, readiness: readiness(issue, labels), prLink: extractPrLinks(issue.description, issue.attachments?.nodes ?? []), prs: [], pr: null, proof: null, waitLane: null, decisionDraft: null, decision: { state: "missing", cardId: null, cardState: null, title: null, waiting: false, direct: [], transitive: [] }, preflight: { state: "not planned", environment: null, verifier: null, ownerAction: null, accessTicket: null, gaps: ["Verification plan not recorded"], source: issue.url } };
   });
-  const { byId, outgoing, ownerActions } = pathwaysGraph(tickets, edges);
+  const { byId, outgoing, ownerActions, cycles } = pathwaysGraph(tickets, edges);
   const paths: string[][] = [];
   const walk = (id: string, path: string[]) => {
     const next = (outgoing.get(id) ?? []).filter((target) => !path.includes(target) && byId.has(target) && !closed(byId.get(target)!.state.type));
@@ -192,7 +218,7 @@ export function pathwaysMap(map: PathwaysIssue, children: PathwaysIssue[]): Path
   });
   const ordered = tickets.filter((ticket) => !closed(ticket.state.type)).sort((a, b) => (a.priority || 5) - (b.priority || 5) || (a.estimate ?? Infinity) - (b.estimate ?? Infinity) || a.identifier.localeCompare(b.identifier));
   const firstPath = paths[0] ?? [];
-  return { identifier: map.identifier, title: map.title, url: map.url, tickets, external: [...external.values()], edges, fog: fogBullets(map.description ?? ""), firstPath, frontier: ordered.filter((ticket) => ticket.displayState === "ready" || ticket.displayState === "unknown").map((ticket) => ticket.identifier), claimed: ordered.filter((ticket) => ticket.displayState === "claimed").map((ticket) => ticket.identifier), blocked: ordered.filter((ticket) => ticket.displayState === "blocked").map((ticket) => ticket.identifier), ownerActions: ownerActions(firstPath) };
+  return { identifier: map.identifier, title: map.title, url: map.url, tickets, external: [...external.values()], edges, fog: fogBullets(map.description ?? ""), firstPath, frontier: ordered.filter((ticket) => ticket.displayState === "ready" || ticket.displayState === "unknown").map((ticket) => ticket.identifier), claimed: ordered.filter((ticket) => ticket.displayState === "claimed").map((ticket) => ticket.identifier), blocked: ordered.filter((ticket) => ticket.displayState === "blocked").map((ticket) => ticket.identifier), ownerActions: ownerActions(firstPath), cycles: cycles() };
 }
 
 export function attachPathwaysPreflight(map: PathwaysMap, issues: PathwaysIssue[]): void {

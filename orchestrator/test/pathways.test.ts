@@ -78,12 +78,15 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
     const engine = new Engine(db as never, { now: () => 10_000, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} });
     const cos = engine.register("T-cos", "cos", null);
     const leadAlpha = engine.register("T-lead-alpha", "lead", "alpha");
-    engine.register("T-lead-empty", "lead", "empty");
+    const leadEmpty = engine.register("T-lead-empty", "lead", "empty");
+    engine.setEnvironment(leadEmpty.threadId, "env-lead-empty");
     const thr1 = engine.register("T-thr-1", "thread", "alpha", leadAlpha.threadId);
     engine.setStatus(thr1.threadId, "active");
     engine.setEnvironment(thr1.threadId, "env-thr-1");
     const thr2 = engine.register("T-thr-2", "thread", "alpha", leadAlpha.threadId);
     engine.setStatus(thr2.threadId, "archived");
+    const thr3 = engine.register("T-thr-3", "thread", "alpha", leadAlpha.threadId);
+    engine.setStatus(thr3.threadId, "stopped");
     engine.setEnvironment(leadAlpha.threadId, "env-lead-alpha");
     engine.publishStatus(leadAlpha, {
       goal: "Ship alpha",
@@ -114,6 +117,7 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
           apply: (_t, _this, args: any[]) => {
             if (path.join(".") === "threads.get") {
               if (args[0]?.threadId === "T-thr-1") return Promise.resolve({ title: "Worker implementation", status: "active" });
+              if (args[0]?.threadId === "T-thr-3") return Promise.resolve({ title: "Stopped worker", status: "stopped" });
               return Promise.resolve({ title: null, status: "idle" });
             }
             return Promise.resolve({});
@@ -156,12 +160,14 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
     assert.equal(byId.has("STEP-2"), false);
     assert.equal(byId.get("STEP-3")?.displayState, "claimed");
     assert.equal(byId.get("STEP-3")?.waitsOnYou, true);
-    assert.equal(byId.get("STEP-4")?.displayState, "ready");
+    assert.equal(byId.get("STEP-4")?.displayState, "blocked");
     assert.equal(byId.get("STEP-5")?.displayState, "blocked");
     assert.equal(byId.has("THR-1"), true);
     assert.match(byId.get("THR-1")!.title, /Worker implementation/);
     assert.match(byId.get("THR-1")!.title, /active/);
     assert.equal(byId.has("THR-2"), false);
+    assert.equal(byId.get("THR-3")?.displayState, "unknown");
+    assert.notEqual(byId.get("THR-3")?.state.type, "completed");
     assert.deepEqual(byId.get("THR-1")?.prLink.urls, ["https://github.com/acme/alpha/pull/42"]);
     assert.deepEqual(byId.get("STEP-3")?.prLink.urls, ["https://github.com/acme/alpha/pull/43"]);
     const cardTicket = byId.get(`CARD-${openCard.id.slice(-6)}`);
@@ -192,6 +198,9 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
     assert.deepEqual(emptyView.map.edges, []);
     assert.deepEqual(emptyView.map.firstPath, []);
     assert.equal(emptyView.retro, null);
+    engine.prSeen(leadEmpty, "env-lead-empty", { outcome: "available", pullRequest: { number: 77, url: "https://github.com/acme/empty/pull/77", state: "open", review: { state: "approved" }, checks: { state: "passing" }, mergeability: { state: "ready_to_merge" } } });
+    const prOnly = pathwaysViewSchema.parse(await callNoKey({ slug: "empty", refresh: true }));
+    assert.equal(prOnly.map?.tickets.some((t) => t.identifier === "PR-77"), true);
 
     const callWithKeyNoLink = await boot("lin_api_test");
     const noLink = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
@@ -384,6 +393,12 @@ test("frontier, claims, blockers, unknowns, fog, priority, and pagination", asyn
   assert.equal(selectPathwaysMap(mapCandidates, "MAP-1")?.identifier, "MAP-1");
   assert.equal(selectPathwaysMap(mapCandidates)?.identifier, "MAP-2");
   assert.equal(selectPathwaysMap(mapCandidates, "MISSING"), undefined);
+  const cyclic = pathwaysMap(map, [
+    issue("C-1", { inverseRelations: { nodes: [blockedBy("C-3")] } }),
+    issue("C-2", { inverseRelations: { nodes: [blockedBy("C-1")] } }),
+    issue("C-3", { inverseRelations: { nodes: [blockedBy("C-2")] } }),
+  ]);
+  assert.deepEqual(cyclic.cycles, [["C-1", "C-2", "C-3"]]);
 });
 
 test("an explicit linked PR block links the same card in decision preview and timeline", () => {
