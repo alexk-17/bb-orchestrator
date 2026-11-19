@@ -7,7 +7,7 @@ export type PathwaysProof = { state: "unrecorded" | "stale" | "partial" | "block
 export type PathwaysWaitStep = { kind: "check run" | "human review" | "QA" | "draft decision" | "merge go"; state: "done" | "pending" | "blocked" | "unknown"; since: number | null; owner: string | null; note: string };
 export type PathwaysWaitLane = { head: string | null; reviewFreshness: "current" | "stale" | "older accepted" | "unknown"; steps: PathwaysWaitStep[] };
 
-function canonicalPrUrl(value: string): string | null {
+export function canonicalPrUrl(value: string): string | null {
   try {
     const parsed = new URL(value.trim());
     const url = `${parsed.origin}${parsed.pathname.replace(/\/+$/, "").toLowerCase()}`;

@@ -164,22 +164,25 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
     assert.equal(byId.has("THR-2"), false);
     assert.deepEqual(byId.get("THR-1")?.prLink.urls, ["https://github.com/acme/alpha/pull/42"]);
     assert.deepEqual(byId.get("STEP-3")?.prLink.urls, ["https://github.com/acme/alpha/pull/43"]);
-    const cardTicket = local.map.tickets.find((t) => t.identifier.startsWith("CARD-"));
+    const cardTicket = byId.get(`CARD-${openCard.id}`);
     assert.ok(cardTicket);
     assert.equal(cardTicket.displayState, "needs-you");
     assert.equal(cardTicket.decision.cardId, openCard.id);
+    assert.deepEqual(cardTicket.decision.direct, ["STEP-3"]);
+    assert.deepEqual(cardTicket.decision.transitive, ["STEP-4", "STEP-5"]);
     assert.ok(local.map.edges.some((e) => e.from === "STEP-1" && e.to === "STEP-3" && e.type === "blocks"));
     assert.ok(local.map.edges.some((e) => e.from === "STEP-3" && e.to === "STEP-4" && e.type === "blocks"));
     assert.ok(local.map.edges.some((e) => e.from === "STEP-4" && e.to === "STEP-5" && e.type === "blocks"));
     assert.ok(local.map.edges.some((e) => e.from === cardTicket.identifier && e.to === "STEP-3" && e.type === "blocks"));
     assert.ok(local.map.edges.some((e) => e.from === "STEP-3" && e.to === "THR-1" && e.type === "related"));
-    assert.deepEqual(local.map.firstPath, [cardTicket.identifier, "STEP-3", "STEP-4", "STEP-5"]);
+    assert.deepEqual(local.map.firstPath, ["STEP-3", "STEP-4", "STEP-5"]);
     assert.equal(local.map.ownerActions.length, 1);
     assert.equal(local.map.ownerActions[0]?.identifier, cardTicket.identifier);
     assert.equal(local.map.ownerActions[0]?.next, "STEP-3");
+    assert.equal(local.map.ownerActions[0]?.neededBefore, 1);
     assert.deepEqual(local.map.fog, ["Waiting on staging key"]);
     assert.ok(local.map.tickets.every((t) => t.decisionDraft === null));
-    assert.deepEqual(local.retro?.decisions.map((d) => d.id), [answeredCard.id]);
+    assert.equal(local.retro, null);
 
     const emptyView = pathwaysViewSchema.parse(await callNoKey({ slug: "empty" }));
     assert.equal(emptyView.error, null);
@@ -188,12 +191,18 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
     assert.deepEqual(emptyView.map.tickets, []);
     assert.deepEqual(emptyView.map.edges, []);
     assert.deepEqual(emptyView.map.firstPath, []);
+    assert.equal(emptyView.retro, null);
 
     const callWithKeyNoLink = await boot("lin_api_test");
     const noLink = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
     assert.equal(noLink.error, null);
     assert.equal(noLink.map?.source, "orchestrator");
-    assert.deepEqual(noLink.map?.firstPath, [cardTicket.identifier, "STEP-3", "STEP-4", "STEP-5"]);
+    assert.deepEqual(noLink.map?.firstPath, ["STEP-3", "STEP-4", "STEP-5"]);
+
+    writeFileSync(join(root, "projects", "empty", "project.json"), "{bad-json");
+    const badRecord = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "empty", refresh: true }));
+    assert.equal(badRecord.map, null);
+    assert.match(badRecord.error ?? "", /Linear project link/);
 
     db.close();
   } finally {

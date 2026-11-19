@@ -455,6 +455,31 @@ function PathwaysNodeGlyph({
   );
 }
 
+function PathwaysLink({
+  href,
+  className,
+  fallbackClassName,
+  fallback,
+  children,
+  ...rest
+}: {
+  href?: string | null;
+  className?: string;
+  fallbackClassName?: string;
+  fallback?: React.ReactNode;
+  children: React.ReactNode;
+} & React.HTMLAttributes<HTMLSpanElement>) {
+  return href ? (
+    <a href={href} target="_blank" rel="noreferrer" className={className}>
+      {children}
+    </a>
+  ) : (
+    <span className={fallbackClassName ?? className} {...rest}>
+      {fallback ?? children}
+    </span>
+  );
+}
+
 function PathwaysDecisionPreview({
   ticket,
   tickets,
@@ -475,18 +500,13 @@ function PathwaysDecisionPreview({
       ? ids.map((id, index) => (
           <span key={id}>
             {index > 0 && ", "}
-            {tickets.get(id)?.url ? (
-              <a
-                href={tickets.get(id)!.url}
-                target="_blank"
-                rel="noreferrer"
-                className="underline underline-offset-2"
-              >
-                {id}
-              </a>
-            ) : (
-              id
-            )}
+            <PathwaysLink
+              href={tickets.get(id)?.url}
+              className="underline underline-offset-2"
+              fallbackClassName=""
+            >
+              {id}
+            </PathwaysLink>
           </span>
         ))
       : "none";
@@ -1306,26 +1326,23 @@ function PathwaysSection({ slug }: { slug: string }) {
       <style>{`@keyframes pathways-flow { to { stroke-dashoffset: -20; } } @media (prefers-reduced-motion: no-preference) { [data-pathways] .pathways-flow { animation: pathways-flow 1s linear infinite; } }`}</style>
       <div className="flex items-center justify-between gap-3">
         <div>
-          {map &&
-            (map.source === "orchestrator" ? (
-              <span
-                className="text-xs text-muted-foreground"
-                data-pathways-source="orchestrator"
-              >
-                <span className="font-mono">{map.identifier}</span> · Built from
-                this project's plan, threads and cards
-              </span>
-            ) : (
-              <a
-                href={map.url}
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs text-muted-foreground"
-              >
-                <span className="font-mono">{map.identifier}</span> ·{" "}
-                {map.title}
-              </a>
-            ))}
+          {map && (
+            <PathwaysLink
+              href={map.source === "orchestrator" ? null : map.url}
+              className="text-xs text-muted-foreground"
+              data-pathways-source={
+                map.source === "orchestrator" ? "orchestrator" : undefined
+              }
+              fallback={
+                <>
+                  <span className="font-mono">{map.identifier}</span> · Built
+                  from this project's plan, threads and cards
+                </>
+              }
+            >
+              <span className="font-mono">{map.identifier}</span> · {map.title}
+            </PathwaysLink>
+          )}
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
@@ -1417,16 +1434,17 @@ function PathwaysSection({ slug }: { slug: string }) {
                 {pathHead && (
                   <>
                     Do now:{" "}
-                    {pathHead.type === "research"
-                      ? "investigate"
-                      : pathHead.readiness.state === "ready"
-                        ? "start"
-                        : "resolve scope for"}{" "}
+                    {pathHead.type === "decision"
+                      ? "answer"
+                      : pathHead.type === "research"
+                        ? "investigate"
+                        : pathHead.readiness.state === "ready"
+                          ? "start"
+                          : "resolve scope for"}{" "}
                     {pathHead.identifier}.
-                    {needsYouNow &&
-                      needsYouNow.identifier !== pathHead.identifier && (
-                        <> In parallel, complete {needsYouNow.identifier}.</>
-                      )}
+                    {needsYouNow && (
+                      <> In parallel, complete {needsYouNow.identifier}.</>
+                    )}
                   </>
                 )}
                 {visible.some(
@@ -1955,18 +1973,14 @@ function PathwaysSection({ slug }: { slug: string }) {
                       {q.data?.retro?.finished.length
                         ? q.data.retro.finished.map((item) => (
                             <span key={item.label}>
-                              {item.url ? (
-                                <a
-                                  href={item.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="underline"
-                                >
-                                  {item.label}
-                                </a>
-                              ) : (
-                                <span>{item.label}</span>
-                              )}
+                              <a
+                                href={item.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="underline"
+                              >
+                                {item.label}
+                              </a>
                               {item.prUrl && (
                                 <>
                                   {" "}
@@ -2025,18 +2039,14 @@ function PathwaysSection({ slug }: { slug: string }) {
                       {q.data?.retro?.stalled.length
                         ? q.data.retro.stalled.map((item) => (
                             <div key={item.label}>
-                              {item.url ? (
-                                <a
-                                  href={item.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="underline"
-                                >
-                                  {item.label}
-                                </a>
-                              ) : (
-                                <span>{item.label}</span>
-                              )}{" "}
+                              <a
+                                href={item.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="underline"
+                              >
+                                {item.label}
+                              </a>{" "}
                               · {item.kind} ·{" "}
                               {Math.round(item.durationMs / 3_600_000)}h from
                               recorded start
@@ -2084,20 +2094,13 @@ function PathwaysSection({ slug }: { slug: string }) {
                 <>
                   <DialogHeader className="flex-row items-start justify-between gap-3 text-left">
                     <div>
-                      {selected.url ? (
-                        <a
-                          href={selected.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="font-mono text-sm underline"
-                        >
-                          {selected.identifier}
-                        </a>
-                      ) : (
-                        <span className="font-mono text-sm">
-                          {selected.identifier}
-                        </span>
-                      )}
+                      <PathwaysLink
+                        href={selected.url}
+                        className="font-mono text-sm underline"
+                        fallbackClassName="font-mono text-sm"
+                      >
+                        {selected.identifier}
+                      </PathwaysLink>
                       <DialogTitle className="mt-1 text-lg">
                         {selected.title}
                       </DialogTitle>
@@ -2130,20 +2133,14 @@ function PathwaysSection({ slug }: { slug: string }) {
                         {selected.readiness.reasons.join(" · ") ||
                           "Scope and proof plan recorded"}
                       </p>
-                      {selected.readiness.source ? (
-                        <a
-                          href={selected.readiness.source}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-xs underline"
-                        >
-                          Source: Linear ticket
-                        </a>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">
-                          Source: orchestrator
-                        </span>
-                      )}
+                      <PathwaysLink
+                        href={selected.readiness.source}
+                        className="text-xs underline"
+                        fallbackClassName="text-xs text-muted-foreground"
+                        fallback="Source: orchestrator"
+                      >
+                        Source: Linear ticket
+                      </PathwaysLink>
                     </UiCard>
                     {map.ownerActions
                       .filter(

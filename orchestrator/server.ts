@@ -2174,34 +2174,34 @@ export default async function plugin(bb: BbPluginApi) {
       const apiKey = cfg.linearApiKey?.trim();
       let linearProjectId: string | undefined;
       let linearMapIssue: string | undefined;
-      try {
-        const record = JSON.parse(readFileSync(join(projectsDir(), slug, projectRecord()), "utf8")) as { linearProjectId?: unknown; linearMapIssue?: unknown };
-        linearProjectId = typeof record.linearProjectId === "string" ? record.linearProjectId.trim() : undefined;
-        linearMapIssue = typeof record.linearMapIssue === "string" ? record.linearMapIssue.trim() : undefined;
-      } catch {}
+      const recordPath = join(projectsDir(), slug, projectRecord());
+      if (existsSync(recordPath)) {
+        try {
+          const record = JSON.parse(readFileSync(recordPath, "utf8")) as { linearProjectId?: unknown; linearMapIssue?: unknown };
+          linearProjectId = typeof record.linearProjectId === "string" ? record.linearProjectId.trim() : undefined;
+          linearMapIssue = typeof record.linearMapIssue === "string" ? record.linearMapIssue.trim() : undefined;
+        } catch {
+          return failure("Set the Pathways Linear project link in this project's record.");
+        }
+      }
       if (!apiKey || !linearProjectId) {
         const readLocal = async (): Promise<Pathways> => {
           const now = Date.now();
           const status = engine.leadStatus(slug);
           const rawThreads = engine.agents().filter((a) => a.role === "thread" && a.project === slug && a.status !== "archived");
-          const extraPrs: { url: string; number: number; state: string; checks: string | null; review: string | null; attention: string | null; seenAt?: number }[] = [];
           const threads = await mapPathwaysLimited(rawThreads, 8, async (a) => {
             const info = (await bb.sdk.threads.get({ threadId: a.threadId }).catch(() => null)) as { title?: string | null; status?: string | null } | null;
             const pr = engine.prFor(a.environmentId);
-            if (pr?.url && pr.number != null) {
-              extraPrs.push({ url: pr.url, number: pr.number, state: pr.state ?? "open", checks: pr.checks, review: pr.review, attention: pr.attention, seenAt: pr.seenAt });
-            }
             return {
               address: a.address,
               threadId: a.threadId,
               title: info?.title?.trim() || engine.lastReport(a.address)?.split("\n")[0]?.trim() || a.address,
               status: info?.status?.trim() || a.status,
-              prUrls: pr?.url && (pr.state === "open" || pr.state === "draft") ? [pr.url] : [],
+              prUrls: pr?.url ? [pr.url] : [],
             };
           });
           const decisions = engine.decisions(5000).filter((decision) => decision.project === slug);
-          const known = engine.knownPrs().filter((p) => p.project === slug);
-          const prs = [...known, ...extraPrs];
+          const prs = engine.knownPrs().filter((p) => p.project === slug);
           const deliverables = engine.deliverables().filter((deliverable) => deliverable.project === slug);
           const waits = engine.openWaits();
           const map = localPathwaysMap({
@@ -2222,20 +2222,7 @@ export default async function plugin(bb: BbPluginApi) {
             waits,
             now,
           });
-          const retroLibrary = join(projectsDir(), slug, "library");
-          let retroDoc: string | null = null;
-          if (existsSync(retroLibrary)) retroDoc = readdirSync(retroLibrary).filter((name) => /retro/i.test(name) && /\.md$/i.test(name)).sort()[0] ?? null;
-          const summary = summarizePathwaysRetro(map, decisions.map((decision) => ({ id: decision.id, title: decision.request.title, state: decision.state })), now);
-          const mergedSeen = new Set(summary.mergedPrs.map((item) => item.url.replace(/\/+$/, "").toLowerCase()));
-          for (const pr of prs) {
-            if (pr.state !== "merged") continue;
-            const key = pr.url.replace(/\/+$/, "").toLowerCase();
-            if (mergedSeen.has(key)) continue;
-            mergedSeen.add(key);
-            summary.mergedPrs.push({ ticket: `PR-${pr.number}`, url: pr.url });
-          }
-          const retro = { ...summary, doc: retroDoc ? join(retroLibrary, retroDoc) : null, hostId: retroDoc ? await onlyHost().catch(() => null) : null };
-          return { error: null, map, retro };
+          return { error: null, map, retro: null };
         };
         return pathwaysSnapshots.view(slug, refresh ?? false, readLocal);
       }
