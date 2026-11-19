@@ -18,9 +18,11 @@
 // is wide, so no column stands blank. With anything waiting the entry is as before.
 import { useEffect, useRef, useState } from "react";
 import type { z } from "zod";
-import { useBbNavigate } from "@get-bb/plugin-sdk/app";
-import { ChevronRight } from "lucide-react";
-import { WRITES, type Card, type Deliverables, type Projects, type Scope, type answerBody, type secretBody } from "../contract.ts";
+import { experimental_useRpcQuery, useBbNavigate } from "@get-bb/plugin-sdk/app";
+import { Check, ChevronRight, Hourglass, UserRound } from "lucide-react";
+import { WRITES, rpcContract, type Card, type Deliverables, type Projects, type Scope, type Pathways, type answerBody, type secretBody } from "../contract.ts";
+import { layout } from "./diagram-layout.ts";
+import { openInBb, PANEL_PATH } from "./open-proof.ts";
 import { ccCss } from "./cc-lines.tsx";
 import { ChatBody, ChatCard, Composer, ThreadBox, directCss, markSeen } from "./direct-line.tsx";
 import { CardView, useArming, via, type Act } from "./needs-you.tsx";
@@ -30,6 +32,17 @@ import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 import { Card as UiCard, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card.tsx";
 import { Item, ItemGroup } from "./ui/item.tsx";
+import { Alert, AlertDescription } from "./ui/alert.tsx";
+import { Checkbox } from "./ui/checkbox.tsx";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collapsible.tsx";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog.tsx";
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty.tsx";
+import { Input } from "./ui/input.tsx";
+import { Label } from "./ui/label.tsx";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select.tsx";
+import { Separator } from "./ui/separator.tsx";
+import { Skeleton } from "./ui/skeleton.tsx";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx";
 import { Tabs, TabsList, TabsTrigger } from "./ui/tabs.tsx";
 import { cn } from "./ui/utils.ts";
 import { Chip, kitCss } from "./kit-ui.tsx";
@@ -391,6 +404,1657 @@ export function ScopeView({ q, projects, deliverables, refetchAll, mons, accents
         </div>
       </div>
     </div>
+  );
+}
+
+const pathwaysPathColor = "teal";
+const pathwaysColors = { ready: "var(--success)", claimed: "royalblue", blocked: "var(--muted-foreground)", unknown: "blueviolet", "needs-you": "var(--warning-text)", done: "color-mix(in srgb, var(--success) 65%, var(--muted-foreground))" } as const;
+
+function titleLines(title: string, limit = 27, count = 2): string[] {
+  const lines: string[] = [];
+  for (const word of title.split(/\s+/)) {
+    const last = lines.length - 1;
+    if (last < 0 || lines[last]!.length + word.length + 1 > limit) lines.push(word);
+    else lines[last] += ` ${word}`;
+  }
+  if (lines.length <= count) return lines;
+  return [...lines.slice(0, count - 1), `${lines.slice(count - 1).join(" ").slice(0, limit - 1)}…`];
+}
+
+type PathwaysTicketView = NonNullable<Pathways["map"]>["tickets"][number];
+
+function PathwaysNodeGlyph({
+  label,
+  meaning,
+}: {
+  label: string;
+  meaning: string;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge
+          variant="outline"
+          tabIndex={0}
+          className="h-4 bg-card px-1 text-[8px] leading-none"
+        >
+          {label}
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent>{meaning}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function PathwaysDecisionPreview({
+  ticket,
+  tickets,
+}: {
+  ticket: PathwaysTicketView;
+  tickets: Map<string, PathwaysTicketView>;
+}) {
+  const decision = ticket.decision;
+  if (
+    decision.state === "missing" &&
+    ticket.readiness.state !== "needs decision" &&
+    !decision.direct.length &&
+    !decision.transitive.length
+  )
+    return null;
+  const links = (ids: string[]) =>
+    ids.length
+      ? ids.map((id, index) => (
+          <span key={id}>
+            {index > 0 && ", "}
+            {tickets.get(id) ? (
+              <a
+                href={tickets.get(id)!.url}
+                target="_blank"
+                rel="noreferrer"
+                className="underline underline-offset-2"
+              >
+                {id}
+              </a>
+            ) : (
+              id
+            )}
+          </span>
+        ))
+      : "none";
+  return (
+    <div className="mt-2 rounded-md border bg-muted/20 p-2 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">Decision impact</span>
+        <span
+          className="rounded border px-1.5 py-0.5"
+          style={{
+            color: decision.waiting ? "var(--warning-text)" : undefined,
+          }}
+        >
+          {decision.state === "linked"
+            ? decision.waiting
+              ? "awaiting answer"
+              : decision.cardState
+            : decision.state === "ambiguous"
+              ? "card link ambiguous"
+              : "card link missing"}
+        </span>
+      </div>
+      {decision.cardId && (
+        <span className="mt-1 block text-muted-foreground">
+          <span style={{ color: "var(--foreground)" }}>
+            <OpenRef
+              open={panel(
+                decision.waiting ? "needs-you" : "board",
+                decision.waiting
+                  ? `[data-card="${decision.cardId}"]`
+                  : `[data-decision="${decision.cardId}"]`,
+              )}
+              title="Open decision card"
+              data="card"
+              className="font-medium underline underline-offset-2"
+            >
+              {decision.cardId}
+            </OpenRef>
+          </span>{" "}
+          · {decision.title}
+        </span>
+      )}
+      {ticket.decisionDraft?.question &&
+        !ticket.readiness.reasons.some((reason) =>
+          reason.includes(ticket.decisionDraft!.question),
+        ) && (
+          <span className="mt-1 block text-muted-foreground">
+            Question: {ticket.decisionDraft.question}
+          </span>
+        )}
+      <span className="mt-1 block text-muted-foreground">
+        {decision.waiting ? "Answering unblocks" : "Decision affects"}{" "}
+        {links(decision.direct)} (direct) ·{" "}
+        {decision.transitive.length ? (
+          <>{links(decision.transitive)} (further)</>
+        ) : (
+          "no further tickets"
+        )}
+      </span>
+      {decision.state === "linked" &&
+        !decision.waiting &&
+        ticket.state.type !== "completed" &&
+        ticket.state.type !== "canceled" && (
+          <span className="mt-1 block text-muted-foreground">
+            Card answered · Linear ticket remains open
+          </span>
+        )}
+    </div>
+  );
+}
+
+function PathwaysPreflight({
+  ticket,
+  tickets,
+}: {
+  ticket: PathwaysTicketView;
+  tickets: Map<string, PathwaysTicketView>;
+}) {
+  const preflight = ticket.preflight;
+  if (preflight.state === "not planned")
+    return ticket.prLink.state === "linked" ? (
+      <div className="mt-1 text-xs text-muted-foreground">
+        Proof preflight · plan not recorded
+      </div>
+    ) : null;
+  return (
+    <div className="mt-2 rounded-md border bg-muted/20 p-2 text-xs">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">Proof preflight</span>
+        <span
+          className="rounded border px-1.5 py-0.5"
+          style={{
+            color:
+              preflight.state === "needs access" ||
+              preflight.state === "blocked"
+                ? "var(--warning-text)"
+                : undefined,
+          }}
+        >
+          {preflight.state}
+        </span>
+      </div>
+      <span className="mt-1 block text-muted-foreground">
+        Environment: {preflight.environment ?? "not declared"} · Verifier:{" "}
+        {preflight.verifier ?? "not declared"}
+      </span>
+      <span className="mt-1 block text-muted-foreground">
+        Owner action: {preflight.ownerAction ?? "not declared"}
+      </span>
+      {preflight.accessTicket && (
+        <span className="mt-1 block text-muted-foreground">
+          Access ticket:{" "}
+          {tickets.get(preflight.accessTicket) ? (
+            <a
+              href={tickets.get(preflight.accessTicket)!.url}
+              target="_blank"
+              rel="noreferrer"
+              className="underline underline-offset-2"
+            >
+              {preflight.accessTicket}
+            </a>
+          ) : (
+            preflight.accessTicket
+          )}
+        </span>
+      )}
+      {!!preflight.gaps.length && (
+        <span
+          className="mt-1 block"
+          style={{
+            color:
+              preflight.state === "needs access" ||
+              preflight.state === "blocked"
+                ? "var(--warning-text)"
+                : undefined,
+          }}
+        >
+          {preflight.gaps.join(" · ")}
+        </span>
+      )}
+      <a
+        href={preflight.source}
+        target="_blank"
+        rel="noreferrer"
+        className="mt-1 inline-block text-muted-foreground underline underline-offset-2"
+      >
+        Source: Linear plan
+      </a>
+    </div>
+  );
+}
+
+function PathwaysWaitLaneView({ ticket }: { ticket: PathwaysTicketView }) {
+  const lane = ticket.waitLane;
+  if (!lane) return null;
+  const waitingIndex = lane.steps.findIndex(
+    (step) => step.state === "pending" || step.state === "blocked",
+  );
+  const waiting = waitingIndex < 0 ? null : lane.steps[waitingIndex]!;
+  return (
+    <div className="mt-2 border-t pt-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">
+          {waiting
+            ? `Waiting on ${waitingIndex + 1}. ${waiting.kind}`
+            : "Review and CI wait lane"}
+        </span>
+        {waiting?.state === "pending" && (
+          <span className="text-muted-foreground">
+            {waiting.since == null
+              ? "since not recorded"
+              : `pending ${age(waiting.since, Date.now())}`}
+          </span>
+        )}
+        <span className="font-mono text-muted-foreground">
+          head {lane.head?.slice(0, 8) ?? "not recorded"}
+        </span>
+      </div>
+      <ol className="mb-0 mt-1 grid gap-1 pl-0" style={{ listStyle: "none" }}>
+        {lane.steps.map((step, index) => (
+          <li
+            key={step.kind}
+            className="flex flex-wrap items-baseline gap-x-2 border-t pt-1"
+          >
+            <span className="font-medium">
+              {index + 1}. {step.kind}
+            </span>
+            <span
+              className="rounded border px-1.5 py-0.5"
+              style={{
+                color:
+                  step.kind === "human review" &&
+                  lane.reviewFreshness === "older accepted"
+                    ? "var(--warning-text)"
+                    : step.state === "blocked" || step.state === "pending"
+                      ? "var(--warning-text)"
+                      : step.state === "done"
+                        ? "var(--success)"
+                        : undefined,
+              }}
+            >
+              {step.kind === "human review" &&
+              lane.reviewFreshness === "older accepted"
+                ? "accepted on older head"
+                : step.state}
+            </span>
+            {step.state === "pending" && (
+              <span className="text-muted-foreground">
+                {step.since == null
+                  ? "Since not recorded"
+                  : `Pending ${age(step.since, Date.now())}`}
+              </span>
+            )}
+            {step.owner && (
+              <span className="text-muted-foreground">{step.owner} waits</span>
+            )}
+            <span className="text-muted-foreground">{step.note}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
+function PathwaysPrBadge({ ticket }: { ticket: PathwaysTicketView }) {
+  if (ticket.prLink.state === "missing")
+    return (
+      <span className="mt-1 block text-xs text-muted-foreground">
+        PR link missing
+      </span>
+    );
+  if (ticket.prLink.state === "ambiguous")
+    return (
+      <span className="mt-1 block text-xs text-muted-foreground">
+        PR link ambiguous · {ticket.prLink.urls.length} explicit links
+      </span>
+    );
+  const pr = ticket.pr;
+  if (!pr)
+    return (
+      <span className="mt-1 block text-xs text-muted-foreground">
+        PR reading not recorded
+      </span>
+    );
+  const proof = ticket.proof;
+  const proofState = proof?.state ?? "unrecorded";
+  const proofColor =
+    proofState === "verified"
+      ? "var(--success)"
+      : proofState === "stale" || proofState === "blocked"
+        ? "var(--warning-text)"
+        : undefined;
+  const number =
+    pr.number ?? Number(pr.url.match(/\/pull\/(\d+)\/?$/)?.[1] ?? 0);
+  const link = (
+    <a
+      href={pr.url}
+      target="_blank"
+      rel="noreferrer"
+      className="font-medium underline underline-offset-2"
+    >
+      {number ? `#${number}` : "Linked PR"}
+      {pr.title ? ` · ${pr.title}` : ""}
+    </a>
+  );
+  if (pr.state === "unavailable")
+    return (
+      <div className="mt-2 flex flex-wrap items-center gap-1.5 rounded-md border bg-muted/20 p-2 text-xs">
+        {link}
+        <span className="text-muted-foreground">GitHub read unavailable</span>
+        <Badge variant="outline">proof {proofState}</Badge>
+      </div>
+    );
+  return (
+    <div className="mt-2 rounded-md border bg-muted/20 p-2 text-xs">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        {link}
+        <Badge variant="outline">{pr.state}</Badge>
+        <Badge variant="outline" style={{ color: proofColor }}>
+          Proof {proofState}
+        </Badge>
+        {pr.reason !== "Merged" && <span>{pr.reason}</span>}
+      </div>
+      <div className="mt-1 text-muted-foreground">
+        Via {ticket.prLink.source ?? "source not recorded"} · Read{" "}
+        {new Date(pr.retrievedAt).toLocaleString()}
+      </div>
+      {proofState !== "unrecorded" && (
+        <div className="mt-2 border-t pt-2">
+          {proof?.verifiedSha && (
+            <span className="block font-mono">
+              {proof.state === "verified" ? "Verified" : "Recorded"}{" "}
+              {proof.verifiedSha.slice(0, 8)} · Head{" "}
+              {pr.head?.slice(0, 8) ?? "not recorded"}
+            </span>
+          )}
+          <span className="block text-muted-foreground">
+            {proof?.missing
+              .filter(
+                (gap) =>
+                  gap !== "Live interface not recorded" &&
+                  gap !== "QA packet not recorded",
+              )
+              .join(" · ") || "Proof details recorded"}
+          </span>
+          <span className="block text-muted-foreground">
+            Live interface: {proof?.liveInterface ?? "not recorded"} · QA
+            packet: {proof?.qaPacketUrl ? "recorded" : "not recorded"}
+          </span>
+          {proof?.sourceLabel && (
+            <span className="block text-muted-foreground">
+              {proof.sourceLabel} ·{" "}
+              {new Date(proof.observedAt!).toLocaleString()}
+            </span>
+          )}
+          {proof?.qaPacketUrl && (
+            <a
+              href={proof.qaPacketUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="underline underline-offset-2"
+            >
+              QA packet
+            </a>
+          )}
+        </div>
+      )}
+      <PathwaysWaitLaneView ticket={ticket} />
+    </div>
+  );
+}
+
+function PathwaysDecisionDraftView({
+  ticket,
+  slug,
+  onSubmitted,
+}: {
+  ticket: PathwaysTicketView;
+  slug: string;
+  onSubmitted: () => void;
+}) {
+  const draft = ticket.decisionDraft;
+  const [open, setOpen] = useState(false);
+  const [options, setOptions] = useState<{ label: string; detail: string }[]>(
+    draft?.options ?? [],
+  );
+  const [submitted, setSubmitted] = useState<string | null>(null);
+  if (
+    ticket.decision.state === "linked" &&
+    ticket.decision.waiting &&
+    ticket.decision.cardId
+  )
+    return (
+      <div
+        className="mt-2 text-xs font-medium"
+        style={{ color: "var(--foreground)" }}
+      >
+        Filed {ticket.decision.cardId} · linked to {ticket.identifier} · in
+        Needs you
+      </div>
+    );
+  if (!draft) return null;
+  const submit = async () => {
+    const result = await write(
+      WRITES.pathwaysDecision,
+      { slug, ticketId: draft.ticketId, question: draft.question, options },
+      { kind: "other", where: ticket.identifier, after: onSubmitted },
+    );
+    if (result?.ok && typeof result.result === "string")
+      setSubmitted(result.result);
+  };
+  return (
+    <div className="mt-2 text-xs">
+      <Button
+        variant="secondary"
+        size="sm"
+        className="border"
+        onClick={() => setOpen(!open)}
+      >
+        {open ? "Close decision preview" : "Draft decision"}
+      </Button>
+      {open && (
+        <UiCard className="mt-2 gap-2 px-3 py-3">
+          <CardTitle className="text-sm">
+            Decision preview · {draft.ticketId}
+          </CardTitle>
+          <div className="mt-1 text-muted-foreground">
+            Preview only · no card is filed until Submit
+          </div>
+          <p className="mb-2 mt-1">{draft.question}</p>
+          <div className="text-muted-foreground">
+            Would unblock:{" "}
+            {draft.affected.length
+              ? draft.affected.join(", ")
+              : "no downstream tickets recorded"}
+          </div>
+          <div className="mt-2 grid gap-2">
+            {options.map((option, index) => (
+              <div key={index} className="grid gap-1">
+                <Label htmlFor={`${ticket.identifier}-option-${index}`}>
+                  Option {index + 1}
+                  {index === 0 ? " · recommended" : ""}
+                </Label>
+                <Input
+                  id={`${ticket.identifier}-option-${index}`}
+                  className="w-full"
+                  value={option.label}
+                  maxLength={80}
+                  onChange={(event) =>
+                    setOptions(
+                      options.map((item, at) =>
+                        at === index
+                          ? { ...item, label: event.target.value }
+                          : item,
+                      ),
+                    )
+                  }
+                />
+                <Input
+                  aria-label={`Option ${index + 1} detail`}
+                  className="w-full"
+                  placeholder="Why this option"
+                  value={option.detail}
+                  maxLength={300}
+                  onChange={(event) =>
+                    setOptions(
+                      options.map((item, at) =>
+                        at === index
+                          ? { ...item, detail: event.target.value }
+                          : item,
+                      ),
+                    )
+                  }
+                />
+                {options.length > 2 && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() =>
+                      setOptions(options.filter((_, at) => at !== index))
+                    }
+                  >
+                    Remove option
+                  </Button>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {options.length < 4 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="border"
+                onClick={() =>
+                  setOptions([...options, { label: "", detail: "" }])
+                }
+              >
+                Add option
+              </Button>
+            )}
+            <Button
+              size="sm"
+              disabled={
+                !!gate.lock || options.some((option) => !option.label.trim())
+              }
+              onClick={() => void submit()}
+            >
+              Submit decision
+            </Button>
+          </div>
+          {submitted && <div className="mt-2">Filed card {submitted}</div>}
+        </UiCard>
+      )}
+    </div>
+  );
+}
+
+export function PathwaysTab({
+  projects,
+  linkedSlug,
+}: {
+  projects: Projects | undefined;
+  linkedSlug: string | null;
+}) {
+  const navigate = useBbNavigate();
+  const [picked, setPicked] = useState(
+    () =>
+      linkedSlug ??
+      (() => {
+        try {
+          return localStorage.getItem("pathways:last-project") ?? "";
+        } catch {
+          return "";
+        }
+      })(),
+  );
+  useEffect(() => {
+    if (linkedSlug) setPicked(linkedSlug);
+  }, [linkedSlug]);
+  const slug = projects?.some((project) => project.slug === picked)
+    ? picked
+    : (projects?.[0]?.slug ?? "");
+  const pick = (value: string) => {
+    setPicked(value);
+    localStorage.setItem("pathways:last-project", value);
+    navigate.toPluginPanel(PANEL_PATH, {
+      subPath: `pathways/${encodeURIComponent(value)}`,
+    });
+  };
+  return (
+    <div
+      className="mx-auto max-w-[1500px] p-4 max-[1100px]:p-1"
+      data-pathways-tab=""
+    >
+      <div className="mb-4 flex flex-wrap items-center gap-3">
+        <h2 className="m-0 text-lg font-semibold">Pathways</h2>
+        <label className="text-sm" htmlFor="pathways-project">
+          Project
+        </label>
+        <Select value={slug || undefined} onValueChange={pick}>
+          <SelectTrigger
+            id="pathways-project"
+            size="sm"
+            aria-label="Pathways project"
+          >
+            <SelectValue placeholder="Choose a project" />
+          </SelectTrigger>
+          <SelectContent>
+            {projects?.map((project) => (
+              <SelectItem key={project.slug} value={project.slug}>
+                {project.slug}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      {projects === undefined ? (
+        <Skeleton className="h-80 w-full" />
+      ) : slug ? (
+        <PathwaysSection key={slug} slug={slug} />
+      ) : (
+        <Empty>
+          <EmptyHeader>
+            <EmptyTitle>No projects recorded</EmptyTitle>
+            <EmptyDescription>
+              Create a project to see its Pathways map.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      )}
+    </div>
+  );
+}
+
+function PathwaysSection({ slug }: { slug: string }) {
+  const [refresh, setRefresh] = useState(false);
+  const refreshSeen = useRef(false);
+  const [retroOpen, setRetroOpen] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [narrowGraph, setNarrowGraph] = useState(
+    () => window.innerWidth < 1100,
+  );
+  useEffect(() => {
+    const resize = () => setNarrowGraph(window.innerWidth < 1100);
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, []);
+  const navigate = useBbNavigate();
+  const [hideDone, setHideDone] = useState(() => {
+    try {
+      return localStorage.getItem(`pathways:hide-done:${slug}`) === "true";
+    } catch {
+      return false;
+    }
+  });
+  const q = experimental_useRpcQuery({
+    contract: rpcContract,
+    method: "pathways",
+    input: { slug, refresh },
+  });
+  useEffect(() => {
+    if (!refresh) refreshSeen.current = false;
+    else if (q.isFetching) refreshSeen.current = true;
+    else if (refreshSeen.current) setRefresh(false);
+  }, [refresh, q.isFetching]);
+  const map = q.data?.map;
+  const tickets = new Map(
+    map?.tickets.map((ticket) => [ticket.identifier, ticket]) ?? [],
+  );
+  const visible =
+    map?.tickets.filter(
+      (ticket) => !hideDone || ticket.displayState !== "done",
+    ) ?? [];
+  const accessGaps = visible.filter(
+    (ticket) =>
+      ticket.preflight.state === "needs access" &&
+      !map?.ownerActions.some(
+        (action) => action.identifier === ticket.identifier,
+      ),
+  );
+  const visibleExternal =
+    map?.external.filter((item) =>
+      map.edges.some(
+        (edge) =>
+          edge.type === "blocks" &&
+          edge.from === item.identifier &&
+          visible.some((ticket) => ticket.identifier === edge.to),
+      ),
+    ) ?? [];
+  const visibleIds = new Set([
+    ...visible.map((ticket) => ticket.identifier),
+    ...visibleExternal.map((item) => item.identifier),
+  ]);
+  const visibleEdges =
+    map?.edges.filter(
+      (edge) =>
+        edge.type !== "sub-issue" &&
+        visibleIds.has(edge.from) &&
+        visibleIds.has(edge.to),
+    ) ?? [];
+  const graphNodes = [
+    ...visibleExternal.map((item) => ({
+      id: item.identifier,
+      label: item.title ?? item.identifier,
+      change: "same" as const,
+    })),
+    ...visible.map((ticket) => ({
+      id: ticket.identifier,
+      label: ticket.title,
+      change: "same" as const,
+    })),
+  ];
+  const graphRank = (id: string) => {
+    const ticket = tickets.get(id);
+    const pathTarget = visibleEdges.some(
+      (edge) => edge.from === id && map?.firstPath.includes(edge.to),
+    );
+    return map?.firstPath.includes(id)
+      ? 0
+      : pathTarget
+        ? 1
+        : ticket?.displayState === "needs-you"
+          ? 2
+          : ticket?.displayState === "done"
+            ? 3
+            : 4;
+  };
+  graphNodes.sort(
+    (a, b) => graphRank(a.id) - graphRank(b.id) || a.id.localeCompare(b.id),
+  );
+  const graph = map
+    ? layout(
+        graphNodes.length
+          ? graphNodes
+          : [{ id: map.identifier, label: map.title, change: "same" }],
+        visibleEdges.map((edge) => ({
+          ...edge,
+          label: edge.type,
+          change: "same" as const,
+        })),
+        "right",
+        narrowGraph ? 166 : 208,
+        narrowGraph ? 110 : 84,
+        "orthogonal",
+        narrowGraph ? 54 : 100,
+      )
+    : null;
+  const rows = (ids: string[]) =>
+    ids
+      .map((id) => tickets.get(id))
+      .filter((ticket): ticket is NonNullable<typeof ticket> => !!ticket);
+  const pathIds = new Set(map?.firstPath ?? []);
+  const pathHead = tickets.get(map?.firstPath[0] ?? "");
+  const needsYouNow = visible.find(
+    (ticket) => ticket.displayState === "needs-you",
+  );
+  const pathEdges = new Set(
+    (map?.firstPath ?? [])
+      .slice(1)
+      .map((id, index) => `${map!.firstPath[index]}:${id}`),
+  );
+  const selected = tickets.get(selectedId ?? "");
+  const ticketRow = (ticket: PathwaysTicketView, detail?: string) => (
+    <Item key={ticket.identifier} asChild variant="default" size="sm">
+      <Button
+        type="button"
+        variant="ghost"
+        onClick={() => setSelectedId(ticket.identifier)}
+        className="flex h-auto min-w-0 w-full items-start gap-2 rounded-md px-2 py-2 text-left text-xs hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-offset-2"
+        data-pathways-row={ticket.identifier}
+      >
+        {pathIds.has(ticket.identifier) ? (
+          <Badge variant="outline" className="shrink-0 px-1">
+            {map!.firstPath.indexOf(ticket.identifier) + 1}
+          </Badge>
+        ) : (
+          <span
+            className="mt-1 size-2 shrink-0 rounded-full"
+            style={{ background: pathwaysColors[ticket.displayState] }}
+          />
+        )}
+        <span className="min-w-0 flex-1">
+          <span className="block text-balance">
+            <span className="font-mono">{ticket.identifier}</span> ·{" "}
+            {ticket.title}
+          </span>
+          {detail && (
+            <span className="mt-0.5 block whitespace-normal text-muted-foreground">
+              {detail}
+            </span>
+          )}
+        </span>
+      </Button>
+    </Item>
+  );
+  const ticketFact = (ticket: PathwaysTicketView) =>
+    [
+      ticket.prLink.state === "linked" &&
+      ticket.pr &&
+      ticket.pr.state !== "unavailable"
+        ? `PR #${ticket.pr.number ?? "linked"} ${ticket.pr.state}`
+        : "",
+      ticket.decision.waiting ? "decision awaiting answer" : "",
+      ticket.preflight.state === "needs access" ? "proof needs access" : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  const firstPathFact = (ticket: PathwaysTicketView) =>
+    [
+      ticket.type === "research"
+        ? "Investigate this research question first"
+        : ticket.blockers.length
+          ? `Waits on ${ticket.blockers.join(", ")}`
+          : "Ready to start",
+      ticketFact(ticket),
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  const blockedFact = (ticket: PathwaysTicketView) =>
+    [
+      ticket.waitsOnYou ? "Waits on you" : "",
+      ticket.blockers.length ? `Blocked by ${ticket.blockers.join(", ")}` : "",
+      ticket.blockers.some((id) =>
+        map?.external.some((item) => item.identifier === id),
+      )
+        ? "External blocker"
+        : "",
+      ticket.estimate == null ? "No estimate" : "",
+      ...ticket.unknown,
+      ticketFact(ticket),
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  return (
+    <UiCard
+      className="gap-3 px-4 py-4 max-[1100px]:px-2"
+      data-pathways={slug}
+      aria-label="Pathways"
+    >
+      <style>{`@keyframes pathways-flow { to { stroke-dashoffset: -20; } } @media (prefers-reduced-motion: no-preference) { [data-pathways] .pathways-flow { animation: pathways-flow 1s linear infinite; } }`}</style>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          {map && (
+            <a
+              href={map.url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs text-muted-foreground"
+            >
+              <span className="font-mono">{map.identifier}</span> · {map.title}
+            </a>
+          )}
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id={`pathways-hide-done-${slug}`}
+              checked={hideDone}
+              onCheckedChange={(value) => {
+                const checked = value === true;
+                setHideDone(checked);
+                try {
+                  localStorage.setItem(
+                    `pathways:hide-done:${slug}`,
+                    String(checked),
+                  );
+                } catch {}
+              }}
+            />
+            <Label htmlFor={`pathways-hide-done-${slug}`} className="text-xs">
+              Hide done
+            </Label>
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            className="text-foreground [&:is(.dark_*)]:text-white"
+            onClick={() => {
+              setRefresh(true);
+            }}
+          >
+            Refresh
+          </Button>
+        </div>
+      </div>
+      {q.error ? (
+        <Alert>
+          <AlertDescription>
+            Pathways failed: {q.error.message}
+          </AlertDescription>
+        </Alert>
+      ) : q.data?.error ? (
+        <Empty>
+          <EmptyHeader>
+            <EmptyTitle>
+              {q.data.error.includes("linearProjectId") ||
+              q.data.error.includes("Linear project link")
+                ? "No Linear map linked"
+                : "Pathways unavailable"}
+            </EmptyTitle>
+            <EmptyDescription>{q.data.error}</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : !map || !graph ? (
+        <Skeleton className="mt-3 h-80 w-full" />
+      ) : (
+        <>
+          {(pathHead ||
+            visible.some((ticket) => ticket.pr?.state === "unavailable")) && (
+            <Alert
+              className="mt-3 py-2 text-xs"
+              data-pathways-github-unavailable={
+                visible.some((ticket) => ticket.pr?.state === "unavailable")
+                  ? ""
+                  : undefined
+              }
+            >
+              <AlertDescription>
+                {pathHead && (
+                  <>
+                    Do now:{" "}
+                    {pathHead.type === "research"
+                      ? "investigate"
+                      : pathHead.readiness.state === "ready"
+                        ? "start"
+                        : "resolve scope for"}{" "}
+                    {pathHead.identifier}.
+                    {needsYouNow && (
+                      <> In parallel, complete {needsYouNow.identifier}.</>
+                    )}
+                  </>
+                )}
+                {visible.some(
+                  (ticket) => ticket.pr?.state === "unavailable",
+                ) && (
+                  <>
+                    {" "}
+                    · GitHub unavailable · linked PR readiness needs a fresh
+                    read
+                  </>
+                )}
+              </AlertDescription>
+            </Alert>
+          )}
+          <div className="mt-3 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(390px,420px)]">
+            <div
+              className="order-1 min-w-0 self-start overflow-auto rounded-lg border p-2 max-[1100px]:p-1"
+              data-pathways-graph=""
+            >
+              <div
+                className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs"
+                aria-label="Pathways state legend"
+              >
+                {(
+                  Object.entries(pathwaysColors) as [
+                    keyof typeof pathwaysColors,
+                    string,
+                  ][]
+                )
+                  .filter(([state]) =>
+                    visible.some((ticket) => ticket.displayState === state),
+                  )
+                  .map(([state, color]) => (
+                    <Tooltip key={state}>
+                      <TooltipTrigger asChild>
+                        <Badge
+                          variant="outline"
+                          tabIndex={0}
+                          className="gap-1 px-1.5 py-0.5"
+                        >
+                          <span
+                            aria-hidden
+                            style={{
+                              background: color,
+                              width: 9,
+                              height: 9,
+                              borderRadius: 2,
+                            }}
+                          />
+                          {state === "needs-you" && (
+                            <UserRound className="size-3" aria-hidden />
+                          )}
+                          {state === "done" && (
+                            <Check className="size-3" aria-hidden />
+                          )}
+                          {state}
+                        </Badge>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {state} tickets in this map
+                      </TooltipContent>
+                    </Tooltip>
+                  ))}
+                {!!map.firstPath.length && (
+                  <span className="flex items-center gap-1">
+                    <span
+                      aria-hidden
+                      className="inline-flex size-3 items-center justify-center rounded-full text-[9px] text-white"
+                      style={{ background: pathwaysPathColor }}
+                    >
+                      1
+                    </span>
+                    first path step
+                  </span>
+                )}
+                {!!visible.some((ticket) => ticket.waitsOnYou) && (
+                  <span className="flex items-center gap-1">
+                    <Hourglass className="size-3" aria-hidden />
+                    waits on you
+                  </span>
+                )}
+                {!!visibleExternal.length && (
+                  <span className="flex items-center gap-1">
+                    <span
+                      aria-hidden
+                      className="inline-block size-2.5 border border-dashed border-muted-foreground"
+                    />
+                    external blocker
+                  </span>
+                )}
+                <span className="flex items-center gap-1">
+                  <span
+                    aria-hidden
+                    className="inline-block w-3 border-t border-dashed border-muted-foreground"
+                  />
+                  open blocker
+                </span>
+                {!!visible.some(
+                  (ticket) => ticket.displayState === "needs-you",
+                ) && (
+                  <span className="flex items-center gap-1">
+                    <span
+                      aria-hidden
+                      className="inline-block w-3 border-t border-dashed"
+                      style={{ borderColor: pathwaysColors["needs-you"] }}
+                    />
+                    needs-you blocker
+                  </span>
+                )}
+                <span className="flex items-center gap-1">
+                  <span
+                    aria-hidden
+                    className="inline-block w-3 border-t border-dotted"
+                    style={{ borderColor: pathwaysColors.done }}
+                  />
+                  done dependency
+                </span>
+              </div>
+              <Separator className="mb-2" />
+              <svg
+                className="mx-auto block h-auto w-full max-w-[720px]"
+                role="img"
+                aria-label="Pathways map graph"
+                width={graph.width}
+                height={graph.height}
+                viewBox={`0 0 ${graph.width} ${graph.height}`}
+              >
+                {graph.lines.map((line, i) => {
+                  const blockerTicket = tickets.get(line.from);
+                  const blocker =
+                    blockerTicket ??
+                    map.external.find((item) => item.identifier === line.from);
+                  const active =
+                    line.label === "blocks" &&
+                    blocker?.state.type !== "completed" &&
+                    blocker?.state.type !== "canceled";
+                  const first = pathEdges.has(`${line.from}:${line.to}`);
+                  return (
+                    <g key={`${line.from}:${line.to}:${i}`}>
+                      <path
+                        d={line.path}
+                        fill="none"
+                        stroke={
+                          first
+                            ? pathwaysPathColor
+                            : blockerTicket
+                              ? pathwaysColors[blockerTicket.displayState]
+                              : "var(--muted-foreground)"
+                        }
+                        strokeWidth={first ? 2 : 1.25}
+                        strokeDasharray={
+                          active && !first ? "6 4" : !active ? "2 5" : undefined
+                        }
+                        className={
+                          active && !first ? "pathways-flow" : undefined
+                        }
+                        opacity={first ? 1 : active ? 0.75 : 0.5}
+                        markerEnd={
+                          first
+                            ? "url(#pathways-arrow-first)"
+                            : "url(#pathways-arrow)"
+                        }
+                      />
+                      {first && active && (
+                        <path
+                          d={line.path}
+                          fill="none"
+                          stroke="var(--background)"
+                          strokeWidth="1"
+                          strokeDasharray="1 16"
+                          className="pathways-flow"
+                          opacity="0.3"
+                        />
+                      )}
+                    </g>
+                  );
+                })}
+                <defs>
+                  <marker
+                    id="pathways-arrow"
+                    markerWidth="5"
+                    markerHeight="5"
+                    refX="4"
+                    refY="2.5"
+                    orient="auto"
+                  >
+                    <path
+                      d="M0 0 L5 2.5 L0 5"
+                      fill="none"
+                      stroke="currentColor"
+                    />
+                  </marker>
+                  <marker
+                    id="pathways-arrow-first"
+                    markerWidth="5"
+                    markerHeight="5"
+                    refX="4"
+                    refY="2.5"
+                    orient="auto"
+                  >
+                    <path
+                      d="M0 0 L5 2.5 L0 5"
+                      fill="none"
+                      stroke={pathwaysPathColor}
+                    />
+                  </marker>
+                </defs>
+                {graph.boxes.map((box) => {
+                  const ticket = tickets.get(box.id);
+                  const outside = map.external.find(
+                    (item) => item.identifier === box.id,
+                  );
+                  const title = ticket?.title ?? outside?.title ?? map.title;
+                  const color = ticket
+                    ? pathwaysColors[ticket.displayState]
+                    : outside
+                      ? "var(--muted-foreground)"
+                      : "currentColor";
+                  return (
+                    <a
+                      key={box.id}
+                      href={ticket ? "#" : (outside?.url ?? map.url)}
+                      target={ticket ? undefined : "_blank"}
+                      rel={ticket ? undefined : "noreferrer"}
+                      onClick={
+                        ticket
+                          ? (event) => {
+                              event.preventDefault();
+                              setSelectedId(box.id);
+                            }
+                          : undefined
+                      }
+                      data-pathways-state={
+                        ticket?.displayState ?? (outside ? "external" : "map")
+                      }
+                    >
+                      <rect
+                        x={box.x}
+                        y={box.y}
+                        width={box.w}
+                        height={box.h}
+                        rx="6"
+                        fill={
+                          ticket?.displayState === "done"
+                            ? "var(--muted)"
+                            : "var(--card)"
+                        }
+                        stroke="var(--border)"
+                        strokeWidth={1}
+                        strokeDasharray={outside ? "5 4" : undefined}
+                        opacity={ticket?.displayState === "done" ? 0.85 : 1}
+                      />
+                      {ticket && (
+                        <rect
+                          x={box.x + 1}
+                          y={box.y + 5}
+                          width="3"
+                          height={box.h - 10}
+                          rx="1.5"
+                          fill={color}
+                        />
+                      )}
+                      <title>{`${box.id}: ${title}`}</title>
+                      <text
+                        x={box.x + 8}
+                        y={box.y + 17}
+                        fontSize="11"
+                        fontWeight="bold"
+                        fill="currentColor"
+                      >
+                        {box.id}
+                      </text>
+                      {ticket?.displayState === "done" && (
+                        <Check
+                          x={box.x + box.w - 24}
+                          y={box.y + 5}
+                          width={16}
+                          height={16}
+                          stroke={color}
+                        />
+                      )}
+                      {ticket?.waitsOnYou && (
+                        <Hourglass
+                          x={box.x + box.w - 22}
+                          y={box.y + 7}
+                          width={14}
+                          height={14}
+                          stroke="var(--muted-foreground)"
+                          aria-label="Waits on you"
+                        />
+                      )}
+                      {ticket?.displayState === "needs-you" && (
+                        <UserRound
+                          x={box.x + box.w - (pathIds.has(box.id) ? 42 : 22)}
+                          y={box.y + 5}
+                          width={16}
+                          height={16}
+                          stroke={
+                            ticket.waitsOnYou
+                              ? pathwaysColors["needs-you"]
+                              : color
+                          }
+                        />
+                      )}
+                      {pathIds.has(box.id) && (
+                        <g>
+                          <circle
+                            cx={box.x + box.w - 16}
+                            cy={box.y + 16}
+                            r="10"
+                            fill={
+                              ticket?.blockers.length
+                                ? "var(--card)"
+                                : pathwaysPathColor
+                            }
+                            stroke={pathwaysPathColor}
+                          />
+                          <text
+                            x={box.x + box.w - 16}
+                            y={box.y + 20}
+                            textAnchor="middle"
+                            fontSize="11"
+                            fontWeight="bold"
+                            fill={
+                              ticket?.blockers.length
+                                ? pathwaysPathColor
+                                : "white"
+                            }
+                          >
+                            {map.firstPath.indexOf(box.id) + 1}
+                          </text>
+                        </g>
+                      )}
+                      {titleLines(
+                        title,
+                        narrowGraph ? 20 : 27,
+                        narrowGraph ? 3 : 2,
+                      ).map((line, i) => (
+                        <text
+                          key={i}
+                          x={box.x + 8}
+                          y={box.y + 34 + i * 15}
+                          fontSize={narrowGraph ? 13 : 12}
+                          fill="currentColor"
+                        >
+                          {line}
+                        </text>
+                      ))}
+                      {ticket && (
+                        <foreignObject
+                          x={box.x + 5}
+                          y={box.y + box.h - 17}
+                          width={box.w - 10}
+                          height={16}
+                        >
+                          <div className="flex h-4 items-center justify-end gap-1">
+                            {ticket.prLink.state === "linked" &&
+                              ticket.pr &&
+                              ticket.pr.state !== "unavailable" && (
+                                <PathwaysNodeGlyph
+                                  label={`PR ${ticket.pr.state}`}
+                                  meaning={`Linked PR ${ticket.pr.number ?? "number not recorded"} is ${ticket.pr.state}`}
+                                />
+                              )}
+                            {ticket.decision.waiting ? (
+                              <PathwaysNodeGlyph
+                                label="Decision pending"
+                                meaning="Linked decision card is awaiting an answer"
+                              />
+                            ) : ticket.prLink.state === "linked" &&
+                              (ticket.proof?.state === "stale" ||
+                                ticket.proof?.state === "unrecorded") ? (
+                              <PathwaysNodeGlyph
+                                label={
+                                  ticket.proof.state === "stale"
+                                    ? "Proof stale"
+                                    : "Proof needed"
+                                }
+                                meaning={
+                                  ticket.proof.state === "stale"
+                                    ? "Proof is older than the PR head"
+                                    : "Proof at the PR head is not recorded"
+                                }
+                              />
+                            ) : null}
+                          </div>
+                        </foreignObject>
+                      )}
+                      <circle
+                        cx={box.x + 10}
+                        cy={box.y + box.h - 24}
+                        r="3"
+                        fill={color}
+                      />
+                      <text
+                        x={box.x + 18}
+                        y={box.y + box.h - 20}
+                        fontSize="11"
+                        fill="currentColor"
+                      >
+                        {ticket?.displayState ??
+                          (outside ? "external blocker" : "map")}
+                      </text>
+                    </a>
+                  );
+                })}
+              </svg>
+            </div>
+            <div
+              className="order-2 grid min-w-0 content-start gap-3 overflow-hidden rounded-xl border bg-card p-3"
+              data-pathways-next=""
+            >
+              <div className="flex items-baseline justify-between">
+                <h4 className="m-0 text-base font-semibold">What’s next</h4>
+                <span className="text-xs text-muted-foreground">
+                  {visible.length} tickets
+                </span>
+              </div>
+              <Separator />
+              {!!map.firstPath.length && (
+                <div className="rounded-lg bg-muted/30 p-3">
+                  <h5 className="m-0 text-sm font-semibold">
+                    First path · {map.firstPath.length} steps
+                  </h5>
+                  <div className="mt-2 grid gap-1">
+                    {rows(map.firstPath).map((ticket) =>
+                      ticketRow(ticket, firstPathFact(ticket)),
+                    )}
+                  </div>
+                </div>
+              )}
+              {!!map.ownerActions.length && (
+                <div className="rounded-lg p-3">
+                  <h5 className="m-0 text-sm font-semibold">
+                    Needs you · {map.ownerActions.length}
+                  </h5>
+                  <div className="mt-2 grid gap-1">
+                    {map.ownerActions
+                      .map((action) => tickets.get(action.identifier))
+                      .filter(
+                        (ticket): ticket is PathwaysTicketView => !!ticket,
+                      )
+                      .map((ticket) =>
+                        ticketRow(
+                          ticket,
+                          map.ownerActions.find(
+                            (action) => action.identifier === ticket.identifier,
+                          )?.next
+                            ? `Unblocks ${map.ownerActions.find((action) => action.identifier === ticket.identifier)!.next}`
+                            : "Owner action",
+                        ),
+                      )}
+                  </div>
+                </div>
+              )}
+              {!!map.claimed.length && (
+                <details className="rounded-lg border p-3">
+                  <summary className="cursor-pointer text-sm font-semibold">
+                    Claimed · {map.claimed.length}
+                  </summary>
+                  <div className="mt-2 grid gap-1">
+                    {rows(map.claimed).map((ticket) =>
+                      ticketRow(
+                        ticket,
+                        ticketFact(ticket) || ticket.assignee || "Claimed",
+                      ),
+                    )}
+                  </div>
+                </details>
+              )}
+              {!!map.blocked.length && (
+                <details className="rounded-lg border p-3" open>
+                  <summary className="cursor-pointer text-sm font-semibold">
+                    Blocked on · {map.blocked.length}
+                  </summary>
+                  <div className="mt-2 grid gap-1">
+                    {rows(map.blocked).map((ticket) =>
+                      ticketRow(ticket, blockedFact(ticket)),
+                    )}
+                  </div>
+                </details>
+              )}
+              {!!map.fog.length && (
+                <details className="rounded-lg border p-3">
+                  <summary className="cursor-pointer text-sm font-semibold">
+                    Open questions · {map.fog.length}
+                  </summary>
+                  <ul className="mb-0 mt-2 list-disc pl-5 text-xs text-muted-foreground">
+                    {map.fog.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </div>
+          </div>
+          <Collapsible
+            open={retroOpen}
+            onOpenChange={setRetroOpen}
+            data-pathways-retro=""
+          >
+            <UiCard className="mt-3 gap-2 px-3 py-2 text-sm">
+              <CollapsibleTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="w-full justify-start px-0 font-semibold"
+                >
+                  Retro {retroOpen ? "▾" : "▸"}
+                </Button>
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <div className="mt-3 grid gap-3 text-xs">
+                  <div>
+                    <strong>
+                      What finished · {q.data?.retro?.finished.length ?? 0}
+                    </strong>
+                    <div className="mt-1 flex flex-wrap gap-2">
+                      {q.data?.retro?.finished.length
+                        ? q.data.retro.finished.map((item) => (
+                            <span key={item.label}>
+                              <a
+                                href={item.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="underline"
+                              >
+                                {item.label}
+                              </a>
+                              {item.prUrl && (
+                                <>
+                                  {" "}
+                                  ·{" "}
+                                  <a
+                                    href={item.prUrl}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="underline"
+                                  >
+                                    merged PR
+                                  </a>
+                                </>
+                              )}
+                            </span>
+                          ))
+                        : "not recorded"}
+                    </div>
+                  </div>
+                  <Separator />
+                  <div>
+                    <strong>
+                      Decisions made · {q.data?.retro?.decisions.length ?? 0}
+                    </strong>
+                    <div className="mt-1">
+                      {q.data?.retro?.decisions.length
+                        ? q.data.retro.decisions.map((item) => (
+                            <div key={item.id}>
+                              {item.title} ·{" "}
+                              <OpenRef
+                                open={panel(
+                                  "board",
+                                  `[data-decision="${item.id}"]`,
+                                )}
+                                title="Open decision card"
+                                data="card"
+                                className="underline"
+                              >
+                                {item.id}
+                              </OpenRef>
+                            </div>
+                          ))
+                        : "not recorded"}
+                    </div>
+                  </div>
+                  <Separator />
+                  <div>
+                    <strong>Longest recorded waits</strong>
+                    <div className="mt-1">
+                      {q.data?.retro?.stalled.length
+                        ? q.data.retro.stalled.map((item) => (
+                            <div key={item.label}>
+                              <a
+                                href={item.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="underline"
+                              >
+                                {item.label}
+                              </a>{" "}
+                              · {item.kind} ·{" "}
+                              {Math.round(item.durationMs / 3_600_000)}h from
+                              recorded start
+                            </div>
+                          ))
+                        : "not recorded"}
+                    </div>
+                  </div>
+                  <div>
+                    Retro doc:{" "}
+                    {q.data?.retro?.doc && q.data.retro.hostId ? (
+                      <Button
+                        variant="link"
+                        size="sm"
+                        className="h-auto p-0 text-xs underline"
+                        onClick={() =>
+                          openInBb(navigate, {
+                            hostId: q.data!.retro!.hostId,
+                            path: q.data!.retro!.doc,
+                          })
+                        }
+                      >
+                        {q.data.retro.doc.split("/").at(-1)}
+                      </Button>
+                    ) : (
+                      "not recorded"
+                    )}
+                  </div>
+                </div>
+              </CollapsibleContent>
+            </UiCard>
+          </Collapsible>
+          <Dialog
+            open={!!selected}
+            onOpenChange={(open) => {
+              if (!open) setSelectedId(null);
+            }}
+          >
+            <DialogContent
+              showCloseButton={false}
+              className="fixed inset-y-0 right-0 left-auto top-0 h-dvh w-full max-w-[520px] content-start translate-x-0 translate-y-0 overflow-y-auto rounded-none p-5 sm:max-w-[520px]"
+              data-pathways-detail={selected?.identifier}
+            >
+              {selected && (
+                <>
+                  <DialogHeader className="flex-row items-start justify-between gap-3 text-left">
+                    <div>
+                      <a
+                        href={selected.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="font-mono text-sm underline"
+                      >
+                        {selected.identifier}
+                      </a>
+                      <DialogTitle className="mt-1 text-lg">
+                        {selected.title}
+                      </DialogTitle>
+                      <DialogDescription>
+                        Ticket details and next actions
+                      </DialogDescription>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setSelectedId(null)}
+                    >
+                      Close
+                    </Button>
+                  </DialogHeader>
+                  <Separator />
+                  <div className="grid gap-3 text-sm">
+                    <div>
+                      <Badge variant="outline">{selected.displayState}</Badge> ·{" "}
+                      {selected.assignee ?? "Owner not recorded"}
+                      {selected.blockers.length
+                        ? ` · Blocked by ${selected.blockers.join(", ")}`
+                        : ""}
+                    </div>
+                    <UiCard className="gap-1 px-3 py-3">
+                      <CardTitle className="text-sm">
+                        Readiness · {selected.readiness.state}
+                      </CardTitle>
+                      <p className="mb-1 mt-2 text-xs">
+                        {selected.readiness.reasons.join(" · ") ||
+                          "Scope and proof plan recorded"}
+                      </p>
+                      <a
+                        href={selected.readiness.source}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-xs underline"
+                      >
+                        Source: Linear ticket
+                      </a>
+                    </UiCard>
+                    {map.ownerActions
+                      .filter(
+                        (action) => action.identifier === selected.identifier,
+                      )
+                      .map((action) => (
+                        <UiCard key={action.action} className="gap-1 px-3 py-3">
+                          <CardTitle className="text-sm">
+                            Owner action · {action.kind}
+                          </CardTitle>
+                          <p className="mb-0 mt-1 text-xs">
+                            {action.action} ·{" "}
+                            {action.next
+                              ? `Needed before ${action.next}`
+                              : "No downstream step recorded"}
+                          </p>
+                        </UiCard>
+                      ))}
+                    <PathwaysPreflight ticket={selected} tickets={tickets} />
+                    <PathwaysDecisionPreview
+                      ticket={selected}
+                      tickets={tickets}
+                    />
+                    <PathwaysDecisionDraftView
+                      ticket={selected}
+                      slug={slug}
+                      onSubmitted={() => {
+                        setRefresh(true);
+                        void q.refetch();
+                      }}
+                    />
+                    {selected.pr?.state !== "merged" && (
+                      <PathwaysPrBadge ticket={selected} />
+                    )}
+                  </div>
+                </>
+              )}
+            </DialogContent>
+          </Dialog>
+        </>
+      )}
+    </UiCard>
   );
 }
 

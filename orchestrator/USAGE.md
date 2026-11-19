@@ -267,6 +267,30 @@ Suggested reviewers come from the code owners of the changed files, then from pe
 recently. A reviewer is tagged `@handle` only when `slackHandleMap` maps their GitHub login to it. Everyone else is
 shown by their GitHub login, never guessed.
 
+## Pathways
+
+The **Pathways** tab shows a read-only Linear dependency map for one project at a time, to answer "what comes next and
+what stands in the way". Every project card on Projects has a **Pathways** button that opens it on that project; the
+tab's picker remembers the last one. Hide the tab with `hiddenTabs: pathways`.
+
+- **Setup:** set `linearApiKey` (a Linear personal API key, stored as a secret) in the plugin settings, then set
+  `linearProjectId` in the project's `project.json` to its Linear project ID. Until both are set, the tab says which is
+  missing.
+- **The map:** one Linear issue labelled `wayfinder:map` and its sub-issues, drawn as a graph with blockers as edges, the
+  first path numbered, and a What's next column (First path, Needs you, Claimed, Blocked on, Open questions). Click a
+  ticket for its readiness, owner actions, linked PR and wait lane, proof at the PR's head, preflight and decision impact.
+- **Links fail closed:** a ticket links to a PR only through a GitHub PR URL in its Linear attachments or description,
+  never by a similar title. Linked PR state is read through a connected machine's own `gh` login; without one the tab
+  says "GitHub unavailable" rather than guessing.
+- **Draft decision:** for a blocked ticket, previews a card for the project's lead and files it only when you submit.
+  It is the tab's only write, and a second submit of the same question files nothing new.
+- **Retro:** a collapsed card built from the orchestrator's own records: finished tickets and merged PRs, answered
+  decisions, the longest recorded waits, and a retro doc from the project's library folder, if there is one.
+
+The page never writes to Linear or GitHub. The bundled `pathways-linear` skill tells agents how to build and update a
+map in Linear (labels, sub-issues, blocking relations) with a Linear key you give them. Agents can read the map through
+the `pathways` RPC.
+
 ## CodeRabbit review queue
 
 The **CodeRabbit** tab asks CodeRabbit for one review at a time, by posting `@coderabbitai review` on the next PR in

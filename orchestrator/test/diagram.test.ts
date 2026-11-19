@@ -35,7 +35,8 @@ test("no two boxes overlap, in either direction", () => {
   const nodes = ["a", "b", "c", "d", "e", "f", "g"].map(n);
   const edges = [e("a", "b"), e("a", "c"), e("a", "d"), e("b", "e"), e("c", "e"), e("d", "f"), e("e", "g"), e("f", "g")];
   for (const dir of ["right", "down"] as const) {
-    const { boxes, width, height } = layout(nodes, edges, dir);
+    const { boxes, width, height } = layout(nodes, edges, dir, 208, 76);
+    assert.ok(boxes.every((box) => box.h === 76));
     for (const p of boxes)
       for (const q of boxes) {
         if (p === q) continue;
@@ -44,4 +45,14 @@ test("no two boxes overlap, in either direction", () => {
       }
     assert.ok(boxes.every((b) => b.x + b.w <= width && b.y + b.h <= height), `${dir}: every box inside the canvas`);
   }
+  const routed = layout([n("a"), n("b"), n("c")], [e("a", "c"), e("b", "c")], "right", 208, 76, "orthogonal");
+  const arrivals = routed.lines.map((line) => line.path.match(/V([\d.]+) H/)?.[1]);
+  assert.equal(new Set(arrivals).size, 2);
+  const lanes = routed.lines.map((line) => line.path.match(/ H([\d.]+) V/)?.[1]);
+  assert.equal(new Set(lanes).size, 2);
+  assert(Number(lanes[0]) > Number(lanes[1]));
+  const wider = Array.from({ length: 25 }, (_, index) => n(`ticket-${index}`));
+  const wideGraph = layout(wider, wider.slice(1).map((node, index) => e(wider[index].id, node.id)), "right", 208, 76, "orthogonal");
+  assert.equal(wideGraph.boxes.length, 25);
+  assert(wideGraph.boxes.every((box) => box.x + box.w <= wideGraph.width && box.y + box.h <= wideGraph.height));
 });

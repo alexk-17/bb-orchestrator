@@ -21,6 +21,7 @@ import { ccCss } from "./cc-lines.tsx";
 import { INLINE_LINK, ProjectRefs, RefsContext, refCss, type SharedRefs } from "./ref-text.tsx";
 import { ChatCard, ChatLog, Composer, directCss, markSeen } from "./direct-line.tsx";
 import { useMinute } from "./status-bar.tsx";
+import { PANEL_PATH } from "./open-proof.ts";
 import { ChevronDown, ChevronRight, Crosshair, Ellipsis, Pin } from "lucide-react";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog.tsx";
 import { Button } from "./ui/button.tsx";
@@ -204,6 +205,11 @@ function Face({ project, size }: { project: Project; size: 24 | 32 }) {
   );
 }
 
+function PathwaysLink({ slug }: { slug: string }) {
+  const navigate = useBbNavigate();
+  return <Button variant="outline" size="sm" data-open-pathways={slug} onClick={() => navigate.toPluginPanel(PANEL_PATH, { subPath: `pathways/${encodeURIComponent(slug)}` })}>Pathways →</Button>;
+}
+
 /** An archived project: one line, its name and when it was archived; Start lead brings it back. */
 function ArchivedRow({ project, busy, refetchAll, onOpen }: { project: Project; busy: boolean; refetchAll: () => void; onOpen: (slug: string) => void }) {
   const head = leadHead(project);
@@ -225,6 +231,7 @@ function ArchivedRow({ project, busy, refetchAll, onOpen }: { project: Project; 
             <span className="now">archived {when(project.archivedAt)}</span>
           </span>
           <span className="acts">
+            <PathwaysLink slug={project.slug} />
             {project.lead ? null : (
               <Btn size="sm" data-start-lead={project.slug} disabled={busy || project.heldAt !== null} title={`Bring ${project.slug} back with a new lead`} onClick={startLead}>
                 Start lead
@@ -375,6 +382,7 @@ function ListRow({ project, lanes, now, selected, quiet, onSelect }: { project: 
         )}
       </div>
       <div className="k-side">
+        <PathwaysLink slug={project.slug} />
         {r.number ? <Chip spec={r.number} data-list-number={r.number.tone} /> : null}
         <span className="k-age" data-old={r.age.old ? "true" : "false"} title={r.age.title}>
           {r.age.old ? <Icon name="wait" label="status old" /> : null}
@@ -438,6 +446,7 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
               <Btn size="sm" data-open-project={project.slug} title="The timeline, the flow and the dependencies" onClick={() => onOpen(project.slug)}>
                 Timeline
               </Btn>
+              <PathwaysLink slug={project.slug} />
               <MoreMenu project={project} busy={busy} refetchAll={refetchAll} narrow={narrow} onArchive={() => setConfirming(true)} askStatus={askStatus} askInMenu onPin={() => setPinning(true)} />
             </span>
           </div>

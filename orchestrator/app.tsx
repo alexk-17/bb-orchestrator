@@ -24,7 +24,7 @@ import type { SharedRefs } from "./app/ref-text.tsx";
 import { DeliverablesView, inReview, inScope } from "./app/deliverables.tsx";
 import { OpenPrsView } from "./app/open-prs.tsx";
 import { ReviewQueueView } from "./app/review-queue.tsx";
-import { ScopeView } from "./app/scope.tsx";
+import { PathwaysTab, ScopeView } from "./app/scope.tsx";
 import { scopeEntryOf } from "./app/kit.ts";
 import { pointerPressed } from "./app/store.ts";
 import { RENAMED_VIEWS, close, detailOf, findPane, panes, parse, pathFor, resize, setView, single, split, type Layout } from "./app/layout.ts";
@@ -48,6 +48,7 @@ const VIEWS = [
   // 1.11.0: the projects in scoping mode, where the owner and a new project's lead settle its scope (always listed,
   // with an empty state). Right after Projects: it is where the owner goes from a project.
   { id: "scope", subPath: "scope", label: "Scope" },
+  { id: "pathways", subPath: "pathways", label: "Pathways" },
   // Requested 2026-11-16: the owner's open PRs, which need review, and the review ask to paste in Slack
   { id: "open-prs", subPath: "open-prs", label: "Open PRs" },
   // 2026-11-18 (the owner's choice): the CodeRabbit review queue, from a contributor's public PR, as a tab of its own.
@@ -199,7 +200,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   const board = experimental_useRpcQuery({ contract: rpcContract, method: "board", input: null });
   const config = experimental_useRpcQuery({ contract: rpcContract, method: "config", input: null });
   // the Scope tab's chat reads its project's direct line from the projects read
-  const projects = experimental_useRpcQuery({ contract: rpcContract, method: "projects", input: null, enabled: shown.has("projects") || shown.has("scope") });
+  const projects = experimental_useRpcQuery({ contract: rpcContract, method: "projects", input: null, enabled: shown.has("projects") || shown.has("scope") || shown.has("pathways") });
   // the Projects tab's lanes read the agents too
   const agents = experimental_useRpcQuery({ contract: rpcContract, method: "agents", input: null, enabled: shown.has("projects") });
   const deliverables = useDeliverables();
@@ -343,6 +344,8 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
         return <ProjectsView q={projects} refetchAll={refetchAll} agents={board.data?.agents} lanesFrom={agents.data} needs={needs.data} openCard={openCard} detail={detail} onDetail={onDetail} refs={refs} />;
       case "scope":
         return <ScopeView q={scope} projects={projects.data} deliverables={deliverables.data} refetchAll={refetchAll} mons={mons} accents={accents} focus={scopeFocus} />;
+      case "pathways":
+        return <PathwaysTab projects={projects.data} linkedSlug={subPath.startsWith("pathways/") ? decodeURIComponent(subPath.slice(9)) : null} />;
       case "open-prs":
         return <OpenPrsView />;
       case "coderabbit":
@@ -393,7 +396,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
           compact={compact}
           render={render}
           fill={(v) => v === "chat" || v === "cloud" || v === "gameboy"}
-          wide={(v) => v === "projects" || v === "deliverables" || v === "open-prs" || v === "coderabbit" || v === "scope"}
+          wide={(v) => v === "projects" || v === "deliverables" || v === "open-prs" || v === "coderabbit" || v === "scope" || v === "pathways"}
           onView={(id, v) => {
             setLayout((l) => setView(l, id, v));
             follow(v);

@@ -132,6 +132,13 @@ alone, it is archived once it answers. Never post
 `@coderabbitai review` yourself, and never change `reviewQueueDryRun` (on by default): going live is the owner's own
 decision, on a card. Keep it on while another CodeRabbit scheduler runs.
 
+## Pathways (read-only for agents)
+
+The Pathways tab maps a project's linked Linear project (`linearProjectId` in its record; docs in USAGE.md). Agents may
+read the same facts through the `pathways` RPC: the map, first path, owner actions, linked PR state and the retro
+summary. Draft decision on the page is the owner's own action; there is no agent tool for it. To build or change a map
+in Linear, follow the `pathways-linear` skill, and only with a Linear key the owner gave you for it.
+
 ## External fleet integration (opt-in; operator CLI)
 
 Worker spawning accepts `provider` as well as `model`; the default provider remains

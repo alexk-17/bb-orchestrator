@@ -427,6 +427,20 @@ export const scopeSchema = z.object({
 });
 export type Scope = z.infer<typeof scopeSchema>;
 
+export const pathwaysSchema = z.object({
+  error: z.string().nullable(),
+  map: z.object({
+    identifier: z.string(), title: z.string(), url: z.string(),
+    tickets: z.array(z.object({ identifier: z.string(), title: z.string(), url: z.string(), state: z.object({ type: z.string(), name: z.string() }), priority: z.number(), estimate: z.number().nullable(), type: z.string(), assignee: z.string().nullable(), unknown: z.array(z.string()), blockers: z.array(z.string()), displayState: z.enum(["done", "needs-you", "blocked", "claimed", "unknown", "ready"]), waitsOnYou: z.boolean(), readiness: z.object({ state: z.enum(["ready", "needs decision", "needs proof plan"]), reasons: z.array(z.string()), source: z.string() }), prLink: z.object({ state: z.enum(["missing", "linked", "ambiguous"]), urls: z.array(z.string()), source: z.enum(["attachment", "description", "both"]).nullable() }), pr: z.object({ url: z.string(), state: z.enum(["unavailable", "blocked", "ready", "merged"]), number: z.number().nullable(), title: z.string().nullable(), draft: z.boolean().nullable(), head: z.string().nullable(), createdAt: z.number().nullable(), headCommittedAt: z.number().nullable(), checksPendingSince: z.number().nullable(), reviews: z.array(z.object({ login: z.string(), state: z.string(), sha: z.string(), submittedAt: z.number().nullable() })), staleReviewDismissal: z.boolean().nullable(), requiredApprovals: z.number().nullable(), review: z.string(), checks: z.string(), mergeability: z.string(), reason: z.string(), retrievedAt: z.number() }).nullable(), proof: z.object({ state: z.enum(["unrecorded", "stale", "partial", "blocked", "verified"]), verifiedSha: z.string().nullable(), liveInterface: z.string().nullable(), qaPacketUrl: z.string().nullable(), missing: z.array(z.string()), sourceUrl: z.string().nullable(), sourceLabel: z.string().nullable(), observedAt: z.number().nullable() }).nullable(), waitLane: z.object({ head: z.string().nullable(), reviewFreshness: z.enum(["current", "stale", "older accepted", "unknown"]), steps: z.array(z.object({ kind: z.enum(["check run", "human review", "QA", "draft decision", "merge go"]), state: z.enum(["done", "pending", "blocked", "unknown"]), since: z.number().nullable(), owner: z.string().nullable(), note: z.string() })) }).nullable(), decisionDraft: z.object({ ticketId: z.string(), ticketUrl: z.string(), title: z.string(), question: z.string(), context: z.string(), options: z.array(z.object({ label: z.string(), detail: z.string() })), affected: z.array(z.string()) }).nullable(), decision: z.object({ state: z.enum(["missing", "ambiguous", "linked"]), cardId: z.string().nullable(), cardState: z.string().nullable(), title: z.string().nullable(), waiting: z.boolean(), direct: z.array(z.string()), transitive: z.array(z.string()) }), preflight: z.object({ state: z.enum(["not planned", "needs access", "unknown", "blocked", "declared"]), environment: z.string().nullable(), verifier: z.string().nullable(), ownerAction: z.string().nullable(), accessTicket: z.string().nullable(), gaps: z.array(z.string()), source: z.string() }) })),
+    external: z.array(z.object({ identifier: z.string(), title: z.string().optional(), url: z.string().optional(), state: z.object({ type: z.string() }) })),
+    edges: z.array(z.object({ from: z.string(), to: z.string(), type: z.enum(["blocks", "sub-issue", "related"]) })),
+    fog: z.array(z.string()), frontier: z.array(z.string()), claimed: z.array(z.string()), blocked: z.array(z.string()), firstPath: z.array(z.string()),
+    ownerActions: z.array(z.object({ identifier: z.string(), url: z.string(), action: z.string(), kind: z.enum(["sign-in", "permission", "approval", "other"]), affected: z.array(z.string()), next: z.string().nullable(), neededBefore: z.number().nullable(), onlyOpenBlocker: z.boolean() })),
+  }).nullable(),
+  retro: z.object({ finished: z.array(z.object({ label: z.string(), url: z.string(), prUrl: z.string().nullable() })), decisions: z.array(z.object({ id: z.string(), title: z.string() })), stalled: z.array(z.object({ label: z.string(), url: z.string(), kind: z.string(), durationMs: z.number() })), doc: z.string().nullable(), hostId: z.string().nullable() }).nullable(),
+});
+export type Pathways = z.infer<typeof pathwaysSchema>;
+
 // Every project in the sidebar's placing order (engine.projects()), with its accent type (none with pokemon off); the page
 // puts it in the viewer's own section order (core/project-order.ts).
 export const projectOrderSchema = z.array(z.object({ slug: z.string(), monType: z.string().nullable() }));
@@ -450,6 +464,7 @@ export const rpcContract = defineRpcContract({
   deliverableFolders: { input: z.null(), output: deliverableFoldersSchema },
   deliverables: { input: z.null(), output: deliverablesSchema },
   scope: { input: z.null(), output: scopeSchema },
+  pathways: { input: z.object({ slug: z.string().min(1).max(40), refresh: z.boolean().optional() }).strict(), output: pathwaysSchema },
   projectOrder: { input: z.null(), output: projectOrderSchema },
   // the chat log's read (1.10.0): one project's direct messages, newest first, only when the chat is open
   directHistory: { input: z.object({ slug: z.string().min(1).max(40), before: z.number().nullable().optional(), limit: z.number().int().min(1).max(100).optional() }).strict(), output: z.object({ messages: z.array(directMessageSchema), more: z.boolean() }) },
@@ -515,8 +530,11 @@ export const watchRetargetBody = z.object({ id: z.string().min(1).max(40), pr: z
 export const watchMoveBody = z.object({ id: z.string().min(1).max(40), to: z.string().min(1).max(120) }).strict();
 export const watchDropBody = z.object({ id: z.string().min(1).max(40) }).strict();
 
+export const pathwaysDecisionSubmitBody = z.object({ slug: z.string().min(1).max(40), ticketId: z.string().min(1).max(40), question: z.string().min(1).max(600), options: z.array(z.object({ label: z.string().min(1).max(80), detail: z.string().max(300) }).strict()).min(2).max(4) }).strict();
+
 export const WRITES = {
   answer: "/answer",
+  pathwaysDecision: "/pathways/decision",
   secret: "/secret",
   defer: "/defer",
   return: "/return",

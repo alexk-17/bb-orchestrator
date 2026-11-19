@@ -18,6 +18,15 @@ const reading = z.union([
     outcome: z.literal("available"),
     pullRequest: z.object({
       url: z.string(),
+      title: z.string().optional(),
+      draft: z.boolean().optional(),
+      sha: z.string().optional(),
+      headCommittedAt: z.number().optional(),
+      createdAt: z.number().optional(),
+      checksPendingSince: z.number().optional(),
+      reviews: z.array(z.object({ login: z.string(), state: z.string(), sha: z.string(), submittedAt: z.number().nullable() })).optional(),
+      staleReviewDismissal: z.boolean().nullable().optional(),
+      requiredApprovals: z.number().nullable().optional(),
       number: z.number().optional(),
       state: z.string(),
       attention: z.string().optional(),
@@ -47,4 +56,5 @@ export const prHostDefs = {
   },
   // one PR wait's PR, read by its URL (a PR no live environment shows)
   "prs.wait": { input: z.object({ url: z.string().regex(PR_URL_RE) }).strict(), output: reading, experimental_retryable: true },
+  "prs.pathways": { input: z.object({ url: z.string().regex(PR_URL_RE) }).strict(), output: reading, experimental_retryable: true },
 } as const;

@@ -5292,4 +5292,9 @@ export class Engine {
   decisions(limit = 100): Decision[] {
     return (this.db.prepare(`SELECT json FROM decisions ORDER BY id DESC LIMIT ?`).all(limit) as { json: string }[]).map((r) => JSON.parse(r.json));
   }
+
+  decisionByRequestKey(asker: string, key: string): Decision | null {
+    const row = this.db.prepare(`SELECT json FROM decisions WHERE asker = ? AND json_extract(json, '$.request_key') = ? AND state IN ('open','asked') ORDER BY id DESC LIMIT 1`).get(asker, key) as { json: string } | undefined;
+    return row ? JSON.parse(row.json) as Decision : null;
+  }
 }

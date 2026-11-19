@@ -209,6 +209,7 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
    * Throws when no machine answers: the caller then writes nothing and closes nothing.
    */
   const readWait = (url: string, signal?: AbortSignal): Promise<BbPrReading> => onHost((hostId) => host.call("prs.wait", { url }, { hostId, ...(signal ? { signal } : {}) }));
+  const readPathways = (url: string): Promise<BbPrReading> => onHost((hostId) => host.call("prs.pathways", { url }, { hostId }));
 
   // ---------------------------------------------------------------- Post (Slack)
   const poster = slackPoster(fetchImpl);
@@ -337,5 +338,5 @@ export function registerOpenPrs(bb: BbPluginApi, engine: Engine, settings: () =>
     await remember(login, section, prs);
     return null;
   };
-  return { readWait, post, copied };
+  return { readWait, readPathways, post, copied };
 }

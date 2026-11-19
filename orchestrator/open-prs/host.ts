@@ -93,4 +93,11 @@ export const prHandlers = {
   "prs.area": async ({ repo }: { repo: string }) => parseRepoArea(await codeowners(repo), await gh(ghArgs.merged(repo))),
   // one PR wait's own reading, by URL
   "prs.wait": async ({ url }: { url: string }): Promise<BbPrReading> => parseWaitReading(await gh(ghArgs.wait(url))),
+  "prs.pathways": async ({ url }: { url: string }): Promise<BbPrReading> => {
+    const data = await gh(ghArgs.pathwaysWait(url));
+    const base = data && typeof data === "object" && "baseRefName" in data && typeof data.baseRefName === "string" ? data.baseRefName : null;
+    const repo = new URL(url).pathname.split("/").slice(1, 3).join("/");
+    const rules = base ? await gh(ghArgs.rules(repo, base)).catch(() => null) : null;
+    return parseWaitReading(data, rules);
+  },
 };

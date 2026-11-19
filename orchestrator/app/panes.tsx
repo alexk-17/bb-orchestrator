@@ -21,7 +21,7 @@ function CountedLabel({ label, count }: { label: string; count?: number | string
   return (
     <span className="orch-tab-label" data-label={label} data-empty={text === "" || undefined}>
       <span className="orch-tab-name">{label}</span>
-      <Badge variant="secondary" className="orch-tab-count h-4 min-w-[calc(2ch+8px)] px-1 tabular-nums" data-empty={text === "" || undefined} aria-hidden={text === "" || undefined}>
+      <Badge variant="secondary" className="orch-tab-count h-4 min-w-[calc(2ch+8px)] px-1 tabular-nums" style={{ color: "var(--foreground)" }} data-empty={text === "" || undefined} aria-hidden={text === "" || undefined}>
         {text}
       </Badge>
     </span>

@@ -48,7 +48,7 @@ export function layers(nodes: readonly DNode[], edges: readonly DEdge[]): Map<st
 }
 
 /** The whole picture: boxes, arrows (an SVG path each, with where its label goes) and the canvas size. */
-export function layout(nodes: readonly DNode[], edges: readonly DEdge[], direction: "right" | "down", boxW = BOX_W): { boxes: Box[]; lines: Line[]; width: number; height: number } {
+export function layout(nodes: readonly DNode[], edges: readonly DEdge[], direction: "right" | "down", boxW = BOX_W, boxH = BOX_H, route: "curve" | "orthogonal" = "curve", layerGap = GAP_LAYER): { boxes: Box[]; lines: Line[]; width: number; height: number } {
   const BOX_W = boxW;
   const layer = layers(nodes, edges);
   const byLayer: DNode[][] = [];
@@ -59,10 +59,10 @@ export function layout(nodes: readonly DNode[], edges: readonly DEdge[], directi
   byLayer.forEach((col, li) => {
     col.forEach((n, i) => {
       // centre each layer on the widest one
-      const offset = ((across - col.length) * ((right ? BOX_H : BOX_W) + GAP_ROW)) / 2;
-      const along = PAD + li * ((right ? BOX_W : BOX_H) + GAP_LAYER);
-      const side = PAD + offset + i * ((right ? BOX_H : BOX_W) + GAP_ROW);
-      boxes.push({ ...n, layer: li, w: BOX_W, h: BOX_H, x: right ? along : side, y: right ? side : along });
+      const offset = ((across - col.length) * ((right ? boxH : BOX_W) + GAP_ROW)) / 2;
+      const along = PAD + li * ((right ? BOX_W : boxH) + layerGap);
+      const side = PAD + offset + i * ((right ? boxH : BOX_W) + GAP_ROW);
+      boxes.push({ ...n, layer: li, w: BOX_W, h: boxH, x: right ? along : side, y: right ? side : along });
     });
   });
   const at = new Map(boxes.map((b) => [b.id, b]));
@@ -75,7 +75,19 @@ export function layout(nodes: readonly DNode[], edges: readonly DEdge[], directi
     let path: string;
     let lx: number;
     let ly: number;
-    if (right) {
+    if (right && route === "orthogonal" && !back) {
+      const incoming = edges.filter((edge) => edge.to === e.to && at.has(edge.from)).sort((left, right) => at.get(left.from)!.y - at.get(right.from)!.y);
+      const outgoing = edges.filter((edge) => edge.from === e.from && at.has(edge.to)).sort((left, right) => at.get(left.to)!.y - at.get(right.to)!.y);
+      const x1 = a.x + a.w;
+      const y1 = a.y + ((outgoing.findIndex((edge) => edge.to === e.to) + 1) * a.h) / (outgoing.length + 1);
+      const x2 = b.x;
+      const y2 = b.y + ((incoming.findIndex((edge) => edge.from === e.from) + 1) * b.h) / (incoming.length + 1);
+      const lanes = edges.filter((edge) => at.get(edge.from)?.layer === a.layer && at.get(edge.to)?.layer === b.layer).sort((left, right) => at.get(left.from)!.y - at.get(right.from)!.y || at.get(left.to)!.y - at.get(right.to)!.y);
+      const bend = x1 + ((lanes.length - lanes.findIndex((edge) => edge.from === e.from && edge.to === e.to)) * (x2 - x1)) / (lanes.length + 1);
+      path = `M${x1},${y1} H${bend} V${y2} H${x2}`;
+      lx = bend;
+      ly = (y1 + y2) / 2;
+    } else if (right) {
       const [x1, y1] = back ? [a.x + a.w / 2, a.y + a.h] : [a.x + a.w, a.y + a.h / 2];
       const [x2, y2] = back ? [b.x + b.w / 2, b.y + b.h] : [b.x, b.y + b.h / 2];
       const bend = back ? Math.max(a.y + a.h, b.y + b.h) + 28 : 0;

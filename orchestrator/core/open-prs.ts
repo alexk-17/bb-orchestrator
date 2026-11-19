@@ -28,6 +28,7 @@ export const CODEOWNERS_PATHS = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEO
 
 /** One PR's state fields a wait reads (approved, green, ready, merged). */
 const WAIT_FIELDS = "url,number,state,isDraft,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus";
+const PATHWAYS_FIELDS = "url,number,title,state,isDraft,createdAt,baseRefName,headRefOid,commits,reviews,reviewDecision,statusCheckRollup,mergeable,mergeStateStatus";
 /** What the search can't return about an open PR: review, checks, merge state, branches, body. */
 // author and reviewRequests (2026-11-18): the review states read who wrote it and who was asked; gh pages reviews in full
 const VIEW_FIELDS = "url,body,isDraft,headRefName,headRefOid,baseRefName,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,reviews,author,reviewRequests";
@@ -64,6 +65,10 @@ export const ghArgs = {
   wait(url: string): string[] {
     must(PR_URL_RE.test(url), "pull request URL", url);
     return ["pr", "view", url, "--json", WAIT_FIELDS];
+  },
+  pathwaysWait(url: string): string[] {
+    must(PR_URL_RE.test(url), "pull request URL", url);
+    return ["pr", "view", url, "--json", PATHWAYS_FIELDS];
   },
   // The two `gh api` calls stay (agreed with the CoS): gh has no command that prints a file of a repo or a branch's
   // rules. Both are REST GETs with --method GET and no -f/-F fields (fields would switch gh to a POST).
@@ -237,6 +242,12 @@ export function parseRequired(data: Json): number | null {
   return counts.length ? Math.max(...counts) : null;
 }
 
+export function parseDismissStaleReviews(data: Json): boolean | null {
+  if (!Array.isArray(data)) return null;
+  const policies = data.map(obj).filter((rule) => rule.type === "pull_request").map((rule) => obj(rule.parameters).dismiss_stale_reviews_on_push).filter((value): value is boolean => typeof value === "boolean");
+  return policies.length ? policies.some(Boolean) : null;
+}
+
 /** `gh pr view <url> --json headRefOid,files`. */
 export function parsePrFiles(data: Json): { sha: string; files: string[] } {
   const pr = obj(data);
@@ -262,7 +273,7 @@ export function parseRepoArea(codeowners: string | null, merged: Json): RepoArea
 
 /** A bb PR-status reading (bb--github-pr-status pullRequests), as the engine reads it. */
 export type BbPrReading =
-  | { outcome: "available"; pullRequest: { url: string; number?: number; state: string; attention?: string; checks?: { state?: string }; review?: { state?: string }; mergeability?: { state?: string; mergeable?: string | null; mergeStateStatus?: string | null }; inMergeQueue?: boolean | null } }
+  | { outcome: "available"; pullRequest: { url: string; number?: number; title?: string; state: string; draft?: boolean; sha?: string; createdAt?: number; headCommittedAt?: number; checksPendingSince?: number; reviews?: { login: string; state: string; sha: string; submittedAt: number | null }[]; staleReviewDismissal?: boolean | null; requiredApprovals?: number | null; attention?: string; checks?: { state?: string }; review?: { state?: string }; mergeability?: { state?: string; mergeable?: string | null; mergeStateStatus?: string | null }; inMergeQueue?: boolean | null } }
   | { outcome: "absent" }
   | { outcome: "unavailable"; message?: string };
 
@@ -292,7 +303,7 @@ function bbMerge(mergeable: string | null, mergeState: string | null): string {
 }
 
 /** `gh pr view <url> --json WAIT_FIELDS` as a bb reading; anything that isn't a PR reading is unavailable. */
-export function parseWaitReading(data: Json): BbPrReading {
+export function parseWaitReading(data: Json, branchRules: Json = null): BbPrReading {
   const n = obj(data);
   const url = str(n.url)?.replace(/\/+$/, "") ?? "";
   const state = str(n.state);
@@ -304,11 +315,25 @@ export function parseWaitReading(data: Json): BbPrReading {
   const mergeable = enumOf(n.mergeable);
   const mergeState = enumOf(n.mergeStateStatus);
   const merge = draft ? "draft" : bbMerge(mergeable, mergeState); // a draft is never ready to merge
+  const headCommit = arr(n.commits).map(obj).find((commit) => str(commit.oid) === str(n.headRefOid));
+  const committedAt = headCommit && str(headCommit.committedDate) ? Date.parse(str(headCommit.committedDate)!) : NaN;
+  const createdAt = str(n.createdAt) ? Date.parse(str(n.createdAt)!) : NaN;
+  const pendingStarts = arr(n.statusCheckRollup).map(obj).filter((check) => checkOf(check) === "pending").map((check) => str(check.startedAt) ?? str(check.createdAt)).map((date) => date ? Date.parse(date) : NaN).filter(Number.isFinite);
+  const reviews = arr(n.reviews).map(obj).map((item) => ({ login: str(obj(item.author).login), state: str(item.state), sha: str(obj(item.commit).oid), submittedAt: str(item.submittedAt) ? Date.parse(str(item.submittedAt)!) : NaN })).filter((item): item is { login: string; state: string; sha: string | null; submittedAt: number } => !!item.login && !!item.state && !isBot(item.login) && Number.isFinite(item.submittedAt)).map((item) => ({ login: item.login, state: item.state, sha: item.sha ?? "", submittedAt: item.submittedAt }));
   return {
     outcome: "available",
     pullRequest: {
       url,
+      ...(str(n.headRefOid) ? { sha: str(n.headRefOid)! } : {}),
+      ...(Number.isFinite(committedAt) ? { headCommittedAt: committedAt } : {}),
+      ...(Number.isFinite(createdAt) ? { createdAt } : {}),
+      ...(pendingStarts.length ? { checksPendingSince: Math.min(...pendingStarts) } : {}),
+      reviews,
+      staleReviewDismissal: parseDismissStaleReviews(branchRules),
+      requiredApprovals: parseRequired(branchRules),
       ...(typeof n.number === "number" ? { number: n.number } : {}),
+      ...(str(n.title) ? { title: str(n.title)! } : {}),
+      ...(typeof n.isDraft === "boolean" ? { draft: n.isDraft } : {}),
       state: bbState,
       attention: merge,
       checks: rollup ? { state: BB_CHECKS[rollup]! } : {},
