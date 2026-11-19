@@ -1398,25 +1398,27 @@ function PathwaysSection({ slug }: { slug: string }) {
           )}
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <Checkbox
-              id={`pathways-hide-done-${slug}`}
-              checked={hideDone}
-              onCheckedChange={(value) => {
-                const checked = value === true;
-                setHideDone(checked);
-                try {
-                  localStorage.setItem(
-                    `pathways:hide-done:${slug}`,
-                    String(checked),
-                  );
-                } catch {}
-              }}
-            />
-            <Label htmlFor={`pathways-hide-done-${slug}`} className="text-xs">
-              Hide done
-            </Label>
-          </div>
+          {map && (
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id={`pathways-hide-done-${slug}`}
+                checked={hideDone}
+                onCheckedChange={(value) => {
+                  const checked = value === true;
+                  setHideDone(checked);
+                  try {
+                    localStorage.setItem(
+                      `pathways:hide-done:${slug}`,
+                      String(checked),
+                    );
+                  } catch {}
+                }}
+              />
+              <Label htmlFor={`pathways-hide-done-${slug}`} className="text-xs">
+                Hide done
+              </Label>
+            </div>
+          )}
           <Button
             variant="secondary"
             size="sm"
@@ -1442,21 +1444,24 @@ function PathwaysSection({ slug }: { slug: string }) {
           </AlertDescription>
         </Alert>
       ) : q.data?.error && !map ? (
-        <Empty>
+        <Empty className="border border-destructive/40 bg-destructive/5" data-pathways-error="">
           <EmptyHeader>
+            <Badge variant="destructive">Error</Badge>
             <EmptyTitle>
-              {q.data.error.includes("linearApiKey")
-                ? "Linear authentication failed"
-                : q.data.error.includes("rate limit")
-                  ? "Linear rate limit reached"
-                  : q.data.error.includes("timed out")
-                    ? "Linear request timed out"
-                : q.data.error.includes("linearProjectId") ||
-                    q.data.error.includes("Linear project link")
-                  ? "No Linear map linked"
-                  : "Pathways unavailable"}
+              {q.data.error.includes("Invalid JSON")
+                ? "Project record is invalid"
+                : q.data.error.includes("linearApiKey")
+                  ? "Linear authentication failed"
+                  : q.data.error.includes("rate limit")
+                    ? "Linear rate limit reached"
+                    : q.data.error.includes("timed out")
+                      ? "Linear request timed out"
+                      : q.data.error.includes("linearProjectId") ||
+                          q.data.error.includes("Linear project link")
+                        ? "No Linear map linked"
+                        : "Pathways unavailable"}
             </EmptyTitle>
-            <EmptyDescription>{q.data.error}</EmptyDescription>
+            <EmptyDescription className="max-w-xl [overflow-wrap:anywhere]">{q.data.error}</EmptyDescription>
           </EmptyHeader>
         </Empty>
       ) : !map || !graph ? (

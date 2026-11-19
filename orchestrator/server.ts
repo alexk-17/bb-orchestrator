@@ -2177,11 +2177,16 @@ export default async function plugin(bb: BbPluginApi) {
       const recordPath = join(projectsDir(), slug, projectRecord());
       if (existsSync(recordPath)) {
         try {
-          const record = JSON.parse(readFileSync(recordPath, "utf8")) as { linearProjectId?: unknown; linearMapIssue?: unknown };
+          const parsed = JSON.parse(readFileSync(recordPath, "utf8")) as unknown;
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            return failure(`Invalid JSON in projects/${slug}/${projectRecord()}: expected a JSON object. Fix the file, then click Refresh.`);
+          }
+          const record = parsed as { linearProjectId?: unknown; linearMapIssue?: unknown };
           linearProjectId = typeof record.linearProjectId === "string" ? record.linearProjectId.trim() : undefined;
           linearMapIssue = typeof record.linearMapIssue === "string" ? record.linearMapIssue.trim() : undefined;
-        } catch {
-          return failure("Set the Pathways Linear project link in this project's record.");
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          return failure(`Invalid JSON in projects/${slug}/${projectRecord()}: ${detail}. Fix the JSON syntax, then click Refresh.`);
         }
       }
       if (!apiKey || !linearProjectId) {

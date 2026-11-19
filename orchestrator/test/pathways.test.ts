@@ -241,7 +241,8 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
     writeFileSync(join(root, "projects", "empty", "project.json"), "{bad-json");
     const badRecord = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "empty", refresh: true }));
     assert.equal(badRecord.map, null);
-    assert.match(badRecord.error ?? "", /Linear project link/);
+    assert.match(badRecord.error ?? "", /Invalid JSON/);
+    assert.match(badRecord.error ?? "", /projects\/empty\/project\.json/);
 
     db.close();
   } finally {
