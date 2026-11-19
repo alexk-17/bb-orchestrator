@@ -237,6 +237,29 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
       const serverErr = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
       assert.match(serverErr.error ?? "", /server error/i);
       assert.match(serverErr.error ?? "", /500/);
+      globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { query?: string; variables?: { id?: string } };
+        if (body.query?.includes("project(id:")) {
+          return new Response(JSON.stringify({ data: { project: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+            { identifier: "LIN-1", parent: null, labels: { nodes: [{ name: "wayfinder:map" }] } },
+            { identifier: "LIN-2", parent: { identifier: "LIN-1" }, labels: { nodes: [{ name: "wayfinder:task" }] } },
+          ] } } } }), { status: 200 });
+        }
+        const id = body.variables?.id ?? "LIN-1";
+        return new Response(JSON.stringify({ data: { issue: {
+          identifier: id, title: id === "LIN-1" ? "Linear Map" : "Linear Ticket", url: `https://linear.app/test/issue/${id}`,
+          description: "## Acceptance criteria\nDone.", updatedAt: "2026-11-19T20:00:00.000Z",
+          state: { type: "unstarted", name: "Todo" }, priority: 2, estimate: 1, assignee: null,
+          labels: { nodes: [{ name: id === "LIN-1" ? "wayfinder:map" : "wayfinder:task" }] },
+          parent: id === "LIN-1" ? null : { identifier: "LIN-1" },
+          attachments: { nodes: [] }, relations: { nodes: [] }, inverseRelations: { nodes: [] },
+        } } }), { status: 200 });
+      }) as typeof fetch;
+      const linearLive = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+      assert.equal(linearLive.map?.identifier, "LIN-1");
+      writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha" }));
+      const switchedToLocal = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: false }));
+      assert.equal(switchedToLocal.map?.source, "orchestrator");
     } finally {
       globalThis.fetch = realFetch;
       writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha" }));

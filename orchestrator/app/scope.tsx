@@ -1377,7 +1377,12 @@ function PathwaysSection({ slug }: { slug: string }) {
     >
       <style>{`@keyframes pathways-flow { to { stroke-dashoffset: -20; } } @media (prefers-reduced-motion: no-preference) { [data-pathways] .pathways-flow { animation: pathways-flow 1s linear infinite; } }`}</style>
       <div className="flex items-center justify-between gap-3">
-        <div className="min-w-0 [overflow-wrap:anywhere]">
+        <div className="flex min-w-0 flex-wrap items-center gap-2 [overflow-wrap:anywhere]">
+          {map && (
+            <Badge variant="outline" className="shrink-0 text-[11px]" data-pathways-source-badge="">
+              {map.source === "orchestrator" ? "Local" : "Linear"}
+            </Badge>
+          )}
           {map && (
             <PathwaysLink
               href={map.source === "orchestrator" ? null : map.url}

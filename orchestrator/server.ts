@@ -2230,7 +2230,8 @@ export default async function plugin(bb: BbPluginApi) {
           const notice = linearProjectId && !apiKey ? "Linear project is linked (linearProjectId is set), but linearApiKey is unset in Orchestrator plugin settings. Showing the local map until you set linearApiKey and refresh." : null;
           return { error: null, notice, map, retro: null };
         };
-        return pathwaysSnapshots.view(slug, refresh ?? false, readLocal);
+        const localKey = `local:${linearProjectId ? "unkeyed" : "direct"}`;
+        return pathwaysSnapshots.view(slug, refresh ?? false, readLocal, localKey);
       }
       const read = async (): Promise<Pathways> => { try {
         const request = async <T,>(query: string, id: string, after: string | null = null): Promise<T> => {
@@ -2303,7 +2304,8 @@ export default async function plugin(bb: BbPluginApi) {
         const reason = /^HTTP \d+$/.test(msg) || msg === "GraphQL error" ? msg : "network error";
         return failure(`Pathways Linear request failed: ${reason}. Check the connection and try Refresh.`);
       } };
-      return pathwaysSnapshots.view(slug, refresh ?? false, read);
+      const linearKey = `linear:${linearProjectId}:${linearMapIssue ?? ""}`;
+      return pathwaysSnapshots.view(slug, refresh ?? false, read, linearKey);
     },
     directHistory({ slug, before, limit }) {
       return engine.directHistory(slug, before ?? null, limit ?? 30);
