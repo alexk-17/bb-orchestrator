@@ -274,8 +274,8 @@ what stands in the way". Every project card on Projects has a **Pathways** butto
 tab's picker remembers the last one. Hide the tab with `hiddenTabs: pathways`.
 
 - **Setup:** set `linearApiKey` (a Linear personal API key, stored as a secret) in the plugin settings, then set
-  `linearProjectId` in the project's `project.json` to its Linear project ID. Until both are set, the tab says which is
-  missing. Set `linearMapIssue` to an issue identifier such as `ENG-123` to use an existing map issue in that project,
+  `linearProjectId` in the project's `project.json` to its Linear project ID. When either is unset, Pathways builds a
+  local what's-next map from the project's lead status steps, active threads, open decision cards and open PRs. Set `linearMapIssue` to an issue identifier such as `ENG-123` to use an existing map issue in that project,
   regardless of its labels. Without it, Pathways looks for the `wayfinder:map` label.
 - **The map:** one Linear issue labelled `wayfinder:map` and its sub-issues, drawn as a graph with blockers as edges, the
   first path numbered, and a What's next column (First path, Needs you, Claimed, Blocked on, Open questions). Click a

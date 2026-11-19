@@ -14,6 +14,7 @@ import { approveBody, type DeliverableFolders, type Deliverables, PROOF_ROUTE, t
 import { projectIssues, pathwaysMap, linkPathwaysDecisions, attachPathwaysPreflight, draftPathwaysDecision, summarizePathwaysRetro, pathwaysDecisionKey, submitPathwaysDecision, mapPathwaysLimited, selectPathwaysMap, type PathwaysIssue } from "./core/pathways.ts";
 import { collectPathwaysProofRecords, reducePathwaysPr, reducePathwaysProof, reducePathwaysWaitLane } from "./core/pathways-pr.ts";
 import { createPathwaysSnapshots, type PathwaysSnapshot, type PathwaysView } from "./core/pathways-snapshot.ts";
+import { localPathwaysMap } from "./core/pathways-local.ts";
 import { type DeliverPlace, type OutputPlace, type ProofInput, SCOPING_SUMMARY_MAX, SCOPING_TASK_NAME_MAX, SECRET_TTL_MS } from "./core/engine.ts";
 import { deliverBlocks, deliverPoints, fromJson, inputBlocksSchema, lessTextRefusal, looksLikeCode } from "./blocks.ts";
 import { CARD_CAPS, DELIVER_BUDGET, deliverBudgetRefusal } from "./core/caps.ts";
@@ -2169,19 +2170,75 @@ export default async function plugin(bb: BbPluginApi) {
     },
     async pathways({ slug, refresh }): Promise<PathwaysView> {
       const failure = (error: string): PathwaysView => ({ error, map: null, retro: null, fetchedAt: null, refreshing: false });
-      const apiKey = cfg.linearApiKey?.trim();
-      if (!apiKey) return failure("Set the Pathways Linear API key in Orchestrator plugin settings.");
       if (!engine.project(slug)) return failure("Pathways project not found.");
+      const apiKey = cfg.linearApiKey?.trim();
       let linearProjectId: string | undefined;
       let linearMapIssue: string | undefined;
       try {
         const record = JSON.parse(readFileSync(join(projectsDir(), slug, projectRecord()), "utf8")) as { linearProjectId?: unknown; linearMapIssue?: unknown };
         linearProjectId = typeof record.linearProjectId === "string" ? record.linearProjectId.trim() : undefined;
         linearMapIssue = typeof record.linearMapIssue === "string" ? record.linearMapIssue.trim() : undefined;
-      } catch {
-        return failure("Set the Pathways Linear project link in this project's record.");
+      } catch {}
+      if (!apiKey || !linearProjectId) {
+        const readLocal = async (): Promise<Pathways> => {
+          const now = Date.now();
+          const status = engine.leadStatus(slug);
+          const rawThreads = engine.agents().filter((a) => a.role === "thread" && a.project === slug && a.status !== "archived");
+          const extraPrs: { url: string; number: number; state: string; checks: string | null; review: string | null; attention: string | null; seenAt?: number }[] = [];
+          const threads = await mapPathwaysLimited(rawThreads, 8, async (a) => {
+            const info = (await bb.sdk.threads.get({ threadId: a.threadId }).catch(() => null)) as { title?: string | null; status?: string | null } | null;
+            const pr = engine.prFor(a.environmentId);
+            if (pr?.url && pr.number != null) {
+              extraPrs.push({ url: pr.url, number: pr.number, state: pr.state ?? "open", checks: pr.checks, review: pr.review, attention: pr.attention, seenAt: pr.seenAt });
+            }
+            return {
+              address: a.address,
+              threadId: a.threadId,
+              title: info?.title?.trim() || engine.lastReport(a.address)?.split("\n")[0]?.trim() || a.address,
+              status: info?.status?.trim() || a.status,
+              prUrls: pr?.url && (pr.state === "open" || pr.state === "draft") ? [pr.url] : [],
+            };
+          });
+          const decisions = engine.decisions(5000).filter((decision) => decision.project === slug);
+          const known = engine.knownPrs().filter((p) => p.project === slug);
+          const prs = [...known, ...extraPrs];
+          const deliverables = engine.deliverables().filter((deliverable) => deliverable.project === slug);
+          const waits = engine.openWaits();
+          const map = localPathwaysMap({
+            slug,
+            status,
+            threads,
+            decisions: decisions.map((decision) => ({
+              id: decision.id,
+              state: decision.state,
+              title: decision.ask?.title ?? decision.request.title,
+              question: decision.ask?.question ?? decision.request.question,
+              action: decision.orchestrator.action,
+              createdAt: decision.created_at,
+              prUrls: (decision.request.blocks ?? []).flatMap((block) => (block.kind === "pr" ? [block.url] : [])),
+            })),
+            prs,
+            deliverables,
+            waits,
+            now,
+          });
+          const retroLibrary = join(projectsDir(), slug, "library");
+          let retroDoc: string | null = null;
+          if (existsSync(retroLibrary)) retroDoc = readdirSync(retroLibrary).filter((name) => /retro/i.test(name) && /\.md$/i.test(name)).sort()[0] ?? null;
+          const summary = summarizePathwaysRetro(map, decisions.map((decision) => ({ id: decision.id, title: decision.request.title, state: decision.state })), now);
+          const mergedSeen = new Set(summary.mergedPrs.map((item) => item.url.replace(/\/+$/, "").toLowerCase()));
+          for (const pr of prs) {
+            if (pr.state !== "merged") continue;
+            const key = pr.url.replace(/\/+$/, "").toLowerCase();
+            if (mergedSeen.has(key)) continue;
+            mergedSeen.add(key);
+            summary.mergedPrs.push({ ticket: `PR-${pr.number}`, url: pr.url });
+          }
+          const retro = { ...summary, doc: retroDoc ? join(retroLibrary, retroDoc) : null, hostId: retroDoc ? await onlyHost().catch(() => null) : null };
+          return { error: null, map, retro };
+        };
+        return pathwaysSnapshots.view(slug, refresh ?? false, readLocal);
       }
-      if (!linearProjectId) return failure("Set linearProjectId in this project's record for Pathways.");
       const read = async (): Promise<Pathways> => { try {
         const request = async <T,>(query: string, id: string, after: string | null = null): Promise<T> => {
           const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables: { id, after } }) });
@@ -2367,7 +2424,9 @@ export default async function plugin(bb: BbPluginApi) {
     const prior = engine.decisionByRequestKey(lead.address, pathwaysDecisionKey(b.ticketId, b.question));
     if (prior) return prior.id;
     const project = engine.project(b.slug);
-    const ticket = pathwaysSnapshots.peek(b.slug)?.value.map?.tickets.find((item) => item.identifier === b.ticketId);
+    const snapshotMap = pathwaysSnapshots.peek(b.slug)?.value.map;
+    if (snapshotMap?.source === "orchestrator") throw new EngineError("bad_state", "Decision drafts are only supported for Linear maps");
+    const ticket = snapshotMap?.tickets.find((item) => item.identifier === b.ticketId);
     if (!project || !ticket) throw new EngineError("not_found", "Project or ticket not found; refresh Pathways");
     if (ticket.readiness.state !== "needs decision" && ticket.displayState !== "blocked") throw new EngineError("bad_state", "Ticket has no recorded decision blocker");
     const draft = draftPathwaysDecision(ticket);

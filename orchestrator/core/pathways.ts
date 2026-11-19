@@ -45,7 +45,7 @@ export type PathwaysTicket = Pick<PathwaysIssue, "identifier" | "title" | "url" 
   decision: PathwaysDecision;
   preflight: PathwaysPreflight;
 };
-export type PathwaysMap = { identifier: string; title: string; url: string; tickets: PathwaysTicket[]; external: PathwaysRelationIssue[]; edges: PathwaysEdge[]; fog: string[]; frontier: string[]; claimed: string[]; blocked: string[]; firstPath: string[]; ownerActions: PathwaysOwnerAction[] };
+export type PathwaysMap = { identifier: string; title: string; url: string; source?: "linear" | "orchestrator"; tickets: PathwaysTicket[]; external: PathwaysRelationIssue[]; edges: PathwaysEdge[]; fog: string[]; frontier: string[]; claimed: string[]; blocked: string[]; firstPath: string[]; ownerActions: PathwaysOwnerAction[] };
 
 export function summarizePathwaysRetro(map: PathwaysMap, decisions: { id: string; title: string; state: string }[], now: number) {
   const finished = map.tickets.filter((ticket) => ticket.state.type === "completed").map((ticket) => ({ label: ticket.identifier, url: ticket.url, prUrl: ticket.prs.find((entry) => entry.pr.state === "merged")?.pr.url ?? (ticket.pr?.state === "merged" ? ticket.pr.url : null) }));

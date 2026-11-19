@@ -1,10 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Engine } from "../core/engine.ts";
 import { attachPathwaysPreflight, fogBullets, linkPathwaysDecisions, mapPathwaysLimited, pathwaysMap, projectIssues, selectPathwaysMap, summarizePathwaysRetro, type PathwaysIssue } from "../core/pathways.ts";
 import { createPathwaysSnapshots, type PathwaysSnapshot } from "../core/pathways-snapshot.ts";
-import type { Pathways } from "../contract.ts";
+import { pathwaysViewSchema, type Pathways } from "../contract.ts";
+import plugin from "../server.ts";
 
 test("Pathways detail reads cap concurrency and preserve order; the last map is served while a refresh runs", async () => {
   let active = 0;
@@ -64,6 +68,137 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
   assert.equal(loads, loadsAfterFailure, "a failed refresh is not retried by polling until the cache age passes");
   assert.equal(polled.refreshing, false);
   assert.match(polled.error ?? "", /HTTP 500/);
+
+  const root = mkdtempSync(join(tmpdir(), "orch-pathways-local-"));
+  try {
+    mkdirSync(join(root, "projects", "alpha"), { recursive: true });
+    mkdirSync(join(root, "projects", "empty"), { recursive: true });
+    writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha" }));
+    const db = Object.assign(new DatabaseSync(join(root, "data.db")), { name: join(root, "data.db") });
+    const engine = new Engine(db as never, { now: () => 10_000, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} });
+    const cos = engine.register("T-cos", "cos", null);
+    const leadAlpha = engine.register("T-lead-alpha", "lead", "alpha");
+    engine.register("T-lead-empty", "lead", "empty");
+    const thr1 = engine.register("T-thr-1", "thread", "alpha", leadAlpha.threadId);
+    engine.setStatus(thr1.threadId, "active");
+    engine.setEnvironment(thr1.threadId, "env-thr-1");
+    const thr2 = engine.register("T-thr-2", "thread", "alpha", leadAlpha.threadId);
+    engine.setStatus(thr2.threadId, "archived");
+    engine.setEnvironment(leadAlpha.threadId, "env-lead-alpha");
+    engine.publishStatus(leadAlpha, {
+      goal: "Ship alpha",
+      steps: [
+        { title: "Design API", state: "done" },
+        { title: "Skip old spike", state: "skipped" },
+        { title: "Build worker", state: "current" },
+        { title: "Run QA", state: "next" },
+        { title: "Release", state: "next" },
+      ],
+      blockers: ["Waiting on staging key"],
+    });
+    const openCard = engine.ask(leadAlpha, { title: "Approve staging deploy", question: "May we deploy to staging?", options: [{ label: "Yes" }, { label: "No" }] });
+    engine.triageAskPerson(cos, openCard.id, { title: "Approve staging deploy", question: "May we deploy to staging?", options: [{ label: "Yes" }, { label: "No" }], allowText: true });
+    const answeredCard = engine.ask(leadAlpha, { title: "Pick storage", question: "SQLite or Postgres?", options: [{ label: "SQLite" }, { label: "Postgres" }] });
+    engine.triageAskPerson(cos, answeredCard.id, { title: "Pick storage", question: "SQLite or Postgres?", options: [{ label: "SQLite" }, { label: "Postgres" }], allowText: true });
+    const askedAnswered = engine.decision(answeredCard.id)!;
+    engine.personAnswer(answeredCard.id, askedAnswered.rev, askedAnswered.ask!.options[0]!.id, null, "desktop");
+    engine.prSeen(thr1, "env-thr-1", { outcome: "available", pullRequest: { number: 42, url: "https://github.com/acme/alpha/pull/42", state: "open", review: { state: "review_required" }, checks: { state: "passing" }, mergeability: { state: "ready_to_merge" } } });
+    engine.prSeen(leadAlpha, "env-lead-alpha", { outcome: "available", pullRequest: { number: 43, url: "https://github.com/acme/alpha/pull/43", state: "open", review: { state: "approved" }, checks: { state: "passing" }, mergeability: { state: "ready_to_merge" } } });
+
+    const boot = async (linearApiKey: string) => {
+      const rpc: Record<string, (input: unknown) => Promise<unknown>> = {};
+      const noop: any = new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : noop), apply: () => noop });
+      const sdk = (path: string[]): any =>
+        new Proxy(function () {}, {
+          get: (_t, k) => (k === "then" ? undefined : sdk([...path, String(k)])),
+          apply: (_t, _this, args: any[]) => {
+            if (path.join(".") === "threads.get") {
+              if (args[0]?.threadId === "T-thr-1") return Promise.resolve({ title: "Worker implementation", status: "active" });
+              return Promise.resolve({ title: null, status: "idle" });
+            }
+            return Promise.resolve({});
+          },
+        });
+      const bb: any = new Proxy(
+        {},
+        {
+          get(_t, k) {
+            if (k === "pluginId") return "orchestrator";
+            if (k === "settings")
+              return {
+                define: (schema: Record<string, { default: unknown }>) => {
+                  const v: any = Object.fromEntries(Object.entries(schema).map(([key, d]) => [key, d.default]));
+                  Object.assign(v, { stateDir: join(root, "state"), projectsDir: join(root, "projects"), memoryConfig: "", diskPath: root, linearApiKey });
+                  return { get: async () => v, onChange: () => {} };
+                },
+              };
+            if (k === "storage") return { database: () => db, kv: noop };
+            if (k === "sdk") return sdk([]);
+            if (k === "rpc") return { register: (_c: unknown, h: typeof rpc) => Object.assign(rpc, h) };
+            if (k === "log") return { info: () => {}, warn: () => {}, error: () => {} };
+            return noop;
+          },
+        },
+      );
+      await plugin(bb);
+      return rpc.pathways as (input: { slug: string; refresh?: boolean }) => Promise<ReturnType<typeof pathwaysViewSchema.parse>>;
+    };
+
+    const callNoKey = await boot("");
+    const local = pathwaysViewSchema.parse(await callNoKey({ slug: "alpha" }));
+    assert.equal(local.error, null);
+    assert.ok(local.map);
+    assert.equal(local.map.source, "orchestrator");
+    assert.ok(local.fetchedAt != null);
+    assert.equal(local.refreshing, false);
+    const byId = new Map(local.map.tickets.map((t) => [t.identifier, t]));
+    assert.equal(byId.get("STEP-1")?.displayState, "done");
+    assert.equal(byId.has("STEP-2"), false);
+    assert.equal(byId.get("STEP-3")?.displayState, "claimed");
+    assert.equal(byId.get("STEP-3")?.waitsOnYou, true);
+    assert.equal(byId.get("STEP-4")?.displayState, "ready");
+    assert.equal(byId.get("STEP-5")?.displayState, "blocked");
+    assert.equal(byId.has("THR-1"), true);
+    assert.match(byId.get("THR-1")!.title, /Worker implementation/);
+    assert.match(byId.get("THR-1")!.title, /active/);
+    assert.equal(byId.has("THR-2"), false);
+    assert.deepEqual(byId.get("THR-1")?.prLink.urls, ["https://github.com/acme/alpha/pull/42"]);
+    assert.deepEqual(byId.get("STEP-3")?.prLink.urls, ["https://github.com/acme/alpha/pull/43"]);
+    const cardTicket = local.map.tickets.find((t) => t.identifier.startsWith("CARD-"));
+    assert.ok(cardTicket);
+    assert.equal(cardTicket.displayState, "needs-you");
+    assert.equal(cardTicket.decision.cardId, openCard.id);
+    assert.ok(local.map.edges.some((e) => e.from === "STEP-1" && e.to === "STEP-3" && e.type === "blocks"));
+    assert.ok(local.map.edges.some((e) => e.from === "STEP-3" && e.to === "STEP-4" && e.type === "blocks"));
+    assert.ok(local.map.edges.some((e) => e.from === "STEP-4" && e.to === "STEP-5" && e.type === "blocks"));
+    assert.ok(local.map.edges.some((e) => e.from === cardTicket.identifier && e.to === "STEP-3" && e.type === "blocks"));
+    assert.ok(local.map.edges.some((e) => e.from === "STEP-3" && e.to === "THR-1" && e.type === "related"));
+    assert.deepEqual(local.map.firstPath, [cardTicket.identifier, "STEP-3", "STEP-4", "STEP-5"]);
+    assert.equal(local.map.ownerActions.length, 1);
+    assert.equal(local.map.ownerActions[0]?.identifier, cardTicket.identifier);
+    assert.equal(local.map.ownerActions[0]?.next, "STEP-3");
+    assert.deepEqual(local.map.fog, ["Waiting on staging key"]);
+    assert.ok(local.map.tickets.every((t) => t.decisionDraft === null));
+    assert.deepEqual(local.retro?.decisions.map((d) => d.id), [answeredCard.id]);
+
+    const emptyView = pathwaysViewSchema.parse(await callNoKey({ slug: "empty" }));
+    assert.equal(emptyView.error, null);
+    assert.ok(emptyView.map);
+    assert.equal(emptyView.map.source, "orchestrator");
+    assert.deepEqual(emptyView.map.tickets, []);
+    assert.deepEqual(emptyView.map.edges, []);
+    assert.deepEqual(emptyView.map.firstPath, []);
+
+    const callWithKeyNoLink = await boot("lin_api_test");
+    const noLink = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+    assert.equal(noLink.error, null);
+    assert.equal(noLink.map?.source, "orchestrator");
+    assert.deepEqual(noLink.map?.firstPath, [cardTicket.identifier, "STEP-3", "STEP-4", "STEP-5"]);
+
+    db.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("a withdrawn Pathways card does not satisfy a later submit with the same key", () => {

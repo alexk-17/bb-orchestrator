@@ -146,6 +146,7 @@ of labels; otherwise Pathways uses the `wayfinder:map` label. Each ticket shows 
 Linear attachments or description, with separate state, proof and wait lane. Merged and closed PRs leave the forward
 view. The page never writes to Linear; the included [pathways-linear skill](orchestrator/skills/pathways-linear/SKILL.md)
 tells agents how to build and update a map in Linear with a key you give them.
+Projects without a Linear API key or `linearProjectId` still show a local what's-next map built from the project's lead status steps, active threads, open decision cards and open PRs.
 Wheel or pinch to zoom the map, drag to pan, and use +, −, or Fit to reset its view.
 
 ### The Cloud tab

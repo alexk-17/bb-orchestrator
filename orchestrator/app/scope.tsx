@@ -475,7 +475,7 @@ function PathwaysDecisionPreview({
       ? ids.map((id, index) => (
           <span key={id}>
             {index > 0 && ", "}
-            {tickets.get(id) ? (
+            {tickets.get(id)?.url ? (
               <a
                 href={tickets.get(id)!.url}
                 target="_blank"
@@ -1291,7 +1291,7 @@ function PathwaysSection({ slug }: { slug: string }) {
       )
         ? "External blocker"
         : "",
-      ticket.estimate == null ? "No estimate" : "",
+      map?.source !== "orchestrator" && ticket.estimate == null ? "No estimate" : "",
       ...ticket.unknown,
       ticketFact(ticket),
     ]
@@ -1306,16 +1306,26 @@ function PathwaysSection({ slug }: { slug: string }) {
       <style>{`@keyframes pathways-flow { to { stroke-dashoffset: -20; } } @media (prefers-reduced-motion: no-preference) { [data-pathways] .pathways-flow { animation: pathways-flow 1s linear infinite; } }`}</style>
       <div className="flex items-center justify-between gap-3">
         <div>
-          {map && (
-            <a
-              href={map.url}
-              target="_blank"
-              rel="noreferrer"
-              className="text-xs text-muted-foreground"
-            >
-              <span className="font-mono">{map.identifier}</span> · {map.title}
-            </a>
-          )}
+          {map &&
+            (map.source === "orchestrator" ? (
+              <span
+                className="text-xs text-muted-foreground"
+                data-pathways-source="orchestrator"
+              >
+                <span className="font-mono">{map.identifier}</span> · Built from
+                this project's plan, threads and cards
+              </span>
+            ) : (
+              <a
+                href={map.url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs text-muted-foreground"
+              >
+                <span className="font-mono">{map.identifier}</span> ·{" "}
+                {map.title}
+              </a>
+            ))}
         </div>
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
@@ -1375,6 +1385,17 @@ function PathwaysSection({ slug }: { slug: string }) {
         </Empty>
       ) : !map || !graph ? (
         <Skeleton className="mt-3 h-80 w-full" />
+      ) : map.source === "orchestrator" && !map.tickets.length ? (
+        <Empty data-pathways-empty="">
+          <EmptyHeader>
+            <EmptyTitle>No plan or active work yet</EmptyTitle>
+            <EmptyDescription>
+              Built from this project's plan, threads and cards. Publish a lead
+              status, start a thread, open a PR, or raise a decision card to see
+              what&apos;s next here.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
       ) : (
         <>
           {q.data?.error && (
@@ -1402,9 +1423,10 @@ function PathwaysSection({ slug }: { slug: string }) {
                         ? "start"
                         : "resolve scope for"}{" "}
                     {pathHead.identifier}.
-                    {needsYouNow && (
-                      <> In parallel, complete {needsYouNow.identifier}.</>
-                    )}
+                    {needsYouNow &&
+                      needsYouNow.identifier !== pathHead.identifier && (
+                        <> In parallel, complete {needsYouNow.identifier}.</>
+                      )}
                   </>
                 )}
                 {visible.some(
@@ -1826,7 +1848,8 @@ function PathwaysSection({ slug }: { slug: string }) {
               <div className="flex items-baseline justify-between">
                 <h4 className="m-0 text-base font-semibold">What’s next</h4>
                 <span className="text-xs text-muted-foreground">
-                  {visible.length} tickets
+                  {visible.length}{" "}
+                  {map.source === "orchestrator" ? "items" : "tickets"}
                 </span>
               </div>
               <Separator />
@@ -1932,14 +1955,18 @@ function PathwaysSection({ slug }: { slug: string }) {
                       {q.data?.retro?.finished.length
                         ? q.data.retro.finished.map((item) => (
                             <span key={item.label}>
-                              <a
-                                href={item.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="underline"
-                              >
-                                {item.label}
-                              </a>
+                              {item.url ? (
+                                <a
+                                  href={item.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="underline"
+                                >
+                                  {item.label}
+                                </a>
+                              ) : (
+                                <span>{item.label}</span>
+                              )}
                               {item.prUrl && (
                                 <>
                                   {" "}
@@ -1998,14 +2025,18 @@ function PathwaysSection({ slug }: { slug: string }) {
                       {q.data?.retro?.stalled.length
                         ? q.data.retro.stalled.map((item) => (
                             <div key={item.label}>
-                              <a
-                                href={item.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="underline"
-                              >
-                                {item.label}
-                              </a>{" "}
+                              {item.url ? (
+                                <a
+                                  href={item.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="underline"
+                                >
+                                  {item.label}
+                                </a>
+                              ) : (
+                                <span>{item.label}</span>
+                              )}{" "}
                               · {item.kind} ·{" "}
                               {Math.round(item.durationMs / 3_600_000)}h from
                               recorded start
@@ -2053,14 +2084,20 @@ function PathwaysSection({ slug }: { slug: string }) {
                 <>
                   <DialogHeader className="flex-row items-start justify-between gap-3 text-left">
                     <div>
-                      <a
-                        href={selected.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="font-mono text-sm underline"
-                      >
-                        {selected.identifier}
-                      </a>
+                      {selected.url ? (
+                        <a
+                          href={selected.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="font-mono text-sm underline"
+                        >
+                          {selected.identifier}
+                        </a>
+                      ) : (
+                        <span className="font-mono text-sm">
+                          {selected.identifier}
+                        </span>
+                      )}
                       <DialogTitle className="mt-1 text-lg">
                         {selected.title}
                       </DialogTitle>
@@ -2093,14 +2130,20 @@ function PathwaysSection({ slug }: { slug: string }) {
                         {selected.readiness.reasons.join(" · ") ||
                           "Scope and proof plan recorded"}
                       </p>
-                      <a
-                        href={selected.readiness.source}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-xs underline"
-                      >
-                        Source: Linear ticket
-                      </a>
+                      {selected.readiness.source ? (
+                        <a
+                          href={selected.readiness.source}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-xs underline"
+                        >
+                          Source: Linear ticket
+                        </a>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">
+                          Source: orchestrator
+                        </span>
+                      )}
                     </UiCard>
                     {map.ownerActions
                       .filter(
