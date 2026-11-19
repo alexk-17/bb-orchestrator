@@ -440,6 +440,7 @@ export const pathwaysSchema = z.object({
   retro: z.object({ finished: z.array(z.object({ label: z.string(), url: z.string(), prUrl: z.string().nullable() })), mergedPrs: z.array(z.object({ ticket: z.string(), url: z.string() })), decisions: z.array(z.object({ id: z.string(), title: z.string() })), stalled: z.array(z.object({ label: z.string(), url: z.string(), kind: z.string(), durationMs: z.number() })), doc: z.string().nullable(), hostId: z.string().nullable() }).nullable(),
 });
 export type Pathways = z.infer<typeof pathwaysSchema>;
+export const pathwaysViewSchema = pathwaysSchema.extend({ fetchedAt: z.number().nullable(), refreshing: z.boolean() });
 
 // Every project in the sidebar's placing order (engine.projects()), with its accent type (none with pokemon off); the page
 // puts it in the viewer's own section order (core/project-order.ts).
@@ -464,7 +465,7 @@ export const rpcContract = defineRpcContract({
   deliverableFolders: { input: z.null(), output: deliverableFoldersSchema },
   deliverables: { input: z.null(), output: deliverablesSchema },
   scope: { input: z.null(), output: scopeSchema },
-  pathways: { input: z.object({ slug: z.string().min(1).max(40), refresh: z.boolean().optional() }).strict(), output: pathwaysSchema },
+  pathways: { input: z.object({ slug: z.string().min(1).max(40), refresh: z.boolean().optional() }).strict(), output: pathwaysViewSchema },
   projectOrder: { input: z.null(), output: projectOrderSchema },
   // the chat log's read (1.10.0): one project's direct messages, newest first, only when the chat is open
   directHistory: { input: z.object({ slug: z.string().min(1).max(40), before: z.number().nullable().optional(), limit: z.number().int().min(1).max(100).optional() }).strict(), output: z.object({ messages: z.array(directMessageSchema), more: z.boolean() }) },

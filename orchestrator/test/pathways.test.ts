@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { Engine } from "../core/engine.ts";
 import { attachPathwaysPreflight, fogBullets, linkPathwaysDecisions, mapPathwaysLimited, pathwaysMap, projectIssues, selectPathwaysMap, summarizePathwaysRetro, type PathwaysIssue } from "../core/pathways.ts";
+import { createPathwaysSnapshots, type PathwaysSnapshot } from "../core/pathways-snapshot.ts";
+import type { Pathways } from "../contract.ts";
 
-test("Pathways detail reads cap concurrency and preserve order", async () => {
+test("Pathways detail reads cap concurrency and preserve order; the last map is served while a refresh runs", async () => {
   let active = 0;
   let peak = 0;
   const result = await mapPathwaysLimited(Array.from({ length: 17 }, (_, index) => index), 8, async (index) => {
@@ -16,6 +18,47 @@ test("Pathways detail reads cap concurrency and preserve order", async () => {
   });
   assert.equal(peak, 8);
   assert.deepEqual(result, Array.from({ length: 17 }, (_, index) => index * 2));
+
+  const fresh = (title: string) => ({ error: null, map: { identifier: "AIO-729", title, url: "", tickets: [], external: [], edges: [], fog: [], frontier: [], claimed: [], blocked: [], firstPath: [], ownerActions: [] }, retro: null }) as unknown as Pathways;
+  const failed = (error: string) => ({ error, map: null, retro: null }) as unknown as Pathways;
+  const disk = new Map<string, PathwaysSnapshot>();
+  let clock = 1_000;
+  let loads = 0;
+  let answer: () => Promise<Pathways> = async () => fresh("fresh-1");
+  const load = async () => { loads++; return answer(); };
+  const snapshots = createPathwaysSnapshots({
+    now: () => clock,
+    maxAgeMs: 60_000,
+    read: (slug) => disk.get(slug) ?? null,
+    write: (slug, snapshot) => disk.set(slug, snapshot),
+  });
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const first = await snapshots.view("hatz", false, load);
+  assert.equal(first.map?.title, "fresh-1");
+  assert.equal(first.refreshing, false);
+  assert.equal(first.fetchedAt, 1_000);
+  await snapshots.view("hatz", false, load);
+  assert.equal(loads, 1, "inside the 60 s cache nothing is re-read");
+
+  clock += 61_000;
+  answer = () => new Promise((resolve) => setTimeout(() => resolve(fresh("fresh-2")), 5));
+  const served = await snapshots.view("hatz", false, load);
+  assert.equal(served.map?.title, "fresh-1", "an expired snapshot is served at once");
+  assert.equal(served.fetchedAt, 1_000);
+  assert.equal(served.refreshing, true);
+  await snapshots.view("hatz", false, load);
+  assert.equal(loads, 2, "concurrent loads share one background refresh");
+  await wait(20);
+  assert.equal(snapshots.peek("hatz")?.value.map?.title, "fresh-2");
+  assert.deepEqual(disk.get("hatz")?.value, fresh("fresh-2"), "the saved snapshot equals the fresh map it came from");
+
+  clock += 61_000;
+  answer = async () => failed("Pathways Linear request failed: HTTP 500. Check the connection and try Refresh.");
+  const kept = await snapshots.view("hatz", true, load);
+  assert.equal(kept.map?.title, "fresh-2", "a failed refresh keeps the last map");
+  assert.match(kept.error ?? "", /HTTP 500/);
+  assert.equal(kept.refreshing, false);
 });
 
 test("a withdrawn Pathways card does not satisfy a later submit with the same key", () => {

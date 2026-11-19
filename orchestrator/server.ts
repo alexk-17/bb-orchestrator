@@ -13,6 +13,7 @@ import { Readable } from "node:stream";
 import { approveBody, type DeliverableFolders, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody, type Pathways } from "./contract.ts";
 import { projectIssues, pathwaysMap, linkPathwaysDecisions, attachPathwaysPreflight, draftPathwaysDecision, summarizePathwaysRetro, pathwaysDecisionKey, submitPathwaysDecision, mapPathwaysLimited, selectPathwaysMap, type PathwaysIssue } from "./core/pathways.ts";
 import { collectPathwaysProofRecords, reducePathwaysPr, reducePathwaysProof, reducePathwaysWaitLane } from "./core/pathways-pr.ts";
+import { createPathwaysSnapshots, type PathwaysSnapshot, type PathwaysView } from "./core/pathways-snapshot.ts";
 import { type DeliverPlace, type OutputPlace, type ProofInput, SCOPING_SUMMARY_MAX, SCOPING_TASK_NAME_MAX, SECRET_TTL_MS } from "./core/engine.ts";
 import { deliverBlocks, deliverPoints, fromJson, inputBlocksSchema, lessTextRefusal, looksLikeCode } from "./blocks.ts";
 import { CARD_CAPS, DELIVER_BUDGET, deliverBudgetRefusal } from "./core/caps.ts";
@@ -1927,8 +1928,24 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   const providerOf = new Map<string, string | null>();
-  const pathwaysCache = new Map<string, { at: number; value: Pathways }>();
-  const pathwaysInFlight = new Map<string, Promise<Pathways>>();
+  const pathwaysSnapshotFile = (slug: string) => join(stateDir(), "pathways", `${slug}.json`);
+  const pathwaysSnapshots = createPathwaysSnapshots({
+    now: () => Date.now(),
+    maxAgeMs: 60_000,
+    read: (slug) => {
+      try {
+        return JSON.parse(readFileSync(pathwaysSnapshotFile(slug), "utf8")) as PathwaysSnapshot;
+      } catch {
+        return null;
+      }
+    },
+    write: (slug, snapshot) => {
+      const file = pathwaysSnapshotFile(slug);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(`${file}.tmp`, JSON.stringify(snapshot));
+      renameSync(`${file}.tmp`, file);
+    },
+  });
   bb.rpc.register(rpcContract, {
     async config() {
       return {
@@ -2092,8 +2109,8 @@ export default async function plugin(bb: BbPluginApi) {
       );
       return { projects, badge: projects.reduce((n, p) => n + p.cards.length, 0) };
     },
-    async pathways({ slug, refresh }): Promise<Pathways> {
-      const failure = (error: string): Pathways => ({ error, map: null, retro: null });
+    async pathways({ slug, refresh }): Promise<PathwaysView> {
+      const failure = (error: string): PathwaysView => ({ error, map: null, retro: null, fetchedAt: null, refreshing: false });
       const apiKey = cfg.linearApiKey?.trim();
       if (!apiKey) return failure("Set the Pathways Linear API key in Orchestrator plugin settings.");
       if (!engine.project(slug)) return failure("Pathways project not found.");
@@ -2107,10 +2124,6 @@ export default async function plugin(bb: BbPluginApi) {
         return failure("Set the Pathways Linear project link in this project's record.");
       }
       if (!linearProjectId) return failure("Set linearProjectId in this project's record for Pathways.");
-      const cached = pathwaysCache.get(slug);
-      if (!refresh && cached && Date.now() - cached.at < 60_000) return cached.value;
-      const pending = pathwaysInFlight.get(slug);
-      if (pending) return pending;
       const read = async (): Promise<Pathways> => { try {
         const request = async <T,>(query: string, id: string, after: string | null = null): Promise<T> => {
           const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables: { id, after } }) });
@@ -2154,16 +2167,12 @@ export default async function plugin(bb: BbPluginApi) {
         let retroDoc: string | null = null;
         if (existsSync(retroLibrary)) retroDoc = readdirSync(retroLibrary).filter((name) => /retro/i.test(name) && /\.md$/i.test(name)).sort()[0] ?? null;
         const retro = { ...summarizePathwaysRetro(map, decisions.map((decision) => ({ id: decision.id, title: decision.request.title, state: decision.state })), Date.now()), doc: retroDoc ? join(retroLibrary, retroDoc) : null, hostId: retroDoc ? await onlyHost().catch(() => null) : null };
-        const value: Pathways = { error: null, map, retro };
-        pathwaysCache.set(slug, { at: Date.now(), value });
-        return value;
+        return { error: null, map, retro };
       } catch (error) {
         const reason = error instanceof Error && (/^HTTP \d+$/.test(error.message) || error.message === "GraphQL error") ? error.message : "network error";
         return failure(`Pathways Linear request failed: ${reason}. Check the connection and try Refresh.`);
       } };
-      const promise = read();
-      pathwaysInFlight.set(slug, promise);
-      try { return await promise; } finally { if (pathwaysInFlight.get(slug) === promise) pathwaysInFlight.delete(slug); }
+      return pathwaysSnapshots.view(slug, refresh ?? false, read);
     },
     directHistory({ slug, before, limit }) {
       return engine.directHistory(slug, before ?? null, limit ?? 30);
@@ -2300,14 +2309,14 @@ export default async function plugin(bb: BbPluginApi) {
     const prior = engine.decisionByRequestKey(lead.address, pathwaysDecisionKey(b.ticketId, b.question));
     if (prior) return prior.id;
     const project = engine.project(b.slug);
-    const ticket = pathwaysCache.get(b.slug)?.value.map?.tickets.find((item) => item.identifier === b.ticketId);
+    const ticket = pathwaysSnapshots.peek(b.slug)?.value.map?.tickets.find((item) => item.identifier === b.ticketId);
     if (!project || !ticket) throw new EngineError("not_found", "Project or ticket not found; refresh Pathways");
     if (ticket.readiness.state !== "needs decision" && ticket.displayState !== "blocked") throw new EngineError("bad_state", "Ticket has no recorded decision blocker");
     const draft = draftPathwaysDecision(ticket);
     if (b.question !== draft.question) throw new EngineError("conflict", "Ticket question changed; refresh Pathways");
     draft.options = b.options;
     const id = submitPathwaysDecision(draft, { existing: (key) => engine.decisionByRequestKey(lead.address, key)?.id ?? null, create: (key, value) => engine.ask(lead, { title: value.title, question: value.question, context: value.context, options: value.options, key }).id });
-    pathwaysCache.delete(b.slug);
+    pathwaysSnapshots.markStale(b.slug);
     return id;
   });
   write(WRITES.answer, answerBody, (b) =>

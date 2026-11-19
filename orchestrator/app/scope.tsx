@@ -425,6 +425,13 @@ function titleLines(title: string, limit = 27, count = 2): string[] {
 
 type PathwaysTicketView = NonNullable<Pathways["map"]>["tickets"][number];
 
+function pathwaysAge(at: number): string {
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+  return `${Math.floor(seconds / 3600)} h ago`;
+}
+
 function PathwaysNodeGlyph({
   label,
   meaning,
@@ -1072,6 +1079,11 @@ function PathwaysSection({ slug }: { slug: string }) {
     else if (q.isFetching) refreshSeen.current = true;
     else if (refreshSeen.current) setRefresh(false);
   }, [refresh, q.isFetching]);
+  useEffect(() => {
+    if (!q.data?.refreshing) return;
+    const timer = window.setTimeout(() => void q.refetch(), 1500);
+    return () => window.clearTimeout(timer);
+  }, [q.data]);
   const map = q.data?.map;
   const tickets = new Map(
     map?.tickets.map((ticket) => [ticket.identifier, ticket]) ?? [],
@@ -1336,13 +1348,19 @@ function PathwaysSection({ slug }: { slug: string }) {
           </Button>
         </div>
       </div>
+      {q.data?.fetchedAt != null && (
+        <p className="m-0 text-xs text-muted-foreground" data-pathways-freshness="">
+          Updated {pathwaysAge(q.data.fetchedAt)}
+          {q.data.refreshing ? " · refreshing" : ""}
+        </p>
+      )}
       {q.error ? (
         <Alert>
           <AlertDescription>
             Pathways failed: {q.error.message}
           </AlertDescription>
         </Alert>
-      ) : q.data?.error ? (
+      ) : q.data?.error && !map ? (
         <Empty>
           <EmptyHeader>
             <EmptyTitle>
@@ -1358,6 +1376,11 @@ function PathwaysSection({ slug }: { slug: string }) {
         <Skeleton className="mt-3 h-80 w-full" />
       ) : (
         <>
+          {q.data?.error && (
+            <Alert className="mt-3 py-2 text-xs" data-pathways-refresh-error="">
+              <AlertDescription>Refresh failed; showing the last map. {q.data.error}</AlertDescription>
+            </Alert>
+          )}
           {(pathHead ||
             visible.some((ticket) => ticket.pr?.state === "unavailable")) && (
             <Alert

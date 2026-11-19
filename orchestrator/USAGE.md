@@ -289,6 +289,8 @@ tab's picker remembers the last one. Hide the tab with `hiddenTabs: pathways`.
   It is the tab's only write, and a second submit of the same question files nothing new.
 - **Retro:** a collapsed card built from the orchestrator's own records: finished tickets and merged PRs, answered
   decisions, the longest recorded waits, and a retro doc from the project's library folder, if there is one.
+- **Speed:** the last map is kept in `state/pathways/<project>.json`. Opening the tab after the first load paints that map
+  at once, shows "Updated … ago · refreshing", and swaps in the fresh map when it arrives; Refresh still waits for a fresh read.
 
 The page never writes to Linear or GitHub. The bundled `pathways-linear` skill tells agents how to build and update a
 map in Linear (labels, sub-issues, blocking relations) with a Linear key you give them. Agents can read the map through
