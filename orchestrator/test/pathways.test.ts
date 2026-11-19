@@ -164,7 +164,7 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
     assert.equal(byId.has("THR-2"), false);
     assert.deepEqual(byId.get("THR-1")?.prLink.urls, ["https://github.com/acme/alpha/pull/42"]);
     assert.deepEqual(byId.get("STEP-3")?.prLink.urls, ["https://github.com/acme/alpha/pull/43"]);
-    const cardTicket = byId.get(`CARD-${openCard.id}`);
+    const cardTicket = byId.get(`CARD-${openCard.id.slice(-6)}`);
     assert.ok(cardTicket);
     assert.equal(cardTicket.displayState, "needs-you");
     assert.equal(cardTicket.decision.cardId, openCard.id);

@@ -199,7 +199,7 @@ export function localPathwaysMap(input: LocalPathwaysInput): PathwaysMap {
     const title = card.title.trim() || card.question.trim() || card.id;
     const question = card.question.trim();
     const ticket = emptyTicket({
-      identifier: `CARD-${card.id}`,
+      identifier: `CARD-${card.id.slice(-6)}`,
       title,
       state: { type: "started", name: card.state === "asked" ? "Needs you" : "Open" },
       priority: 1,

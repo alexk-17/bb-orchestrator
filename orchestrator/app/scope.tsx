@@ -1443,7 +1443,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                           : "resolve scope for"}{" "}
                     {pathHead.identifier}.
                     {needsYouNow && (
-                      <> In parallel, complete {needsYouNow.identifier}.</>
+                      <> In parallel, {needsYouNow.type === "decision" ? "answer" : "complete"} {needsYouNow.identifier}.</>
                     )}
                   </>
                 )}
