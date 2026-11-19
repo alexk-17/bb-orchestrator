@@ -14,6 +14,7 @@ export function createPathwaysSnapshots(deps: PathwaysSnapshotDeps) {
   const memory = new Map<string, PathwaysSnapshot>();
   const inFlight = new Map<string, Promise<Pathways>>();
   const refreshErrors = new Map<string, string>();
+  const failedAt = new Map<string, number>();
   const stale = new Set<string>();
 
   const current = (slug: string): PathwaysSnapshot | null => {
@@ -33,8 +34,12 @@ export function createPathwaysSnapshots(deps: PathwaysSnapshotDeps) {
         memory.set(slug, snapshot);
         deps.write(slug, snapshot);
         refreshErrors.delete(slug);
-        stale.delete(slug);
-      } else refreshErrors.set(slug, value.error ?? "Pathways refresh failed.");
+        failedAt.delete(slug);
+      } else {
+        refreshErrors.set(slug, value.error ?? "Pathways refresh failed.");
+        failedAt.set(slug, deps.now());
+      }
+      stale.delete(slug);
       return value;
     }).finally(() => {
       if (inFlight.get(slug) === promise) inFlight.delete(slug);
@@ -50,7 +55,8 @@ export function createPathwaysSnapshots(deps: PathwaysSnapshotDeps) {
     refreshing,
   });
 
-  const isFresh = (slug: string, snapshot: PathwaysSnapshot) => !stale.has(slug) && deps.now() - snapshot.fetchedAt < deps.maxAgeMs;
+  const isFresh = (slug: string, snapshot: PathwaysSnapshot) =>
+    !stale.has(slug) && deps.now() - Math.max(snapshot.fetchedAt, failedAt.get(slug) ?? 0) < deps.maxAgeMs;
 
   return {
     async view(slug: string, forced: boolean, load: () => Promise<Pathways>): Promise<PathwaysView> {

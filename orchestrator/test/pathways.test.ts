@@ -59,6 +59,11 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
   assert.equal(kept.map?.title, "fresh-2", "a failed refresh keeps the last map");
   assert.match(kept.error ?? "", /HTTP 500/);
   assert.equal(kept.refreshing, false);
+  const loadsAfterFailure = loads;
+  const polled = await snapshots.view("hatz", false, load);
+  assert.equal(loads, loadsAfterFailure, "a failed refresh is not retried by polling until the cache age passes");
+  assert.equal(polled.refreshing, false);
+  assert.match(polled.error ?? "", /HTTP 500/);
 });
 
 test("a withdrawn Pathways card does not satisfy a later submit with the same key", () => {

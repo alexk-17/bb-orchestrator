@@ -1079,11 +1079,12 @@ function PathwaysSection({ slug }: { slug: string }) {
     else if (q.isFetching) refreshSeen.current = true;
     else if (refreshSeen.current) setRefresh(false);
   }, [refresh, q.isFetching]);
+  const refreshing = q.data?.refreshing === true;
   useEffect(() => {
-    if (!q.data?.refreshing) return;
-    const timer = window.setTimeout(() => void q.refetch(), 1500);
-    return () => window.clearTimeout(timer);
-  }, [q.data]);
+    if (!refreshing) return;
+    const timer = window.setInterval(() => void q.refetch(), 1500);
+    return () => window.clearInterval(timer);
+  }, [refreshing]);
   const map = q.data?.map;
   const tickets = new Map(
     map?.tickets.map((ticket) => [ticket.identifier, ticket]) ?? [],
