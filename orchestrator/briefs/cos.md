@@ -28,7 +28,9 @@ An untriaged decision goes to {owner} on its own after a few minutes, marked "Co
 ## Rules from {owner}'s answers
 - A **rule offer** notice lists cards {owner} answered the same way. If the next ones shouldn't need {owner}, propose
   a rule: `orch_triage(action=propose_rule, id=<one of its cards>, note=<the rule in one line>)`. Add `rule` only to
-  narrow it. {owner} gets one "Make this a rule?" card. Ignore an offer for one-offs.
+  narrow it. {owner} gets one "Make this a rule?" card. Ack an offer `refused` with a note for one-offs.
+- When {owner} states a standing instruction in chat or a card note (always, never, from now on, whenever, anytime),
+  propose it with `orch_propose_rule`, quoting his words; {owner} gets one "Make this a rule?" card.
 - Once {owner} says yes, the rule settles the cards it matches by itself, and you get a notice for each one. You never
   see those cards for triage.
 

@@ -104,7 +104,7 @@ import { type ChildLevel, type NotifySaved, SAVED_KEY as NOTIFY_SAVED, serialRec
 const TOOLS_BY_ROLE: Record<Role, string[]> = {
   thread: ["orch_ask", "orch_ack", "orch_send", "orch_inbox", "orch_report", "orch_output"],
   lead: ["orch_ask", "orch_forward", "orch_answer", "orch_ack", "orch_send", "orch_inbox", "orch_report", "orch_stop_thread", "orch_spawn_thread", "orch_resolve", "orch_handoff", "orch_output", "orch_deliver", "orch_deliver_withdraw", "orch_status", "orch_scope_task"],
-  cos: ["orch_triage", "orch_ack", "orch_send", "orch_inbox", "orch_needs_you", "orch_moot", "orch_deliverables", "orch_dead_letters", "orch_start_lead", "orch_new_project", "orch_project_mode", "orch_watch"],
+  cos: ["orch_triage", "orch_propose_rule", "orch_ack", "orch_send", "orch_inbox", "orch_needs_you", "orch_moot", "orch_deliverables", "orch_dead_letters", "orch_start_lead", "orch_new_project", "orch_project_mode", "orch_watch"],
   steward: ["orch_ask", "orch_ack", "orch_send", "orch_inbox", "orch_host", "orch_cleanup", "orch_needs_you", "orch_deliverables"],
 };
 
@@ -623,6 +623,17 @@ export default async function plugin(bb: BbPluginApi) {
   const cosOrSteward = (a: Agent) => {
     if (a.role !== "cos" && a.role !== "steward") throw new EngineError("forbidden", "CoS and Steward only");
   };
+  bb.agents.registerTool({
+    name: "orch_propose_rule",
+    description: `CoS only: propose a standing rule from ${O.name}'s own words in chat or a card note. Give the rule in one line, quote the words, and optionally name a project. ${O.name} gets one "Make this a rule?" card; only their yes adds it to Rules.`,
+    presentation: { label: { pending: "Proposing a standing rule", completed: "Proposed a standing rule" } },
+    parameters: z.object({ text: z.string().max(300), quote: z.string().max(600), project: z.string().nullable().optional() }),
+    execute: (p, { threadId }) => run(threadId, (a) => {
+      const d = engine.proposeStatedRule(a, p.text, p.quote, p.project ?? null);
+      return `${d.id} "Make this a rule?" is in ${O.name}'s Needs you. A yes adds the rule; the answer comes to you.`;
+    }),
+  });
+
   bb.agents.registerTool({
     name: "orch_needs_you",
     description: `CoS and Steward only: what is on ${O.name}'s Needs you now (each card's id, project, asker, title, how long it has waited; deferred ones; ones still with the CoS), and what ${O.name} answered (with the option chosen) or what went moot, in the last 24h and newest 20 by default (widen with \`since\` and \`limit\`).`,

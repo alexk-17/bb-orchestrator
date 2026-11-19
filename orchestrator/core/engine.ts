@@ -3161,7 +3161,7 @@ export class Engine {
       d.deferred = null;
       const proposal = d.orchestrator.rule_proposal;
       if (proposal && opt?.id === "1") {
-        const r = this.addRule({ text: proposal.text, project: proposal.project, kinds: ["question"], expiresAt: null, source: `card ${d.id}, from ${proposal.evidence.length} of ${this.owner.name}'s answers`, match: proposal.match });
+        const r = this.addRule({ text: proposal.text, project: proposal.project, kinds: proposal.kinds ?? ["question"], expiresAt: null, source: proposal.evidence.length ? `card ${d.id}, from ${proposal.evidence.length} of ${this.owner.name}'s answers` : `card ${d.id}, from ${this.owner.name}'s words`, match: proposal.match });
         proposal.rule_id = r.id;
       }
       this.save(d, "answer", "person", wasDeferred ? "answered while deferred" : proposal?.rule_id ? `rule ${proposal.rule_id} added` : null, rev);
@@ -3323,11 +3323,11 @@ export class Engine {
       kind: "notice",
       ref: d.id,
       key: `rule-offer:${offerId}`,
-      needsAck: false,
+      needsAck: true,
       body:
         `Rule offer ${offerId}: ${this.owner.name} answered ${cards.length} cards (${s.group.startsWith("project:") ? `project ${s.group.slice("project:".length)}` : `from ${s.group.slice("asker:".length)}`}) the same way:\n${lines.join("\n")}\n${how}\n` +
         `If the next ones should be settled without ${this.owner.name}, propose it: triage(action=propose_rule, id=${JSON.stringify(d.id)}, note=<the rule in one line, at most 120 characters>), ` +
-        `optionally rule={from, words, without, key_prefix, option} to narrow it. ${this.owner.Name} gets one "Make this a rule?" card. Ignore this if the answers were one-offs.`,
+        `optionally rule={from, words, without, key_prefix, option} to narrow it. ${this.owner.Name} gets one "Make this a rule?" card. Propose a rule, or ack this offer with outcome="refused" and a note for one-offs.`,
     });
   }
 
@@ -3366,7 +3366,10 @@ export class Engine {
       if (fits.length < 2) throw new EngineError("invalid", `the rule fits ${fits.length} of the ${evidence.length} cards it comes from; it needs 2 (${misses.join("; ")})`);
       const key = `rule-proposal:${offer.id}`;
       const dup = this.db.prepare(`SELECT id FROM decisions WHERE asker = 'cos' AND json_extract(json, '$.request_key') = ? AND state IN ('open','asked')`).get(key) as { id: string } | undefined;
-      if (dup) return this.mustDecision(dup.id);
+      if (dup) {
+        this.closeItems(`recipient = 'cos' AND send_key = ?`, [`rule-offer:${offer.id}`], "done", `proposed as ${dup.id}`);
+        return this.mustDecision(dup.id);
+      }
       const project = offer.grp.startsWith("project:") ? offer.grp.slice("project:".length) : null;
       const t = this.now();
       const options: Opt[] = [
@@ -3424,6 +3427,73 @@ export class Engine {
       };
       this.save(d, "add", "cos", `rule offer ${offer.id}`, null);
       this.putAsk(d, "cos", d.request.title, question, d.request.context, options, false);
+      this.save(d, "ask", "cos", null, null);
+      this.ports.cardUp?.(d);
+      this.closeItems(`recipient = 'cos' AND send_key = ?`, [`rule-offer:${offer.id}`], "done", `proposed as ${d.id}`);
+      return this.mustDecision(d.id);
+    });
+  }
+
+  proposeStatedRule(by: Agent, text: string, quote: string, project: string | null = null): Decision {
+    if (by.role !== "cos") throw new EngineError("forbidden", "only the CoS proposes a rule");
+    const ruleText = oneLine(text ?? "", 300, "rule text");
+    const ownerQuote = (quote ?? "").trim().slice(0, 600);
+    if (!ownerQuote) throw new EngineError("invalid", "quote is empty");
+    if (project !== null && !PROJECT_RE.test(project)) throw new EngineError("invalid", `bad project ${project}`);
+    const normalized = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+    const key = `rule-stated:${createHash("sha256").update(JSON.stringify([normalized(ruleText), project])).digest("hex")}`;
+    return tx(this.db, () => {
+      if (this.rules().some((r) => r.revokedAt === null && (r.expiresAt === null || r.expiresAt > this.now()) && r.project === project && normalized(r.text) === normalized(ruleText)))
+        throw new EngineError("invalid", "an active rule already has this text and project");
+      const dup = this.db.prepare(`SELECT id FROM decisions WHERE asker = 'cos' AND json_extract(json, '$.request_key') = ? AND state IN ('open','asked')`).get(key) as { id: string } | undefined;
+      if (dup) return this.mustDecision(dup.id);
+      const t = this.now();
+      const options: Opt[] = [{ id: "1", label: "Make it a rule", detail: "Add this standing instruction to Rules" }, { id: "2", label: "No rule", detail: "Leave it off Rules" }];
+      const question = `Make this a standing rule? ${ruleText}`.slice(0, 160);
+      const d: Decision = {
+        schema: 1,
+        id: decisionId(t),
+        rev: 0,
+        state: "open",
+        kind: "question",
+        created_at: iso(t),
+        updated_at: iso(t),
+        project,
+        request_key: key,
+        request: {
+          by: { role: "cos", project: null, thread: by.threadId, terminal: null, machine: null, address: "cos" },
+          title: "Make this a rule?",
+          question,
+          context: ownerQuote,
+          options,
+          blocks: [],
+        },
+        reply_to: { labels: { "orchestrator.address": "cos" }, terminal: null, machine: null },
+        ask: null,
+        answer: null,
+        relay: null,
+        ack: null,
+        cos_notified_at: null,
+        owed_from: null,
+        merged_into: null,
+        merged: [],
+        withdrawn: null,
+        deferred: null,
+        returned: null,
+        history: [],
+        orchestrator: {
+          at_level: "person",
+          asker: "cos",
+          origin: "cos",
+          action: null,
+          triage: { filed_at: null, due_at: null, triaged_at: iso(t), by: "cos", escalated_at: null },
+          forwarded_by: null,
+          plan: null,
+          rule_proposal: { text: ruleText, project, match: null, evidence: [], kinds: ["plan"], rule_id: null },
+        },
+      };
+      this.save(d, "add", "cos", "stated rule", null);
+      this.putAsk(d, "cos", d.request.title, question, ownerQuote, options, false);
       this.save(d, "ask", "cos", null, null);
       this.ports.cardUp?.(d);
       return this.mustDecision(d.id);
