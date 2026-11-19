@@ -1244,11 +1244,16 @@ function PathwaysSection({ slug }: { slug: string }) {
     const fit = () => {
       const { width, height } = svg.getBoundingClientRect();
       if (!width || !height) return;
-      const scale = Math.min(width / graph.width, height / graph.height) * 0.9;
+      const topPad = 48;
+      const availH = Math.max(120, height - topPad);
+      const scale = Math.min(width / graph.width, availH / graph.height) * 0.92;
       behavior.extent([[0, 0], [width, height]]).scaleExtent([scale / 2, scale * 4]);
+      const tx = (width - graph.width * scale) / 2;
+      const freeY = Math.max(0, availH - graph.height * scale);
+      const ty = topPad + Math.min(freeY / 2, 24);
       selection.call(behavior).call(
         behavior.transform,
-        zoomIdentity.translate((width - graph.width * scale) / 2, (height - graph.height * scale) / 2).scale(scale),
+        zoomIdentity.translate(tx, ty).scale(scale),
       );
     };
     const observer = new ResizeObserver(fit);
@@ -1402,9 +1407,9 @@ function PathwaysSection({ slug }: { slug: string }) {
             </PathwaysLink>
           )}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex shrink-0 items-center gap-3">
           {map && (
-            <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center gap-2">
               <Checkbox
                 id={`pathways-hide-done-${slug}`}
                 checked={hideDone}
@@ -1419,7 +1424,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                   } catch {}
                 }}
               />
-              <Label htmlFor={`pathways-hide-done-${slug}`} className="text-xs">
+              <Label htmlFor={`pathways-hide-done-${slug}`} className="whitespace-nowrap text-xs">
                 Hide done
               </Label>
             </div>
@@ -1519,7 +1524,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                   : undefined
               }
             >
-              <AlertDescription>
+              <AlertDescription className="block [overflow-wrap:anywhere]">
                 {pathHead ? (
                   <>
                     Do now:{" "}
@@ -1534,16 +1539,49 @@ function PathwaysSection({ slug }: { slug: string }) {
                           : pathHead.readiness.state === "ready"
                             ? "start"
                             : "resolve scope for"}{" "}
-                    {pathHead.identifier}.
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="sm"
+                      className="inline h-auto p-0 align-baseline font-mono text-xs font-semibold"
+                      onClick={() => setSelectedId(pathHead.identifier)}
+                    >
+                      {pathHead.identifier}
+                    </Button>
+                    {" — "}
+                    {pathHead.title}.
                     {needsYouNow && (
-                      <> In parallel, {needsYouNow.type === "decision" ? "answer" : "complete"} {needsYouNow.identifier}.</>
+                      <>
+                        {" "}In parallel, {needsYouNow.type === "decision" ? "answer" : "complete"}{" "}
+                        <Button
+                          type="button"
+                          variant="link"
+                          size="sm"
+                          className="inline h-auto p-0 align-baseline font-mono text-xs font-semibold"
+                          onClick={() => setSelectedId(needsYouNow.identifier)}
+                        >
+                          {needsYouNow.identifier}
+                        </Button>
+                        {" — "}
+                        {needsYouNow.title}.
+                      </>
                     )}
                   </>
                 ) : needsYouNow ? (
                   <>
                     Do now:{" "}
                     {needsYouNow.type === "decision" ? "answer" : "complete"}{" "}
-                    {needsYouNow.identifier}.
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="sm"
+                      className="inline h-auto p-0 align-baseline font-mono text-xs font-semibold"
+                      onClick={() => setSelectedId(needsYouNow.identifier)}
+                    >
+                      {needsYouNow.identifier}
+                    </Button>
+                    {" — "}
+                    {needsYouNow.title}.
                   </>
                 ) : null}
                 {visible.some(
@@ -1679,7 +1717,7 @@ function PathwaysSection({ slug }: { slug: string }) {
               </div>
               <svg
                 ref={graphViewport}
-                className="block w-full min-h-[320px] h-[min(70vh,720px)] cursor-grab active:cursor-grabbing"
+                className="block w-full min-h-[300px] h-[min(70vh,720px)] max-[1100px]:h-[min(44vh,360px)] cursor-grab active:cursor-grabbing"
                 role="img"
                 aria-label="Pathways map graph"
               >
