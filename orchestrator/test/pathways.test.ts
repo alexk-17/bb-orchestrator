@@ -221,6 +221,10 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
       const unauth = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
       assert.match(unauth.error ?? "", /linearApiKey/);
       assert.match(unauth.error ?? "", /401/);
+      globalThis.fetch = (async () => new Response(JSON.stringify({ errors: [{ message: "Rate limit" }] }), { status: 429, headers: { "retry-after": "60" } })) as typeof fetch;
+      const rateLimited = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+      assert.match(rateLimited.error ?? "", /rate limit/i);
+      assert.match(rateLimited.error ?? "", /60s/);
     } finally {
       globalThis.fetch = realFetch;
       writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha" }));

@@ -2230,7 +2230,14 @@ export default async function plugin(bb: BbPluginApi) {
       const read = async (): Promise<Pathways> => { try {
         const request = async <T,>(query: string, id: string, after: string | null = null): Promise<T> => {
           const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables: { id, after } }) });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          if (!response.ok) {
+            if (response.status === 429) {
+              const rawRetry = response.headers.get("retry-after")?.trim();
+              const secs = rawRetry && /^\d+$/.test(rawRetry) ? Number(rawRetry) : null;
+              throw new Error(secs && secs > 0 ? `HTTP 429:${secs}` : "HTTP 429");
+            }
+            throw new Error(`HTTP ${response.status}`);
+          }
           const result = await response.json() as { data?: T; errors?: unknown[] };
           if (result.errors?.length || !result.data) throw new Error("GraphQL error");
           return result.data;
@@ -2275,6 +2282,11 @@ export default async function plugin(bb: BbPluginApi) {
         const msg = error instanceof Error ? error.message : "";
         if (msg === "HTTP 401" || msg === "HTTP 403") {
           return failure(`Linear rejected linearApiKey (${msg}). Update linearApiKey in Orchestrator plugin settings, then click Refresh.`);
+        }
+        const rateLimit = /^HTTP 429(?::(\d+))?$/.exec(msg);
+        if (rateLimit) {
+          const wait = rateLimit[1] ? `about ${rateLimit[1]}s` : "a minute";
+          return failure(`Linear rate limit reached (HTTP 429). Wait ${wait} before clicking Refresh.`);
         }
         const reason = /^HTTP \d+$/.test(msg) || msg === "GraphQL error" ? msg : "network error";
         return failure(`Pathways Linear request failed: ${reason}. Check the connection and try Refresh.`);

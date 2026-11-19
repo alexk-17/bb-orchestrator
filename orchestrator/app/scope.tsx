@@ -1447,6 +1447,8 @@ function PathwaysSection({ slug }: { slug: string }) {
             <EmptyTitle>
               {q.data.error.includes("linearApiKey")
                 ? "Linear authentication failed"
+                : q.data.error.includes("rate limit")
+                  ? "Linear rate limit reached"
                 : q.data.error.includes("linearProjectId") ||
                     q.data.error.includes("Linear project link")
                   ? "No Linear map linked"
