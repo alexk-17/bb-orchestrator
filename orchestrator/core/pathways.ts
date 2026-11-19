@@ -37,6 +37,7 @@ export type PathwaysTicket = Pick<PathwaysIssue, "identifier" | "title" | "url" 
   waitsOnYou: boolean;
   readiness: PathwaysReadiness;
   prLink: PathwaysPrLinks;
+  prs: { pr: PathwaysPr; proof: PathwaysProof; waitLane: PathwaysWaitLane }[];
   pr: PathwaysPr | null;
   proof: PathwaysProof | null;
   waitLane: PathwaysWaitLane | null;
@@ -47,10 +48,11 @@ export type PathwaysTicket = Pick<PathwaysIssue, "identifier" | "title" | "url" 
 export type PathwaysMap = { identifier: string; title: string; url: string; tickets: PathwaysTicket[]; external: PathwaysRelationIssue[]; edges: PathwaysEdge[]; fog: string[]; frontier: string[]; claimed: string[]; blocked: string[]; firstPath: string[]; ownerActions: PathwaysOwnerAction[] };
 
 export function summarizePathwaysRetro(map: PathwaysMap, decisions: { id: string; title: string; state: string }[], now: number) {
-  const finished = map.tickets.filter((ticket) => ticket.state.type === "completed").map((ticket) => ({ label: ticket.identifier, url: ticket.url, prUrl: ticket.pr?.state === "merged" ? ticket.pr.url : null }));
+  const finished = map.tickets.filter((ticket) => ticket.state.type === "completed").map((ticket) => ({ label: ticket.identifier, url: ticket.url, prUrl: ticket.prs.find((entry) => entry.pr.state === "merged")?.pr.url ?? (ticket.pr?.state === "merged" ? ticket.pr.url : null) }));
+  const mergedPrs = map.tickets.flatMap((ticket) => ticket.prs.filter((entry) => entry.pr.state === "merged").map((entry) => ({ ticket: ticket.identifier, url: entry.pr.url })));
   const made = decisions.filter((decision) => decision.state === "answered").map(({ id, title }) => ({ id, title }));
   const stalled = map.tickets.flatMap((ticket) => ticket.waitLane?.steps.filter((step) => (step.state === "pending" || step.state === "blocked") && step.since != null).map((step) => ({ label: ticket.identifier, url: ticket.url, kind: step.kind, durationMs: Math.max(0, now - step.since!) })) ?? []).sort((a, b) => b.durationMs - a.durationMs).slice(0, 3);
-  return { finished, decisions: made, stalled };
+  return { finished, mergedPrs, decisions: made, stalled };
 }
 
 export async function projectIssues<T>(request: (after: string | null) => Promise<{ project: { issues: { nodes: T[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } } | null }>): Promise<T[] | null> {
@@ -83,6 +85,10 @@ export async function mapPathwaysLimited<T, R>(items: readonly T[], limit: numbe
 
 const closed = (type: string) => type === "completed" || type === "canceled";
 const names = (issue: PathwaysIssue) => issue.labels.nodes.map((label) => label.name.toLowerCase());
+
+export function selectPathwaysMap<T extends { identifier: string; labels: { nodes: { name: string }[] } }>(issues: T[], identifier?: string): T | undefined {
+  return identifier ? issues.find((issue) => issue.identifier.toLowerCase() === identifier.toLowerCase()) : issues.find((issue) => issue.labels.nodes.some((label) => label.name.toLowerCase() === "wayfinder:map"));
+}
 
 function readiness(issue: PathwaysIssue, labels: string[]): PathwaysReadiness {
   const reasons: string[] = [];
@@ -138,7 +144,7 @@ export function pathwaysMap(map: PathwaysIssue, children: PathwaysIssue[]): Path
     if (labels.some((label) => ["spike", "question", "open-question", "wayfinder:research"].includes(label))) unknown.push("Research question");
     if (blockers.some((id) => !ids.has(id))) unknown.push("External blocker");
     const displayState: PathwaysState = closed(issue.state.type) ? "done" : labels.includes("wayfinder:needs-you") ? "needs-you" : blockers.length ? "blocked" : issue.assignee ? "claimed" : unknown.length ? "unknown" : "ready";
-    return { identifier: issue.identifier, title: issue.title, url: issue.url, state: issue.state, priority: issue.priority, estimate: issue.estimate, type: labels.find((label) => /^wayfinder:(research|prototype|grilling|task)$/.test(label))?.slice(10) ?? "untyped", assignee: issue.assignee?.name ?? null, unknown, blockers, displayState, waitsOnYou: false, readiness: readiness(issue, labels), prLink: extractPrLinks(issue.description, issue.attachments?.nodes ?? []), pr: null, proof: null, waitLane: null, decisionDraft: null, decision: { state: "missing", cardId: null, cardState: null, title: null, waiting: false, direct: [], transitive: [] }, preflight: { state: "not planned", environment: null, verifier: null, ownerAction: null, accessTicket: null, gaps: ["Verification plan not recorded"], source: issue.url } };
+    return { identifier: issue.identifier, title: issue.title, url: issue.url, state: issue.state, priority: issue.priority, estimate: issue.estimate, type: labels.find((label) => /^wayfinder:(research|prototype|grilling|task)$/.test(label))?.slice(10) ?? "untyped", assignee: issue.assignee?.name ?? null, unknown, blockers, displayState, waitsOnYou: false, readiness: readiness(issue, labels), prLink: extractPrLinks(issue.description, issue.attachments?.nodes ?? []), prs: [], pr: null, proof: null, waitLane: null, decisionDraft: null, decision: { state: "missing", cardId: null, cardState: null, title: null, waiting: false, direct: [], transitive: [] }, preflight: { state: "not planned", environment: null, verifier: null, ownerAction: null, accessTicket: null, gaps: ["Verification plan not recorded"], source: issue.url } };
   });
   const byId = new Map(tickets.map((ticket) => [ticket.identifier, ticket]));
   const outgoing = new Map(tickets.map((ticket) => [ticket.identifier, edges.filter((edge) => edge.type === "blocks" && edge.from === ticket.identifier).map((edge) => edge.to)]));

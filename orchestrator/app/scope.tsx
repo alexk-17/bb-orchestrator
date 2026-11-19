@@ -630,8 +630,7 @@ function PathwaysPreflight({
   );
 }
 
-function PathwaysWaitLaneView({ ticket }: { ticket: PathwaysTicketView }) {
-  const lane = ticket.waitLane;
+function PathwaysWaitLaneView({ lane }: { lane: PathwaysTicketView["waitLane"] }) {
   if (!lane) return null;
   const waitingIndex = lane.steps.findIndex(
     (step) => step.state === "pending" || step.state === "blocked",
@@ -702,27 +701,21 @@ function PathwaysWaitLaneView({ ticket }: { ticket: PathwaysTicketView }) {
   );
 }
 
-function PathwaysPrBadge({ ticket }: { ticket: PathwaysTicketView }) {
+function PathwaysPrItem({ ticket, entry }: { ticket: PathwaysTicketView; entry: PathwaysTicketView["prs"][number] }) {
   if (ticket.prLink.state === "missing")
     return (
       <span className="mt-1 block text-xs text-muted-foreground">
         PR link missing
       </span>
     );
-  if (ticket.prLink.state === "ambiguous")
-    return (
-      <span className="mt-1 block text-xs text-muted-foreground">
-        PR link ambiguous · {ticket.prLink.urls.length} explicit links
-      </span>
-    );
-  const pr = ticket.pr;
+  const pr = entry.pr;
   if (!pr)
     return (
       <span className="mt-1 block text-xs text-muted-foreground">
         PR reading not recorded
       </span>
     );
-  const proof = ticket.proof;
+  const proof = entry.proof;
   const proofState = proof?.state ?? "unrecorded";
   const proofColor =
     proofState === "verified"
@@ -745,10 +738,13 @@ function PathwaysPrBadge({ ticket }: { ticket: PathwaysTicketView }) {
   );
   if (pr.state === "unavailable")
     return (
-      <div className="mt-2 flex flex-wrap items-center gap-1.5 rounded-md border bg-muted/20 p-2 text-xs">
-        {link}
-        <span className="text-muted-foreground">GitHub read unavailable</span>
-        <Badge variant="outline">proof {proofState}</Badge>
+      <div className="mt-2 rounded-md border bg-muted/20 p-2 text-xs">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {link}
+          <span className="text-muted-foreground">GitHub unavailable</span>
+          <Badge variant="outline">proof {proofState}</Badge>
+        </div>
+        <PathwaysWaitLaneView lane={entry.waitLane} />
       </div>
     );
   return (
@@ -805,9 +801,15 @@ function PathwaysPrBadge({ ticket }: { ticket: PathwaysTicketView }) {
           )}
         </div>
       )}
-      <PathwaysWaitLaneView ticket={ticket} />
+      <PathwaysWaitLaneView lane={entry.waitLane} />
     </div>
   );
+}
+
+function PathwaysPrBadge({ ticket }: { ticket: PathwaysTicketView }) {
+  if (ticket.prLink.state === "missing") return <span className="mt-1 block text-xs text-muted-foreground">PR link missing</span>;
+  const active = ticket.prs.filter(({ pr }) => pr.state !== "merged" && pr.state !== "closed");
+  return active.length ? <div>{active.map((entry) => <PathwaysPrItem key={entry.pr.url} ticket={ticket} entry={entry} />)}</div> : <span className="mt-1 block text-xs text-muted-foreground">No open linked PRs</span>;
 }
 
 function PathwaysDecisionDraftView({
@@ -1686,11 +1688,10 @@ function PathwaysSection({ slug }: { slug: string }) {
                         >
                           <div className="flex h-4 items-center justify-end gap-1">
                             {ticket.prLink.state === "linked" &&
-                              ticket.pr &&
-                              ticket.pr.state !== "unavailable" && (
+                              ticket.pr && (
                                 <PathwaysNodeGlyph
-                                  label={`PR ${ticket.pr.state}`}
-                                  meaning={`Linked PR ${ticket.pr.number ?? "number not recorded"} is ${ticket.pr.state}`}
+                                  label={ticket.pr.state === "unavailable" ? "GitHub unavailable" : `PR ${ticket.pr.state}`}
+                                  meaning={ticket.pr.state === "unavailable" ? "Linked PR state could not be read" : `Linked PR ${ticket.pr.number ?? "number not recorded"} is ${ticket.pr.state}`}
                                 />
                               )}
                             {ticket.decision.waiting ? (
@@ -1877,6 +1878,12 @@ function PathwaysSection({ slug }: { slug: string }) {
                         : "not recorded"}
                     </div>
                   </div>
+                  <div>
+                    <strong>Merged PRs · {q.data?.retro?.mergedPrs.length ?? 0}</strong>
+                    <div className="mt-1 flex flex-wrap gap-2">
+                      {q.data?.retro?.mergedPrs.map((item) => <a key={item.url} href={item.url} target="_blank" rel="noreferrer" className="underline">{item.ticket} · #{item.url.match(/\/pull\/(\d+)$/)?.[1] ?? "PR"}</a>)}
+                    </div>
+                  </div>
                   <Separator />
                   <div>
                     <strong>
@@ -2044,9 +2051,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                         void q.refetch();
                       }}
                     />
-                    {selected.pr?.state !== "merged" && (
-                      <PathwaysPrBadge ticket={selected} />
-                    )}
+                    <PathwaysPrBadge ticket={selected} />
                   </div>
                 </>
               )}

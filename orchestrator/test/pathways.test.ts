@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { Engine } from "../core/engine.ts";
-import { attachPathwaysPreflight, fogBullets, linkPathwaysDecisions, mapPathwaysLimited, pathwaysMap, projectIssues, summarizePathwaysRetro, type PathwaysIssue } from "../core/pathways.ts";
+import { attachPathwaysPreflight, fogBullets, linkPathwaysDecisions, mapPathwaysLimited, pathwaysMap, projectIssues, selectPathwaysMap, summarizePathwaysRetro, type PathwaysIssue } from "../core/pathways.ts";
 
 test("Pathways detail reads cap concurrency and preserve order", async () => {
   let active = 0;
@@ -36,10 +36,13 @@ test("retro cites finished tickets, answered decisions, and the longest recorded
   map.tickets[1]!.waitLane = { head: null, reviewFreshness: "unknown", steps: [{ kind: "human review", state: "pending", since: 1000, owner: null, note: "waiting" }] };
   const retro = summarizePathwaysRetro(map, [{ id: "d-1", title: "Choose a route", state: "answered" }], 5000);
   assert.equal(retro.finished[0]?.label, "T-1");
+  assert.deepEqual(retro.mergedPrs, []);
   assert.equal(retro.decisions[0]?.title, "Choose a route");
   assert.equal(retro.stalled[0]?.label, "T-2");
   assert.equal(retro.stalled[0]?.durationMs, 4000);
   map.tickets[1]!.pr = { url: "https://github.com/acme/app/pull/101", state: "merged", number: 101, title: null, draft: false, head: null, createdAt: null, headCommittedAt: null, checksPendingSince: null, reviews: [], staleReviewDismissal: null, requiredApprovals: null, review: "", checks: "", mergeability: "", reason: "Merged", retrievedAt: 0 };
+  map.tickets[0]!.prs = [{ pr: map.tickets[1]!.pr!, proof: { state: "unrecorded", verifiedSha: null, liveInterface: null, qaPacketUrl: null, missing: [], sourceUrl: null, sourceLabel: null, observedAt: null }, waitLane: { head: null, reviewFreshness: "unknown", steps: [] } }];
+  assert.deepEqual(summarizePathwaysRetro(map, [], 5000).mergedPrs, [{ ticket: "T-1", url: "https://github.com/acme/app/pull/101" }]);
   assert.deepEqual(summarizePathwaysRetro(map, [], 5000).finished.map((item) => item.label), ["T-1"]);
 });
 
@@ -149,6 +152,7 @@ test("frontier, claims, blockers, unknowns, fog, priority, and pagination", asyn
     issue("T-18", { inverseRelations: { nodes: [blockedBy("T-14")] } }),
     issue("T-19", { inverseRelations: { nodes: [blockedBy("T-14")] } }),
     issue("T-20", { labels: { nodes: [{ name: "wayfinder:prototype" }] }, estimate: null, description: "" }),
+    issue("T-21", { labels: { nodes: [] }, description: "Work described without a proof plan" }),
   ];
   const result = pathwaysMap(map, children);
   assert.deepEqual(result.fog, ["Hidden question", "Another area"]);
@@ -173,6 +177,7 @@ test("frontier, claims, blockers, unknowns, fog, priority, and pagination", asyn
   assert.equal(result.tickets.find((ticket) => ticket.identifier === "T-3")?.displayState, "blocked");
   assert.equal(result.tickets.find((ticket) => ticket.identifier === "T-7")?.displayState, "unknown");
   assert.equal(result.tickets.find((ticket) => ticket.identifier === "T-2")?.displayState, "ready");
+  assert.equal(result.tickets.find((ticket) => ticket.identifier === "T-21")?.readiness.state, "needs proof plan");
   assert.deepEqual(result.firstPath, ["T-14", "T-18"]);
   assert.deepEqual(result.external.map((item) => [item.identifier, item.title, item.url]), [["OUT-1", "Outside approval", "https://linear.app/test/issue/OUT-1"]]);
   assert(result.edges.some((edge) => edge.from === "OUT-1" && edge.to === "T-5" && edge.type === "blocks"));
@@ -183,6 +188,10 @@ test("frontier, claims, blockers, unknowns, fog, priority, and pagination", asyn
   });
   assert.deepEqual(calls, [null, "NEXT"]);
   assert.deepEqual(nodes?.map((node) => node.identifier), ["FIRST", "NEXT"]);
+  const mapCandidates = [{ identifier: "MAP-1", labels: { nodes: [{ name: "map" }] } }, { identifier: "MAP-2", labels: { nodes: [{ name: "wayfinder:map" }] } }];
+  assert.equal(selectPathwaysMap(mapCandidates, "MAP-1")?.identifier, "MAP-1");
+  assert.equal(selectPathwaysMap(mapCandidates)?.identifier, "MAP-2");
+  assert.equal(selectPathwaysMap(mapCandidates, "MISSING"), undefined);
 });
 
 test("an explicit linked PR block links the same card in decision preview and timeline", () => {

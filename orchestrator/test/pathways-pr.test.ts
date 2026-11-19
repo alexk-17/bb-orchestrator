@@ -9,7 +9,9 @@ const reading = (change: Partial<Extract<BbPrReading, { outcome: "available" }>[
 test("only explicit PR URLs link a Linear ticket", () => {
   assert.deepEqual(extractPrLinks("This resembles PR #101", []), { state: "missing", urls: [], source: null });
   assert.deepEqual(extractPrLinks(`See [PR](${url})`, [{ url }]), { state: "linked", urls: [url], source: "both" });
-  assert.deepEqual(extractPrLinks(url, [{ url: "https://github.com/acme/app/pull/102" }]), { state: "ambiguous", urls: [url, "https://github.com/acme/app/pull/102"], source: null });
+  assert.deepEqual(extractPrLinks(url, [{ url: "https://github.com/acme/app/pull/102" }]), { state: "linked", urls: [url, "https://github.com/acme/app/pull/102"], source: "both" });
+  assert.equal(reducePathwaysPr(url, { outcome: "unavailable" }, 1000).state, "unavailable");
+  assert.equal(reducePathwaysPr(url, reading({ state: "closed" }), 1000).state, "closed");
 });
 
 test("green checks cannot override draft, missing review, or unknown mergeability", () => {

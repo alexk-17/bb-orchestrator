@@ -1,7 +1,7 @@
 import { PR_URL_RE, type BbPrReading } from "./open-prs.ts";
 
 export type PathwaysPrLinks = { state: "missing" | "linked" | "ambiguous"; urls: string[]; source: "attachment" | "description" | "both" | null };
-export type PathwaysPr = { url: string; state: "unavailable" | "blocked" | "ready" | "merged"; number: number | null; title: string | null; draft: boolean | null; head: string | null; createdAt: number | null; headCommittedAt: number | null; checksPendingSince: number | null; reviews: { login: string; state: string; sha: string; submittedAt: number | null }[]; staleReviewDismissal: boolean | null; requiredApprovals: number | null; review: string; checks: string; mergeability: string; reason: string; retrievedAt: number };
+export type PathwaysPr = { url: string; state: "unavailable" | "blocked" | "ready" | "merged" | "closed"; number: number | null; title: string | null; draft: boolean | null; head: string | null; createdAt: number | null; headCommittedAt: number | null; checksPendingSince: number | null; reviews: { login: string; state: string; sha: string; submittedAt: number | null }[]; staleReviewDismissal: boolean | null; requiredApprovals: number | null; review: string; checks: string; mergeability: string; reason: string; retrievedAt: number };
 export type PathwaysProofRecord = { prUrl: string; verifiedSha: string | null; status: "verified" | "partial" | "blocked"; liveInterface: string | null; qaPacketUrl: string | null; sourceUrl: string | null; sourceLabel: string; observedAt: number };
 export type PathwaysProof = { state: "unrecorded" | "stale" | "partial" | "blocked" | "verified"; verifiedSha: string | null; liveInterface: string | null; qaPacketUrl: string | null; missing: string[]; sourceUrl: string | null; sourceLabel: string | null; observedAt: number | null };
 export type PathwaysWaitStep = { kind: "check run" | "human review" | "QA" | "draft decision" | "merge go"; state: "done" | "pending" | "blocked" | "unknown"; since: number | null; owner: string | null; note: string };
@@ -30,8 +30,8 @@ export function extractPrLinks(description: string | null, attachments: { url: s
     if (url) { urls.add(url); fromDescription.add(url); }
   }
   const values = [...urls].sort();
-  const source = values.length !== 1 ? null : fromAttachments.has(values[0]!) && fromDescription.has(values[0]!) ? "both" : fromAttachments.has(values[0]!) ? "attachment" : "description";
-  return { state: values.length === 0 ? "missing" : values.length === 1 ? "linked" : "ambiguous", urls: values, source };
+  const source = !values.length ? null : fromAttachments.size && fromDescription.size ? "both" : fromAttachments.size ? "attachment" : "description";
+  return { state: values.length === 0 ? "missing" : "linked", urls: values, source };
 }
 
 export function reducePathwaysPr(url: string, reading: BbPrReading, retrievedAt: number): PathwaysPr {
@@ -50,7 +50,7 @@ export function reducePathwaysPr(url: string, reading: BbPrReading, retrievedAt:
   const checks = source?.checks?.state ?? "not recorded";
   const mergeability = source?.mergeability?.state ?? "not recorded";
   const reason = !source ? "PR reading unavailable" : source.state === "merged" ? "Merged" : source.draft === true || source.state === "draft" ? "Draft PR" : source.state !== "open" ? "PR is closed" : !head ? "Head not recorded" : review !== "approved" ? review === "none" && requiredApprovals ? `Review required (0 of ${requiredApprovals})` : review === "none" || review === "not recorded" ? "Review not recorded" : "Review required" : checks !== "passing" ? checks === "not recorded" ? "Checks not recorded" : `Checks ${checks}` : mergeability !== "ready_to_merge" ? "Mergeability not confirmed" : "Ready at this head";
-  const state = !source ? "unavailable" : source.state === "merged" ? "merged" : reason === "Ready at this head" ? "ready" : "blocked";
+  const state = !source ? "unavailable" : source.state === "merged" ? "merged" : source.state === "closed" ? "closed" : reason === "Ready at this head" ? "ready" : "blocked";
   return { url, state, number, title, draft, head, createdAt, headCommittedAt, checksPendingSince, reviews, staleReviewDismissal, requiredApprovals, review, checks, mergeability, reason, retrievedAt };
 }
 

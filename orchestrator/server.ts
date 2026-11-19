@@ -11,7 +11,7 @@ import { cliRun, setupSidebar } from "./core/sidebar.ts";
 import { chmodSync, closeSync, cpSync, createReadStream, openSync, readdirSync, readSync, rmSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
 import { approveBody, type DeliverableFolders, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody, type Pathways } from "./contract.ts";
-import { projectIssues, pathwaysMap, linkPathwaysDecisions, attachPathwaysPreflight, draftPathwaysDecision, summarizePathwaysRetro, pathwaysDecisionKey, submitPathwaysDecision, mapPathwaysLimited, type PathwaysIssue } from "./core/pathways.ts";
+import { projectIssues, pathwaysMap, linkPathwaysDecisions, attachPathwaysPreflight, draftPathwaysDecision, summarizePathwaysRetro, pathwaysDecisionKey, submitPathwaysDecision, mapPathwaysLimited, selectPathwaysMap, type PathwaysIssue } from "./core/pathways.ts";
 import { collectPathwaysProofRecords, reducePathwaysPr, reducePathwaysProof, reducePathwaysWaitLane } from "./core/pathways-pr.ts";
 import { type DeliverPlace, type OutputPlace, type ProofInput, SCOPING_SUMMARY_MAX, SCOPING_TASK_NAME_MAX, SECRET_TTL_MS } from "./core/engine.ts";
 import { deliverBlocks, deliverPoints, fromJson, inputBlocksSchema, lessTextRefusal, looksLikeCode } from "./blocks.ts";
@@ -2098,9 +2098,11 @@ export default async function plugin(bb: BbPluginApi) {
       if (!apiKey) return failure("Set the Pathways Linear API key in Orchestrator plugin settings.");
       if (!engine.project(slug)) return failure("Pathways project not found.");
       let linearProjectId: string | undefined;
+      let linearMapIssue: string | undefined;
       try {
-        const record = JSON.parse(readFileSync(join(projectsDir(), slug, projectRecord()), "utf8")) as { linearProjectId?: unknown };
+        const record = JSON.parse(readFileSync(join(projectsDir(), slug, projectRecord()), "utf8")) as { linearProjectId?: unknown; linearMapIssue?: unknown };
         linearProjectId = typeof record.linearProjectId === "string" ? record.linearProjectId.trim() : undefined;
+        linearMapIssue = typeof record.linearMapIssue === "string" ? record.linearMapIssue.trim() : undefined;
       } catch {
         return failure("Set the Pathways Linear project link in this project's record.");
       }
@@ -2119,8 +2121,8 @@ export default async function plugin(bb: BbPluginApi) {
         };
         const summary = await projectIssues((after) => request<{ project: { issues: { nodes: { identifier: string; parent: { identifier: string } | null; labels: { nodes: { name: string }[] } }[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } } | null }>(`query($id: String!, $after: String) { project(id: $id) { issues(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { identifier parent { identifier } labels { nodes { name } } } } } }`, linearProjectId, after));
         if (!summary) return failure("Pathways Linear project not found. Check linearProjectId.");
-        const mapIndex = summary.find((issue) => issue.labels.nodes.some((label) => label.name.toLowerCase() === "wayfinder:map"));
-        if (!mapIndex) return failure("No Pathways map issue (label wayfinder:map) found in the linked Linear project.");
+        const mapIndex = selectPathwaysMap(summary, linearMapIssue);
+        if (!mapIndex) return failure(linearMapIssue ? `Pathways map issue ${linearMapIssue} not found in the linked Linear project.` : "No Pathways map issue (label wayfinder:map) found in the linked Linear project.");
         const ids = [mapIndex.identifier, ...summary.filter((issue) => issue.parent?.identifier === mapIndex.identifier).map((issue) => issue.identifier)];
         const detailQuery = `query($id: String!) { issue(id: $id) { identifier title url description updatedAt state { type name } priority estimate assignee { name } labels { nodes { name } } parent { identifier } attachments { nodes { id url } } relations { nodes { type relatedIssue { identifier title url state { type } } } } inverseRelations { nodes { type issue { identifier title url state { type } } } } } }`;
         const issues = await mapPathwaysLimited(ids, 8, async (id) => (await request<{ issue: PathwaysIssue | null }>(detailQuery, id)).issue);
@@ -2131,15 +2133,22 @@ export default async function plugin(bb: BbPluginApi) {
         for (const ticket of map.tickets) if (ticket.readiness.state === "needs decision" || ticket.displayState === "blocked") ticket.decisionDraft = draftPathwaysDecision(ticket);
         const deliverables = engine.deliverables().filter((deliverable) => deliverable.project === slug);
         const waits = engine.openWaits();
-        await mapPathwaysLimited(map.tickets, 8, async (ticket) => {
-          if (ticket.prLink.state !== "linked") return;
-          const url = ticket.prLink.urls[0]!;
+        const linked = map.tickets.flatMap((ticket) => ticket.prLink.urls.map((url) => ({ ticket, url })));
+        await mapPathwaysLimited(linked, 8, async ({ ticket, url }) => {
           const reading = await openPrs.readPathways(url).catch(() => ({ outcome: "unavailable" as const }));
-          ticket.pr = reducePathwaysPr(url, reading, Date.now());
-          ticket.proof = reducePathwaysProof(ticket.pr, collectPathwaysProofRecords(url, deliverables));
+          const pr = reducePathwaysPr(url, reading, Date.now());
+          const proof = reducePathwaysProof(pr, collectPathwaysProofRecords(url, deliverables));
           const mergeDecision = decisions.find((decision) => decision.orchestrator.action === "merge" && decision.request.blocks?.some((block) => block.kind === "pr" && block.url.replace(/\/+$/, "").toLowerCase() === url));
-          ticket.waitLane = reducePathwaysWaitLane(ticket.pr, ticket.proof, waits.filter((wait) => wait.prUrl.replace(/\/+$/, "").toLowerCase() === url), mergeDecision ? { id: mergeDecision.id, state: mergeDecision.state, createdAt: Date.parse(mergeDecision.created_at) } : null);
+          const waitLane = reducePathwaysWaitLane(pr, proof, waits.filter((wait) => wait.prUrl.replace(/\/+$/, "").toLowerCase() === url), mergeDecision ? { id: mergeDecision.id, state: mergeDecision.state, createdAt: Date.parse(mergeDecision.created_at) } : null);
+          ticket.prs.push({ pr, proof, waitLane });
         });
+        for (const ticket of map.tickets) {
+          ticket.prs.sort((a, b) => a.pr.url.localeCompare(b.pr.url));
+          const primary = ticket.prs.filter(({ pr }) => pr.state !== "merged" && pr.state !== "closed").sort((a, b) => ({ unavailable: 0, blocked: 1, ready: 2, merged: 3, closed: 4 })[a.pr.state] - ({ unavailable: 0, blocked: 1, ready: 2, merged: 3, closed: 4 })[b.pr.state])[0];
+          ticket.pr = primary?.pr ?? null;
+          ticket.proof = primary?.proof ?? null;
+          ticket.waitLane = primary?.waitLane ?? null;
+        }
         attachPathwaysPreflight(map, issues.slice(1) as PathwaysIssue[]);
         const retroLibrary = join(projectsDir(), slug, "library");
         let retroDoc: string | null = null;

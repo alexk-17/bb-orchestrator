@@ -141,7 +141,10 @@ so in Activity. Desktop and web then get only the CoS thread's notifications. To
 
 Pathways shows a read-only Linear dependency map for one project at a time. Set the Orchestrator's `linearApiKey`, then
 set `linearProjectId` in that project's `project.json` to its Linear project ID. The project card opens its map in one
-click. The page never writes to Linear; the included [pathways-linear skill](orchestrator/skills/pathways-linear/SKILL.md)
+click. Set `linearMapIssue` to an identifier such as `AIO-729` to use that issue and its direct sub-issues regardless
+of labels; otherwise Pathways uses the `wayfinder:map` label. Each ticket shows every open PR explicitly linked in its
+Linear attachments or description, with separate state, proof and wait lane. Merged and closed PRs leave the forward
+view. The page never writes to Linear; the included [pathways-linear skill](orchestrator/skills/pathways-linear/SKILL.md)
 tells agents how to build and update a map in Linear with a key you give them.
 
 ### The Cloud tab

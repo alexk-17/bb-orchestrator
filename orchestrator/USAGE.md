@@ -275,13 +275,15 @@ tab's picker remembers the last one. Hide the tab with `hiddenTabs: pathways`.
 
 - **Setup:** set `linearApiKey` (a Linear personal API key, stored as a secret) in the plugin settings, then set
   `linearProjectId` in the project's `project.json` to its Linear project ID. Until both are set, the tab says which is
-  missing.
+  missing. Set `linearMapIssue` to an issue identifier such as `AIO-729` to use an existing map issue in that project,
+  regardless of its labels. Without it, Pathways looks for the `wayfinder:map` label.
 - **The map:** one Linear issue labelled `wayfinder:map` and its sub-issues, drawn as a graph with blockers as edges, the
   first path numbered, and a What's next column (First path, Needs you, Claimed, Blocked on, Open questions). Click a
   ticket for its readiness, owner actions, linked PR and wait lane, proof at the PR's head, preflight and decision impact.
 - **Links fail closed:** a ticket links to a PR only through a GitHub PR URL in its Linear attachments or description,
   never by a similar title. Linked PR state is read through a connected machine's own `gh` login; without one the tab
-  says "GitHub unavailable" rather than guessing.
+  says "GitHub unavailable" rather than guessing. A ticket can show several open linked PRs, each with its own state,
+  proof and wait lane. Merged and closed PRs leave the forward view; merged PRs can still appear in the retro.
 - **Draft decision:** for a blocked ticket, previews a card for the project's lead and files it only when you submit.
   It is the tab's only write, and a second submit of the same question files nothing new.
 - **Retro:** a collapsed card built from the orchestrator's own records: finished tickets and merged PRs, answered
