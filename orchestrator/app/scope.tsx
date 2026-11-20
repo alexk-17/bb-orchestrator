@@ -409,8 +409,8 @@ export function ScopeView({ q, projects, deliverables, refetchAll, mons, accents
   );
 }
 
-const pathwaysPathColor = "teal";
-const pathwaysColors = { ready: "var(--success)", claimed: "royalblue", blocked: "var(--muted-foreground)", unknown: "blueviolet", "needs-you": "var(--warning-text)", done: "color-mix(in srgb, var(--success) 65%, var(--muted-foreground))" } as const;
+const pathwaysPathColor = "var(--pathways-path, teal)";
+const pathwaysColors = { ready: "var(--success)", claimed: "var(--pathways-claimed, royalblue)", blocked: "var(--muted-foreground)", unknown: "var(--pathways-unknown, blueviolet)", "needs-you": "var(--warning-text)", done: "color-mix(in srgb, var(--success) 65%, var(--muted-foreground))" } as const;
 
 function charWidth(ch: string): number {
   const cp = ch.codePointAt(0) ?? 0;
@@ -1385,7 +1385,7 @@ function PathwaysSection({ slug }: { slug: string }) {
       data-pathways={slug}
       aria-label="Pathways"
     >
-      <style>{`@keyframes pathways-flow { to { stroke-dashoffset: -20; } } @media (prefers-reduced-motion: no-preference) { [data-pathways] .pathways-flow { animation: pathways-flow 1s linear infinite; } }`}</style>
+      <style>{`[data-pathways] { --pathways-path: teal; --pathways-claimed: royalblue; --pathways-unknown: blueviolet; } .dark [data-pathways] { --pathways-path: lightseagreen; --pathways-claimed: cornflowerblue; --pathways-unknown: mediumpurple; } @keyframes pathways-flow { to { stroke-dashoffset: -20; } } @media (prefers-reduced-motion: no-preference) { [data-pathways] .pathways-flow { animation: pathways-flow 1s linear infinite; } }`}</style>
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2 [overflow-wrap:anywhere]">
           {map && (
@@ -1715,7 +1715,7 @@ function PathwaysSection({ slug }: { slug: string }) {
               </div>
               <svg
                 ref={graphViewport}
-                className="block w-full min-h-[300px] h-[min(70vh,720px)] max-[1100px]:h-[min(44vh,360px)] cursor-grab active:cursor-grabbing"
+                className="block w-full min-h-[300px] h-[min(70vh,720px)] max-[1100px]:h-[min(44vh,360px)] cursor-grab text-foreground active:cursor-grabbing"
                 role="img"
                 aria-label="Pathways map graph"
               >
@@ -1744,14 +1744,14 @@ function PathwaysSection({ slug }: { slug: string }) {
                                 ? pathwaysColors[blockerTicket.displayState]
                                 : "var(--muted-foreground)"
                         }
-                        strokeWidth={first ? 2 : 1.25}
+                        strokeWidth={first ? 2 : 1.5}
                         strokeDasharray={
-                          active && !first ? "6 4" : !active ? "2 5" : undefined
+                          active && !first ? "6 4" : !active ? "2 4" : undefined
                         }
                         className={
                           active && !first ? "pathways-flow" : undefined
                         }
-                        opacity={first ? 1 : active ? 0.75 : 0.5}
+                        opacity={first ? 1 : active ? 0.9 : 0.72}
                         markerEnd={
                           first
                             ? "url(#pathways-arrow-first)"
@@ -1854,15 +1854,11 @@ function PathwaysSection({ slug }: { slug: string }) {
                         width={box.w}
                         height={box.h}
                         rx="6"
-                        fill={
-                          ticket?.displayState === "done"
-                            ? "var(--muted)"
-                            : "var(--card)"
-                        }
+                        fill="var(--card)"
                         stroke="var(--border)"
                         strokeWidth={1}
                         strokeDasharray={outside ? "5 4" : undefined}
-                        opacity={ticket?.displayState === "done" ? 0.85 : 1}
+                        opacity={ticket?.displayState === "done" ? 0.68 : 1}
                       />
                       {ticket && (
                         <rect
@@ -1895,7 +1891,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                       )}
                       {ticket?.waitsOnYou && (
                         <Hourglass
-                          x={box.x + box.w - 22}
+                          x={box.x + box.w - (pathIds.has(box.id) ? 42 : 22)}
                           y={box.y + 7}
                           width={14}
                           height={14}
@@ -2091,6 +2087,23 @@ function PathwaysSection({ slug }: { slug: string }) {
                   </div>
                 </div>
               )}
+              {(() => {
+                const readyExtra = map.frontier.filter(
+                  (id) => !pathIds.has(id) && tickets.get(id)?.displayState === "ready",
+                );
+                return readyExtra.length ? (
+                  <details className="rounded-lg border p-3" open>
+                    <summary className="cursor-pointer text-sm font-semibold">
+                      Ready · {readyExtra.length}
+                    </summary>
+                    <div className="mt-2 grid gap-1">
+                      {rows(readyExtra).map((ticket) =>
+                        ticketRow(ticket, ticketFact(ticket) || "Ready to start"),
+                      )}
+                    </div>
+                  </details>
+                ) : null;
+              })()}
               {!!map.claimed.length && (
                 <details className="rounded-lg border p-3" open={map.claimed.some((id) => !pathIds.has(id))}>
                   <summary className="cursor-pointer text-sm font-semibold">
@@ -2118,6 +2131,24 @@ function PathwaysSection({ slug }: { slug: string }) {
                   </div>
                 </details>
               )}
+              {(() => {
+                const unknownIds = visible.filter((t) => t.displayState === "unknown" && !pathIds.has(t.identifier)).map((t) => t.identifier);
+                return unknownIds.length ? (
+                  <details className="rounded-lg border p-3">
+                    <summary className="cursor-pointer text-sm font-semibold">
+                      Needs details · {unknownIds.length}
+                    </summary>
+                    <div className="mt-2 grid gap-1">
+                      {rows(unknownIds).map((ticket) =>
+                        ticketRow(
+                          ticket,
+                          ticket.unknown.join(" · ") || "Missing scope details",
+                        ),
+                      )}
+                    </div>
+                  </details>
+                ) : null;
+              })()}
               {!!map.fog.length && (
                 <details className="rounded-lg border p-3">
                   <summary className="cursor-pointer text-sm font-semibold">
