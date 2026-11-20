@@ -1110,6 +1110,9 @@ function PathwaysSection({ slug }: { slug: string }) {
   const graphContent = useRef<SVGGElement>(null);
   const graphZoom = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null);
   const graphFit = useRef<(() => void) | null>(null);
+  const graphFocus = useRef<(() => void) | null>(null);
+  const zoomTransformRef = useRef(zoomIdentity);
+  const [zoomBounds, setZoomBounds] = useState({ k: 1, min: 0.1, max: 2 });
   const [refresh, setRefresh] = useState(false);
   const refreshSeen = useRef(false);
   const [retroOpen, setRetroOpen] = useState(false);
@@ -1234,16 +1237,22 @@ function PathwaysSection({ slug }: { slug: string }) {
       )
     : null;
   const graphIdentity = `${slug}:${hideDone}:${narrowGraph}:${graphNodes.map((node) => node.id).join(",")}:${visibleEdges.map((edge) => `${edge.from}:${edge.to}`).join(",")}`;
+  const focusTargetId = map?.firstPath[0] ?? visible.find((ticket) => ticket.displayState === "needs-you")?.identifier ?? null;
+  const focusBox = graph?.boxes.find((box) => box.id === focusTargetId) ?? null;
   useEffect(() => {
     const svg = graphViewport.current;
     const content = graphContent.current;
     if (!svg || !content || !graph) return;
     const selection = select(svg);
+    let minScale = 0.05;
+    let maxScale = 2;
     const behavior = zoom<SVGSVGElement, unknown>()
       .clickDistance(4)
-      .translateExtent([[0, 0], [graph.width, graph.height]])
+      .translateExtent([[-80, -80], [graph.width + 80, graph.height + 80]])
       .on("zoom", (event) => {
+        zoomTransformRef.current = event.transform;
         content.setAttribute("transform", event.transform.toString());
+        setZoomBounds({ k: event.transform.k, min: minScale, max: maxScale });
       });
     graphZoom.current = behavior;
     const fit = () => {
@@ -1251,8 +1260,10 @@ function PathwaysSection({ slug }: { slug: string }) {
       if (!width || !height) return;
       const topPad = 48;
       const availH = Math.max(120, height - topPad);
-      const scale = Math.min(width / graph.width, availH / graph.height) * 0.92;
-      behavior.extent([[0, 0], [width, height]]).scaleExtent([scale / 2, scale * 4]);
+      const scale = Math.min(1.15, Math.min(width / graph.width, availH / graph.height) * 0.92);
+      minScale = Math.min(scale * 0.5, 0.5);
+      maxScale = Math.max(2, scale * 3);
+      behavior.extent([[0, 0], [width, height]]).scaleExtent([minScale, maxScale]);
       const tx = (width - graph.width * scale) / 2;
       const freeY = Math.max(0, availH - graph.height * scale);
       const ty = topPad + Math.min(freeY / 2, 24);
@@ -1261,8 +1272,23 @@ function PathwaysSection({ slug }: { slug: string }) {
         zoomIdentity.translate(tx, ty).scale(scale),
       );
     };
+    const focusNext = () => {
+      if (!focusBox) return;
+      const { width, height } = svg.getBoundingClientRect();
+      if (!width || !height) return;
+      const targetScale = 1;
+      const cx = focusBox.x + focusBox.w / 2;
+      const cy = focusBox.y + focusBox.h / 2;
+      const tx = width * 0.28 - cx * targetScale;
+      const ty = Math.max(64, height * 0.28) - cy * targetScale;
+      selection.call(behavior).call(
+        behavior.transform,
+        zoomIdentity.translate(tx, ty).scale(targetScale),
+      );
+    };
     const observer = new ResizeObserver(fit);
     graphFit.current = fit;
+    graphFocus.current = focusNext;
     observer.observe(svg);
     fit();
     return () => {
@@ -1270,17 +1296,30 @@ function PathwaysSection({ slug }: { slug: string }) {
       selection.on(".zoom", null);
       graphZoom.current = null;
       graphFit.current = null;
+      graphFocus.current = null;
     };
-  }, [graphIdentity, graph?.width, graph?.height]);
+  }, [graphIdentity, graph?.width, graph?.height, focusBox?.x, focusBox?.y]);
   const zoomAtCenter = (factor: number) => {
     const svg = graphViewport.current;
     if (svg && graphZoom.current) {
       const { width, height } = svg.getBoundingClientRect();
-      select(svg).call(graphZoom.current.scaleBy, factor, [width / 2, height / 2]);
+      const t = zoomTransformRef.current;
+      let anchor: [number, number] = [width / 2, height / 2];
+      if (factor > 1 && focusBox && t.k < 0.75) {
+        const sx = t.applyX(focusBox.x + focusBox.w / 2);
+        const sy = t.applyY(focusBox.y + focusBox.h / 2);
+        if (sx >= 0 && sx <= width && sy >= 0 && sy <= height) {
+          anchor = [sx, sy];
+        }
+      }
+      select(svg).call(graphZoom.current.scaleBy, factor, anchor);
     }
   };
   const fitGraph = () => {
     graphFit.current?.();
+  };
+  const focusNextGraph = () => {
+    graphFocus.current?.();
   };
   const rows = (ids: string[]) =>
     ids
@@ -1708,9 +1747,15 @@ function PathwaysSection({ slug }: { slug: string }) {
               </div>
               <Separator className="mb-2" />
               <div className="relative">
-              <div className="absolute right-2 top-2 z-10 flex gap-1 rounded-md border bg-background/95 p-1 shadow-sm">
-                <Button variant="outline" size="icon" aria-label="Zoom in" onClick={() => zoomAtCenter(1.4)}><Plus className="size-4" /></Button>
-                <Button variant="outline" size="icon" aria-label="Zoom out" onClick={() => zoomAtCenter(1 / 1.4)}><Minus className="size-4" /></Button>
+              <div className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-md border bg-background/95 p-1 shadow-sm">
+                <span className="px-1.5 font-mono text-[11px] text-muted-foreground" data-pathways-zoom="">
+                  {Math.round(zoomBounds.k * 100)}%
+                </span>
+                <Button variant="outline" size="icon" aria-label="Zoom in" disabled={zoomBounds.k >= zoomBounds.max - 0.01} onClick={() => zoomAtCenter(1.4)}><Plus className="size-4" /></Button>
+                <Button variant="outline" size="icon" aria-label="Zoom out" disabled={zoomBounds.k <= zoomBounds.min + 0.005} onClick={() => zoomAtCenter(1 / 1.4)}><Minus className="size-4" /></Button>
+                {focusBox && (
+                  <Button variant="outline" size="sm" aria-label="Focus next step" onClick={focusNextGraph}>Next</Button>
+                )}
                 <Button variant="outline" size="sm" aria-label="Fit to view" onClick={fitGraph}>Fit</Button>
               </div>
               <svg
