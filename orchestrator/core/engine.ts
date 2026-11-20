@@ -1028,13 +1028,18 @@ export class Engine {
         throw new EngineError("conflict", `thread ${threadId} is already ${existing.address}`);
       }
       const proj = role === "cos" || role === "steward" ? null : project;
-      // a retired thread may take a new role; its old address stays retired (items keep naming it)
-      this.db.prepare(`DELETE FROM agents WHERE thread_id = ? AND retired_at IS NOT NULL`).run(threadId);
+      // the next number is one past the highest ever given in the project, retired ones included (items and history
+      // name them), read before this thread's own retired row goes: a count fell short once re-registering deleted rows
       let n: number | undefined;
       if (role === "thread") {
-        const c = this.db.prepare(`SELECT COUNT(*) AS c FROM agents WHERE role = 'thread' AND project = ?`).get(proj) as { c: number };
-        n = c.c + 1;
+        const prefix = `thread:${proj}:`;
+        const m = this.db
+          .prepare(`SELECT MAX(CAST(substr(address, ?) AS INTEGER)) AS m FROM agents WHERE role = 'thread' AND project = ? AND substr(address, 1, ?) = ?`)
+          .get(prefix.length + 1, proj, prefix.length, prefix) as { m: number | null };
+        n = (m.m ?? 0) + 1;
       }
+      // a retired thread may take a new role; its old address stays retired (items keep naming it)
+      this.db.prepare(`DELETE FROM agents WHERE thread_id = ? AND retired_at IS NOT NULL`).run(threadId);
       const address = addressFor(role, proj, n);
       if (this.agentByAddress(address)) throw new EngineError("conflict", `${address} is already taken`);
       if (role === "lead") this.ensureProject(proj!, null); // its type is picked before its Pokémon
