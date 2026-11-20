@@ -486,6 +486,9 @@ test("frontier, claims, blockers, unknowns, fog, priority, and pagination", asyn
     issue("C-3", { inverseRelations: { nodes: [blockedBy("C-2")] } }),
   ]);
   assert.deepEqual(cyclic.cycles, [["C-1", "C-2", "C-3"]]);
+  const layer = (depth: number) => Array.from({ length: 6 }, (_, index) => `L${String(depth).padStart(2, "0")}-${index}`);
+  const dense = pathwaysMap(map, Array.from({ length: 16 }, (_, depth) => layer(depth).map((id) => issue(id, depth ? { inverseRelations: { nodes: layer(depth - 1).map((from) => blockedBy(from)) } } : {}))).flat());
+  assert.deepEqual(dense.firstPath, Array.from({ length: 16 }, (_, depth) => layer(depth)[0]));
 });
 
 test("an explicit linked PR block links the same card in decision preview and timeline", () => {
