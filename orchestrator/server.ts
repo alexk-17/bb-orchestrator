@@ -2227,8 +2227,24 @@ export default async function plugin(bb: BbPluginApi) {
             waits,
             now,
           });
+          const retroSummary = summarizePathwaysRetro(
+            map,
+            decisions.map((decision) => ({
+              id: decision.id,
+              title: decision.ask?.title ?? decision.request.title,
+              state: decision.state,
+            })),
+            now,
+          );
+          const retro =
+            retroSummary.finished.length ||
+            retroSummary.mergedPrs.length ||
+            retroSummary.decisions.length ||
+            retroSummary.stalled.length
+              ? { ...retroSummary, doc: null, hostId: null }
+              : null;
           const notice = linearProjectId && !apiKey ? "Linear project is linked (linearProjectId is set), but linearApiKey is unset in Orchestrator plugin settings. Showing the local map until you set linearApiKey and refresh." : null;
-          return { error: null, notice, map, retro: null };
+          return { error: null, notice, map, retro };
         };
         const localKey = `local:${linearProjectId ? "unkeyed" : "direct"}`;
         return pathwaysSnapshots.view(slug, refresh ?? false, readLocal, localKey);

@@ -877,7 +877,7 @@ function PathwaysPrItem({ ticket, entry }: { ticket: PathwaysTicketView; entry: 
 }
 
 function PathwaysPrBadge({ ticket }: { ticket: PathwaysTicketView }) {
-  if (ticket.prLink.state === "missing") return <span className="mt-1 block text-xs text-muted-foreground">PR link missing</span>;
+  if (ticket.prLink.state === "missing") return ticket.type === "decision" ? null : <span className="mt-1 block text-xs text-muted-foreground">PR link missing</span>;
   const active = ticket.prs.filter(({ pr }) => pr.state !== "merged" && pr.state !== "closed");
   return active.length ? <div>{active.map((entry) => <PathwaysPrItem key={entry.pr.url} ticket={ticket} entry={entry} />)}</div> : <span className="mt-1 block text-xs text-muted-foreground">No open linked PRs</span>;
 }
@@ -904,11 +904,18 @@ function PathwaysDecisionDraftView({
   )
     return (
       <div
-        className="mt-2 text-xs font-medium"
+        className="mt-2 flex flex-wrap items-center gap-2 text-xs font-medium"
         style={{ color: "var(--foreground)" }}
       >
-        Filed {ticket.decision.cardId} · linked to {ticket.identifier} · in
-        Needs you
+        <span>Filed {ticket.decision.cardId} · linked to {ticket.identifier}</span>
+        <OpenRef
+          open={panel("board", `[data-decision="${ticket.decision.cardId}"]`)}
+          title="Answer decision card in Needs you"
+          data="card"
+          className="underline"
+        >
+          Open in Needs you
+        </OpenRef>
       </div>
     );
   if (!draft) return null;
@@ -2234,14 +2241,26 @@ function PathwaysSection({ slug }: { slug: string }) {
                       {q.data?.retro?.finished.length
                         ? q.data.retro.finished.map((item) => (
                             <span key={item.label}>
-                              <a
-                                href={item.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="underline"
-                              >
-                                {item.label}
-                              </a>
+                              {item.url ? (
+                                <a
+                                  href={item.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="underline"
+                                >
+                                  {item.label}
+                                </a>
+                              ) : (
+                                <Button
+                                  type="button"
+                                  variant="link"
+                                  size="sm"
+                                  className="inline h-auto p-0 align-baseline text-xs underline"
+                                  onClick={() => openDetail(item.label)}
+                                >
+                                  {item.label}
+                                </Button>
+                              )}
                               {item.prUrl && (
                                 <>
                                   {" "}
@@ -2300,14 +2319,26 @@ function PathwaysSection({ slug }: { slug: string }) {
                       {q.data?.retro?.stalled.length
                         ? q.data.retro.stalled.map((item) => (
                             <div key={item.label}>
-                              <a
-                                href={item.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="underline"
-                              >
-                                {item.label}
-                              </a>{" "}
+                              {item.url ? (
+                                <a
+                                  href={item.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="underline"
+                                >
+                                  {item.label}
+                                </a>
+                              ) : (
+                                <Button
+                                  type="button"
+                                  variant="link"
+                                  size="sm"
+                                  className="inline h-auto p-0 align-baseline text-xs underline"
+                                  onClick={() => openDetail(item.label)}
+                                >
+                                  {item.label}
+                                </Button>
+                              )}{" "}
                               · {item.kind} ·{" "}
                               {Math.round(item.durationMs / 3_600_000)}h from
                               recorded start
@@ -2373,7 +2404,11 @@ function PathwaysSection({ slug }: { slug: string }) {
                         {selected.title}
                       </DialogTitle>
                       <DialogDescription>
-                        Ticket details and next actions
+                        {selected.type === "decision"
+                          ? "Decision card details and next actions"
+                          : map.source === "orchestrator"
+                            ? "Project item details and next actions"
+                            : "Ticket details and next actions"}
                       </DialogDescription>
                     </div>
                     <Button
@@ -2388,7 +2423,9 @@ function PathwaysSection({ slug }: { slug: string }) {
                   <div className="grid gap-3 text-sm">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <Badge variant="outline">{selected.displayState}</Badge>
-                      <span>· {selected.assignee ?? "Owner not recorded"}</span>
+                      {(selected.assignee || selected.type !== "decision") && (
+                        <span>· {selected.assignee ?? "Owner not recorded"}</span>
+                      )}
                       {!!selected.blockers.length && (
                         <span>
                           · Blocked by{" "}
@@ -2429,11 +2466,9 @@ function PathwaysSection({ slug }: { slug: string }) {
                     </div>
                     <UiCard className="gap-1 px-3 py-3">
                       <CardTitle className="text-sm">
-                        Scope readiness ·{" "}
-                        {selected.readiness.state === "ready" &&
-                        (selected.displayState === "blocked" || selected.preflight.state === "needs access")
-                          ? "spec ready (blocked)"
-                          : selected.readiness.state}
+                        {selected.type === "decision"
+                          ? `Decision status · ${selected.decision.waiting ? "awaiting answer" : selected.displayState}`
+                          : `Scope readiness · ${selected.readiness.state === "ready" && (selected.displayState === "blocked" || selected.preflight.state === "needs access") ? "spec ready (blocked)" : selected.readiness.state}`}
                       </CardTitle>
                       <p className="mb-1 mt-2 text-xs">
                         {selected.readiness.reasons.join(" · ") ||

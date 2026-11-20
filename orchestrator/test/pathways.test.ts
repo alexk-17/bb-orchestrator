@@ -188,7 +188,9 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
     assert.equal(local.map.ownerActions[0]?.neededBefore, 1);
     assert.deepEqual(local.map.fog, ["Waiting on staging key"]);
     assert.ok(local.map.tickets.every((t) => t.decisionDraft === null));
-    assert.equal(local.retro, null);
+    assert.ok(local.retro);
+    assert.deepEqual(local.retro.finished.map((item) => item.label), ["STEP-1"]);
+    assert.deepEqual(local.retro.decisions.map((item) => item.id), [answeredCard.id]);
 
     const emptyView = pathwaysViewSchema.parse(await callNoKey({ slug: "empty" }));
     assert.equal(emptyView.error, null);
