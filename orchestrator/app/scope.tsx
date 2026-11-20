@@ -22,7 +22,7 @@ import { zoom, zoomIdentity, type ZoomBehavior } from "d3-zoom";
 import type { z } from "zod";
 import { experimental_useRpcQuery, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { Check, ChevronRight, Hourglass, Minus, Plus, UserRound } from "lucide-react";
-import { WRITES, rpcContract, type Card, type Deliverables, type Projects, type Scope, type Pathways, type answerBody, type secretBody } from "../contract.ts";
+import { WRITES, rpcContract, type Card, type Deliverables, type Projects, type Scope, type Pathways, type PathwaysErrorKind, type answerBody, type secretBody } from "../contract.ts";
 import { layout } from "./diagram-layout.ts";
 import { openInBb, PANEL_PATH } from "./open-proof.ts";
 import { ccCss } from "./cc-lines.tsx";
@@ -430,34 +430,39 @@ function fitText(text: string, limit: number): { head: string; rest: string } {
   return { head: chars.slice(0, index).join(""), rest: chars.slice(index).join("") };
 }
 
+function textWidth(text: string): number {
+  let width = 0;
+  for (const ch of text) width += charWidth(ch);
+  return width;
+}
+
 function titleLines(title: string, limit = 27, count = 2): string[] {
   const lines: string[] = [];
   let overflow = false;
-  const pushWord = (word: string) => {
+  for (const word of title.trim().split(/\s+/).filter(Boolean)) {
+    if (overflow) break;
     let remaining = word;
     while (remaining) {
       const last = lines.length - 1;
       const current = last >= 0 ? lines[last]! : "";
-      const currentW = [...current].reduce((sum, ch) => sum + charWidth(ch), 0);
-      const wordW = [...remaining].reduce((sum, ch) => sum + charWidth(ch), 0);
-      if (last >= 0 && currentW + 1 + wordW <= limit) {
+      const wordW = textWidth(remaining);
+      if (last >= 0 && textWidth(current) + 1 + wordW <= limit) {
         lines[last] = `${current} ${remaining}`;
-        return;
+        break;
       }
       if (lines.length >= count) {
         overflow = true;
-        return;
+        break;
       }
       if (wordW <= limit) {
         lines.push(remaining);
-        return;
+        break;
       }
       const { head, rest } = fitText(remaining, limit);
       lines.push(head);
       remaining = rest;
     }
-  };
-  for (const word of title.trim().split(/\s+/).filter(Boolean)) pushWord(word);
+  }
   if (!overflow || !lines.length) return lines;
   const last = lines.length - 1;
   lines[last] = `${fitText(lines[last]!, Math.max(1, limit - 1)).head.trimEnd()}…`;
@@ -465,6 +470,21 @@ function titleLines(title: string, limit = 27, count = 2): string[] {
 }
 
 type PathwaysTicketView = NonNullable<Pathways["map"]>["tickets"][number];
+
+const openTicketPrs = (ticket: PathwaysTicketView) =>
+  ticket.prs.filter(({ pr }) => pr.state !== "merged" && pr.state !== "closed");
+
+const pathwaysErrorTitles: Record<PathwaysErrorKind, string> = {
+  "invalid-record": "Project record is invalid",
+  auth: "Linear authentication failed",
+  "rate-limit": "Linear rate limit reached",
+  timeout: "Linear request timed out",
+  server: "Linear server error",
+  graphql: "Linear GraphQL error",
+  "map-missing": "Linear map issue not found",
+  "project-missing": "Linear project not found",
+  network: "Pathways unavailable",
+};
 
 function pathwaysAge(at: number): string {
   const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
@@ -1126,7 +1146,7 @@ function PathwaysSection({ slug }: { slug: string }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const lastFocusedRef = useRef<Element | null>(null);
   const openDetail = (id: string) => {
-    lastFocusedRef.current = document.activeElement;
+    if (selectedId === null) lastFocusedRef.current = document.activeElement;
     setSelectedId(id);
   };
   const [narrowGraph, setNarrowGraph] = useState(
@@ -1246,10 +1266,13 @@ function PathwaysSection({ slug }: { slug: string }) {
   const graphIdentity = `${slug}:${hideDone}:${narrowGraph}:${graphNodes.map((node) => node.id).join(",")}:${visibleEdges.map((edge) => `${edge.from}:${edge.to}`).join(",")}`;
   const focusTargetId = map?.firstPath[0] ?? visible.find((ticket) => ticket.displayState === "needs-you")?.identifier ?? null;
   const focusBox = graph?.boxes.find((box) => box.id === focusTargetId) ?? null;
+  const focusBoxRef = useRef(focusBox);
+  focusBoxRef.current = focusBox;
+  const showGraphCanvas = !(hideDone && visible.length === 0 && (map?.tickets.length ?? 0) > 0);
   useEffect(() => {
     const svg = graphViewport.current;
     const content = graphContent.current;
-    if (!svg || !content || !graph) return;
+    if (!svg || !content || !graph || !showGraphCanvas) return;
     const selection = select(svg);
     let minScale = 0.05;
     let maxScale = 2;
@@ -1259,7 +1282,14 @@ function PathwaysSection({ slug }: { slug: string }) {
       .on("zoom", (event) => {
         zoomTransformRef.current = event.transform;
         content.setAttribute("transform", event.transform.toString());
-        setZoomBounds({ k: event.transform.k, min: minScale, max: maxScale });
+        const nextK = event.transform.k;
+        setZoomBounds((prev) =>
+          Math.round(prev.k * 100) === Math.round(nextK * 100) &&
+          prev.min === minScale &&
+          prev.max === maxScale
+            ? prev
+            : { k: nextK, min: minScale, max: maxScale },
+        );
       });
     graphZoom.current = behavior;
     const fit = () => {
@@ -1280,17 +1310,17 @@ function PathwaysSection({ slug }: { slug: string }) {
       );
     };
     const focusNext = () => {
-      if (!focusBox) return;
+      const box = focusBoxRef.current;
+      if (!box) return;
       const { width, height } = svg.getBoundingClientRect();
       if (!width || !height) return;
-      const targetScale = 1;
-      const cx = focusBox.x + focusBox.w / 2;
-      const cy = focusBox.y + focusBox.h / 2;
-      const tx = width * 0.28 - cx * targetScale;
-      const ty = Math.max(64, height * 0.28) - cy * targetScale;
+      const cx = box.x + box.w / 2;
+      const cy = box.y + box.h / 2;
+      const tx = width * 0.28 - cx;
+      const ty = Math.max(64, height * 0.28) - cy;
       selection.call(behavior).call(
         behavior.transform,
-        zoomIdentity.translate(tx, ty).scale(targetScale),
+        zoomIdentity.translate(tx, ty).scale(1),
       );
     };
     const observer = new ResizeObserver(fit);
@@ -1305,16 +1335,17 @@ function PathwaysSection({ slug }: { slug: string }) {
       graphFit.current = null;
       graphFocus.current = null;
     };
-  }, [graphIdentity, graph?.width, graph?.height, focusBox?.x, focusBox?.y, hideDone, visible.length]);
+  }, [graphIdentity, graph?.width, graph?.height, showGraphCanvas]);
   const zoomAtCenter = (factor: number) => {
     const svg = graphViewport.current;
     if (svg && graphZoom.current) {
       const { width, height } = svg.getBoundingClientRect();
       const t = zoomTransformRef.current;
+      const box = focusBoxRef.current;
       let anchor: [number, number] = [width / 2, height / 2];
-      if (factor > 1 && focusBox && t.k < 0.75) {
-        const sx = t.applyX(focusBox.x + focusBox.w / 2);
-        const sy = t.applyY(focusBox.y + focusBox.h / 2);
+      if (factor > 1 && box && t.k < 0.75) {
+        const sx = t.applyX(box.x + box.w / 2);
+        const sy = t.applyY(box.y + box.h / 2);
         if (sx >= 0 && sx <= width && sy >= 0 && sy <= height) {
           anchor = [sx, sy];
         }
@@ -1344,6 +1375,44 @@ function PathwaysSection({ slug }: { slug: string }) {
     (ticket) =>
       ticket.displayState === "needs-you" &&
       ticket.identifier !== pathHead?.identifier,
+  );
+  const noun = (n: number) =>
+    map?.source === "orchestrator"
+      ? n === 1 ? "item" : "items"
+      : n === 1 ? "ticket" : "tickets";
+  const cycleEdges = new Set<string>();
+  for (const cycle of map?.cycles ?? []) {
+    for (let i = 0; i < cycle.length; i++) {
+      cycleEdges.add(`${cycle[i]}:${cycle[(i + 1) % cycle.length]}`);
+    }
+  }
+  const doNow = pathHead ?? needsYouNow;
+  const alsoNow = pathHead ? needsYouNow : undefined;
+  const doNowVerb = (ticket: PathwaysTicketView) =>
+    ticket.displayState === "needs-you"
+      ? ticket.type === "decision" ? "answer" : "complete"
+      : ticket.type === "research"
+        ? "investigate"
+        : ticket.displayState === "claimed"
+          ? "continue"
+          : ticket.readiness.state === "ready"
+            ? "start"
+            : "resolve scope for";
+  const doNowSpan = (ticket: PathwaysTicketView) => (
+    <>
+      {doNowVerb(ticket)}{" "}
+      <Button
+        type="button"
+        variant="link"
+        size="sm"
+        className="inline h-auto p-0 align-baseline font-mono text-xs font-semibold"
+        onClick={() => openDetail(ticket.identifier)}
+      >
+        {ticket.identifier}
+      </Button>
+      {" — "}
+      {ticket.title}.
+    </>
   );
   const pathEdges = new Set(
     (map?.firstPath ?? [])
@@ -1389,7 +1458,7 @@ function PathwaysSection({ slug }: { slug: string }) {
       ticket.prLink.state === "linked" && ticket.pr
         ? (() => {
             if (ticket.pr.state === "unavailable") return "PR linked · GitHub unavailable";
-            const openCount = ticket.prs.filter(({ pr }) => pr.state !== "merged" && pr.state !== "closed").length;
+            const openCount = openTicketPrs(ticket).length;
             return `PR #${ticket.pr.number ?? "linked"} ${ticket.pr.state}${openCount > 1 ? ` (+${openCount - 1})` : ""}`;
           })()
         : "",
@@ -1510,24 +1579,9 @@ function PathwaysSection({ slug }: { slug: string }) {
           <EmptyHeader>
             <Badge variant="destructive">Error</Badge>
             <EmptyTitle>
-              {q.data.error.includes("Invalid JSON")
-                ? "Project record is invalid"
-                : q.data.error.includes("rejected linearApiKey")
-                  ? "Linear authentication failed"
-                  : q.data.error.includes("rate limit")
-                    ? "Linear rate limit reached"
-                    : q.data.error.includes("timed out")
-                      ? "Linear request timed out"
-                      : q.data.error.includes("server error")
-                        ? "Linear server error"
-                        : q.data.error.includes("GraphQL error")
-                          ? "Linear GraphQL error"
-                          : q.data.error.includes("Map issue") ||
-                              q.data.error.includes("wayfinder:map")
-                            ? "Linear map issue not found"
-                            : q.data.error.includes("was not found")
-                              ? "Linear project not found"
-                              : "Pathways unavailable"}
+              {q.data.errorKind
+                ? pathwaysErrorTitles[q.data.errorKind]
+                : "Pathways unavailable"}
             </EmptyTitle>
             <EmptyDescription className="max-w-xl [overflow-wrap:anywhere]">{q.data.error}</EmptyDescription>
           </EmptyHeader>
@@ -1589,7 +1643,8 @@ function PathwaysSection({ slug }: { slug: string }) {
             <Alert variant="destructive" className="mt-3 py-2 text-xs" data-pathways-cycles="">
               <AlertDescription>
                 Dependency cycle detected:{" "}
-                {map.cycles.map((cycle) => [...cycle, cycle[0]].join(" → ")).join("; ")}.
+                {map.cycles.slice(0, 3).map((cycle) => [...cycle, cycle[0]].join(" → ")).join("; ")}
+                {map.cycles.length > 3 ? ` (and ${map.cycles.length - 3} more)` : ""}.
                 {" "}Remove one blocking relation to unblock these tickets.
               </AlertDescription>
             </Alert>
@@ -1606,65 +1661,12 @@ function PathwaysSection({ slug }: { slug: string }) {
               }
             >
               <AlertDescription className="block [overflow-wrap:anywhere]">
-                {pathHead ? (
+                {doNow && (
                   <>
-                    Do now:{" "}
-                    {pathHead.displayState === "needs-you"
-                      ? pathHead.type === "decision"
-                        ? "answer"
-                        : "complete"
-                      : pathHead.type === "research"
-                        ? "investigate"
-                        : pathHead.displayState === "claimed"
-                          ? "continue"
-                          : pathHead.readiness.state === "ready"
-                            ? "start"
-                            : "resolve scope for"}{" "}
-                    <Button
-                      type="button"
-                      variant="link"
-                      size="sm"
-                      className="inline h-auto p-0 align-baseline font-mono text-xs font-semibold"
-                      onClick={() => openDetail(pathHead.identifier)}
-                    >
-                      {pathHead.identifier}
-                    </Button>
-                    {" — "}
-                    {pathHead.title}.
-                    {needsYouNow && (
-                      <>
-                        {" "}In parallel, {needsYouNow.type === "decision" ? "answer" : "complete"}{" "}
-                        <Button
-                          type="button"
-                          variant="link"
-                          size="sm"
-                          className="inline h-auto p-0 align-baseline font-mono text-xs font-semibold"
-                          onClick={() => openDetail(needsYouNow.identifier)}
-                        >
-                          {needsYouNow.identifier}
-                        </Button>
-                        {" — "}
-                        {needsYouNow.title}.
-                      </>
-                    )}
+                    Do now: {doNowSpan(doNow)}
+                    {alsoNow && <> In parallel, {doNowSpan(alsoNow)}</>}
                   </>
-                ) : needsYouNow ? (
-                  <>
-                    Do now:{" "}
-                    {needsYouNow.type === "decision" ? "answer" : "complete"}{" "}
-                    <Button
-                      type="button"
-                      variant="link"
-                      size="sm"
-                      className="inline h-auto p-0 align-baseline font-mono text-xs font-semibold"
-                      onClick={() => openDetail(needsYouNow.identifier)}
-                    >
-                      {needsYouNow.identifier}
-                    </Button>
-                    {" — "}
-                    {needsYouNow.title}.
-                  </>
-                ) : null}
+                )}
                 {visible.some(
                   (ticket) => ticket.pr?.state === "unavailable",
                 ) && (
@@ -1690,19 +1692,10 @@ function PathwaysSection({ slug }: { slug: string }) {
                       All {map.tickets.length} done
                     </Badge>
                     <EmptyTitle>
-                      {map.tickets.length} completed{" "}
-                      {map.tickets.length === 1
-                        ? map.source === "orchestrator"
-                          ? "item"
-                          : "ticket"
-                        : map.source === "orchestrator"
-                          ? "items"
-                          : "tickets"}{" "}
-                      hidden
+                      {map.tickets.length} completed {noun(map.tickets.length)} hidden
                     </EmptyTitle>
                     <EmptyDescription>
-                      Every {map.source === "orchestrator" ? "item" : "ticket"} on
-                      this map is complete and hidden by the Hide done filter.
+                      Every {noun(1)} on this map is complete and hidden by the Hide done filter.
                     </EmptyDescription>
                   </EmptyHeader>
                   <Button
@@ -1712,8 +1705,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                     className="mt-3"
                     onClick={() => setHideDoneAndPersist(false)}
                   >
-                    Show completed{" "}
-                    {map.source === "orchestrator" ? "items" : "tickets"}
+                    Show completed {noun(map.tickets.length)}
                   </Button>
                 </Empty>
               ) : (
@@ -1834,7 +1826,7 @@ function PathwaysSection({ slug }: { slug: string }) {
               <svg
                 ref={graphViewport}
                 className="block w-full min-h-[300px] h-[min(70vh,720px)] max-[1100px]:h-[min(44vh,360px)] cursor-grab text-foreground active:cursor-grabbing"
-                role="img"
+                role="group"
                 aria-label="Pathways map graph"
               >
                 <g ref={graphContent}>
@@ -1854,7 +1846,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                         d={line.path}
                         fill="none"
                         stroke={
-                          line.back
+                          line.label === "blocks" && cycleEdges.has(`${line.from}:${line.to}`)
                             ? "var(--destructive)"
                             : first
                               ? pathwaysPathColor
@@ -1954,7 +1946,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                       onKeyDown={
                         ticket
                           ? (event) => {
-                              if (event.key === " " || event.key === "Spacebar") {
+                              if (event.key === " ") {
                                 event.preventDefault();
                                 openDetail(box.id);
                               }
@@ -2086,7 +2078,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                               ticket.pr && (
                                 <PathwaysNodeGlyph
                                   label={(() => {
-                                    const openCount = ticket.prs.filter(({ pr }) => pr.state !== "merged" && pr.state !== "closed").length;
+                                    const openCount = openTicketPrs(ticket).length;
                                     if (ticket.pr.state === "unavailable") return "GitHub unavailable";
                                     return openCount > 1 ? `${openCount} PRs · ${ticket.pr.state}` : `PR ${ticket.pr.state}`;
                                   })()}
@@ -2448,9 +2440,9 @@ function PathwaysSection({ slug }: { slug: string }) {
               showCloseButton={false}
               onCloseAutoFocus={(event) => {
                 const target = lastFocusedRef.current;
-                if (target instanceof Element && target.isConnected && "focus" in target && typeof (target as HTMLElement).focus === "function") {
+                if ((target instanceof HTMLElement || target instanceof SVGElement) && target.isConnected) {
                   event.preventDefault();
-                  (target as HTMLElement).focus();
+                  target.focus();
                 }
               }}
               className="fixed inset-y-0 right-0 left-auto top-0 h-dvh w-full max-w-[520px] content-start translate-x-0 translate-y-0 overflow-y-auto rounded-none p-5 sm:max-w-[520px]"

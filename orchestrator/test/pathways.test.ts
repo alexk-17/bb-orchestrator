@@ -68,6 +68,15 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
   assert.equal(loads, loadsAfterFailure, "a failed refresh is not retried by polling until the cache age passes");
   assert.equal(polled.refreshing, false);
   assert.match(polled.error ?? "", /HTTP 500/);
+  let releaseStaleLinear!: (v: Pathways) => void;
+  const staleLinear = snapshots.view("race", true, () => new Promise<Pathways>((r) => { releaseStaleLinear = r; }), "linear:p1:");
+  const localWin = await snapshots.view("race", true, async () => fresh("local-win"), "local:direct");
+  assert.equal(localWin.map?.title, "local-win");
+  releaseStaleLinear(failed("Linear request failed (HTTP 500)."));
+  await staleLinear;
+  const afterRace = await snapshots.view("race", false, async () => fresh("unexpected"), "local:direct");
+  assert.equal(afterRace.error, null, "stale source failure must not poison newer source view");
+  assert.equal(afterRace.map?.title, "local-win");
 
   const root = mkdtempSync(join(tmpdir(), "orch-pathways-local-"));
   try {
@@ -203,6 +212,9 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
     engine.prSeen(leadEmpty, "env-lead-empty", { outcome: "available", pullRequest: { number: 77, url: "https://github.com/acme/empty/pull/77", state: "open", review: { state: "approved" }, checks: { state: "passing" }, mergeability: { state: "ready_to_merge" } } });
     const prOnly = pathwaysViewSchema.parse(await callNoKey({ slug: "empty", refresh: true }));
     assert.equal(prOnly.map?.tickets.some((t) => t.identifier === "PR-77"), true);
+    engine.prSeen(leadEmpty, "env-lead-empty-2", { outcome: "available", pullRequest: { number: 77, url: "https://github.com/acme/other/pull/77", state: "open", review: { state: "approved" }, checks: { state: "passing" }, mergeability: { state: "ready_to_merge" } } });
+    const prCollide = pathwaysViewSchema.parse(await callNoKey({ slug: "empty", refresh: true }));
+    assert.equal(new Set(prCollide.map?.tickets.map((t) => t.identifier)).size, 2);
 
     writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha", linearProjectId: "proj-alpha" }));
     const linkedNoKey = pathwaysViewSchema.parse(await callNoKey({ slug: "alpha", refresh: true }));
@@ -223,10 +235,12 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
       const unauth = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
       assert.match(unauth.error ?? "", /linearApiKey/);
       assert.match(unauth.error ?? "", /401/);
+      assert.equal(unauth.errorKind, "auth");
       globalThis.fetch = (async () => new Response(JSON.stringify({ errors: [{ message: "Rate limit" }] }), { status: 429, headers: { "retry-after": "60" } })) as typeof fetch;
       const rateLimited = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
       assert.match(rateLimited.error ?? "", /rate limit/i);
       assert.match(rateLimited.error ?? "", /60s/);
+      assert.equal(rateLimited.errorKind, "rate-limit");
       let sawSignal = false;
       globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
         sawSignal = !!init?.signal;
@@ -235,18 +249,22 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
       const timedOut = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
       assert.equal(sawSignal, true);
       assert.match(timedOut.error ?? "", /timed out/i);
+      assert.equal(timedOut.errorKind, "timeout");
       globalThis.fetch = (async () => new Response("Internal Server Error", { status: 500 })) as typeof fetch;
       const serverErr = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
       assert.match(serverErr.error ?? "", /server error/i);
       assert.match(serverErr.error ?? "", /500/);
+      assert.equal(serverErr.errorKind, "server");
       globalThis.fetch = (async () => new Response(JSON.stringify({ errors: [{ message: "Entity not found" }] }), { status: 200 })) as typeof fetch;
       const gqlErr = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
       assert.match(gqlErr.error ?? "", /Entity not found/);
       assert.match(gqlErr.error ?? "", /proj-alpha/);
+      assert.equal(gqlErr.errorKind, "graphql");
       globalThis.fetch = (async () => new Response(JSON.stringify({ data: { project: null } }), { status: 200 })) as typeof fetch;
       const notFoundErr = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
       assert.match(notFoundErr.error ?? "", /proj-alpha/);
       assert.match(notFoundErr.error ?? "", /projects\/alpha\/project\.json/);
+      assert.equal(notFoundErr.errorKind, "project-missing");
       globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
         const body = JSON.parse(String(init?.body ?? "{}")) as { query?: string; variables?: { id?: string } };
         if (body.query?.includes("project(id:")) {
@@ -280,6 +298,7 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
     assert.equal(badRecord.map, null);
     assert.match(badRecord.error ?? "", /Invalid JSON/);
     assert.match(badRecord.error ?? "", /projects\/empty\/project\.json/);
+    assert.equal(badRecord.errorKind, "invalid-record");
 
     db.close();
   } finally {

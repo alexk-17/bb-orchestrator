@@ -427,8 +427,22 @@ export const scopeSchema = z.object({
 });
 export type Scope = z.infer<typeof scopeSchema>;
 
+export const pathwaysErrorKindSchema = z.enum([
+  "invalid-record",
+  "auth",
+  "rate-limit",
+  "timeout",
+  "server",
+  "graphql",
+  "map-missing",
+  "project-missing",
+  "network",
+]);
+export type PathwaysErrorKind = z.infer<typeof pathwaysErrorKindSchema>;
+
 export const pathwaysSchema = z.object({
   error: z.string().nullable(),
+  errorKind: pathwaysErrorKindSchema.nullable().optional(),
   notice: z.string().nullable().optional(),
   map: z.object({
     identifier: z.string(), title: z.string(), url: z.string(),

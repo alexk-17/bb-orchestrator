@@ -10,7 +10,7 @@ import { cliRun, setupSidebar } from "./core/sidebar.ts";
 // deliverables
 import { chmodSync, closeSync, cpSync, createReadStream, openSync, readdirSync, readSync, rmSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
-import { approveBody, type DeliverableFolders, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody, type Pathways } from "./contract.ts";
+import { approveBody, type DeliverableFolders, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody, type Pathways, type PathwaysErrorKind } from "./contract.ts";
 import { projectIssues, pathwaysMap, linkPathwaysDecisions, attachPathwaysPreflight, draftPathwaysDecision, summarizePathwaysRetro, pathwaysDecisionKey, submitPathwaysDecision, mapPathwaysLimited, selectPathwaysMap, type PathwaysIssue } from "./core/pathways.ts";
 import { collectPathwaysProofRecords, reducePathwaysPr, reducePathwaysProof, reducePathwaysWaitLane } from "./core/pathways-pr.ts";
 import { createPathwaysSnapshots, type PathwaysSnapshot, type PathwaysView } from "./core/pathways-snapshot.ts";
@@ -2169,8 +2169,11 @@ export default async function plugin(bb: BbPluginApi) {
       return { projects, badge: projects.reduce((n, p) => n + p.cards.length, 0) };
     },
     async pathways({ slug, refresh }): Promise<PathwaysView> {
-      const failure = (error: string): PathwaysView => ({ error, map: null, retro: null, fetchedAt: null, refreshing: false });
-      if (!engine.project(slug)) return failure("Pathways project not found.");
+      const failure = (error: string, errorKind: PathwaysErrorKind | null = null): PathwaysView => ({ error, errorKind, map: null, retro: null, fetchedAt: null, refreshing: false });
+      const recordRel = `projects/${slug}/${projectRecord()}`;
+      const retroDecisions = (list: ReturnType<typeof engine.decisions>) =>
+        list.map((decision) => ({ id: decision.id, title: decision.ask?.title ?? decision.request.title, state: decision.state }));
+      if (!engine.project(slug)) return failure("Pathways project not found.", "project-missing");
       const apiKey = cfg.linearApiKey?.trim();
       let linearProjectId: string | undefined;
       let linearMapIssue: string | undefined;
@@ -2179,14 +2182,14 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           const parsed = JSON.parse(readFileSync(recordPath, "utf8")) as unknown;
           if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-            return failure(`Invalid JSON in projects/${slug}/${projectRecord()}: expected a JSON object. Fix the file, then click Refresh.`);
+            return failure(`Invalid JSON in ${recordRel}: expected a JSON object. Fix the file, then click Refresh.`, "invalid-record");
           }
           const record = parsed as { linearProjectId?: unknown; linearMapIssue?: unknown };
           linearProjectId = typeof record.linearProjectId === "string" ? record.linearProjectId.trim() : undefined;
           linearMapIssue = typeof record.linearMapIssue === "string" ? record.linearMapIssue.trim() : undefined;
         } catch (err) {
           const detail = err instanceof Error ? err.message : String(err);
-          return failure(`Invalid JSON in projects/${slug}/${projectRecord()}: ${detail}. Fix the JSON syntax, then click Refresh.`);
+          return failure(`Invalid JSON in ${recordRel}: ${detail}. Fix the JSON syntax, then click Refresh.`, "invalid-record");
         }
       }
       if (!apiKey || !linearProjectId) {
@@ -2227,15 +2230,7 @@ export default async function plugin(bb: BbPluginApi) {
             waits,
             now,
           });
-          const retroSummary = summarizePathwaysRetro(
-            map,
-            decisions.map((decision) => ({
-              id: decision.id,
-              title: decision.ask?.title ?? decision.request.title,
-              state: decision.state,
-            })),
-            now,
-          );
+          const retroSummary = summarizePathwaysRetro(map, retroDecisions(decisions), now);
           const retro =
             retroSummary.finished.length ||
             retroSummary.mergedPrs.length ||
@@ -2249,29 +2244,37 @@ export default async function plugin(bb: BbPluginApi) {
         const localKey = `local:${linearProjectId ? "unkeyed" : "direct"}`;
         return pathwaysSnapshots.view(slug, refresh ?? false, readLocal, localKey);
       }
+      class LinearRequestError extends Error {
+        readonly status: number | null;
+        readonly retryAfter: number | null;
+        readonly graphql: string | null;
+        constructor(opts: { status?: number | null; retryAfter?: number | null; graphql?: string | null }) {
+          super("Linear request failed");
+          this.status = opts.status ?? null;
+          this.retryAfter = opts.retryAfter ?? null;
+          this.graphql = opts.graphql ?? null;
+        }
+      }
       const read = async (): Promise<Pathways> => { try {
         const request = async <T,>(query: string, id: string, after: string | null = null): Promise<T> => {
           const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables: { id, after } }), signal: AbortSignal.timeout(12_000) });
           if (!response.ok) {
-            if (response.status === 429) {
-              const rawRetry = response.headers.get("retry-after")?.trim();
-              const secs = rawRetry && /^\d+$/.test(rawRetry) ? Number(rawRetry) : null;
-              throw new Error(secs && secs > 0 ? `HTTP 429:${secs}` : "HTTP 429");
-            }
-            throw new Error(`HTTP ${response.status}`);
+            const rawRetry = response.status === 429 ? response.headers.get("retry-after")?.trim() : undefined;
+            const secs = rawRetry && /^\d+$/.test(rawRetry) ? Number(rawRetry) : null;
+            throw new LinearRequestError({ status: response.status, retryAfter: secs && secs > 0 ? secs : null });
           }
           const result = await response.json() as { data?: T; errors?: { message?: unknown }[] };
           if (result.errors?.length || !result.data) {
             const firstMsg = result.errors?.find((e) => typeof e?.message === "string" && e.message.trim())?.message;
             const detail = typeof firstMsg === "string" ? firstMsg.replace(/\s+/g, " ").trim().slice(0, 200) : "";
-            throw new Error(detail ? `GraphQL error: ${detail}` : "GraphQL error");
+            throw new LinearRequestError({ graphql: detail });
           }
           return result.data;
         };
         const summary = await projectIssues((after) => request<{ project: { issues: { nodes: { identifier: string; parent: { identifier: string } | null; labels: { nodes: { name: string }[] } }[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } } | null }>(`query($id: String!, $after: String) { project(id: $id) { issues(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { identifier parent { identifier } labels { nodes { name } } } } } }`, linearProjectId, after));
-        if (!summary) return failure(`Linear project "${linearProjectId}" was not found. Update linearProjectId in projects/${slug}/project.json, then click Refresh.`);
+        if (!summary) return failure(`Linear project "${linearProjectId}" was not found. Update linearProjectId in ${recordRel}, then click Refresh.`, "project-missing");
         const mapIndex = selectPathwaysMap(summary, linearMapIssue);
-        if (!mapIndex) return failure(linearMapIssue ? `Map issue "${linearMapIssue}" was not found in Linear project "${linearProjectId}". Update linearMapIssue in projects/${slug}/project.json, then click Refresh.` : `No map issue with label "wayfinder:map" was found in Linear project "${linearProjectId}". Add that label in Linear or set linearMapIssue in projects/${slug}/project.json, then click Refresh.`);
+        if (!mapIndex) return failure(linearMapIssue ? `Map issue "${linearMapIssue}" was not found in Linear project "${linearProjectId}". Update linearMapIssue in ${recordRel}, then click Refresh.` : `No map issue with label "wayfinder:map" was found in Linear project "${linearProjectId}". Add that label in Linear or set linearMapIssue in ${recordRel}, then click Refresh.`, "map-missing");
         const ids = [mapIndex.identifier, ...summary.filter((issue) => issue.parent?.identifier === mapIndex.identifier).map((issue) => issue.identifier)];
         const detailQuery = `query($id: String!) { issue(id: $id) { identifier title url description updatedAt state { type name } priority estimate assignee { name } labels { nodes { name } } parent { identifier } attachments { nodes { id url } } relations { nodes { type relatedIssue { identifier title url state { type } } } } inverseRelations { nodes { type issue { identifier title url state { type } } } } } }`;
         const issues = await mapPathwaysLimited(ids, 8, async (id) => (await request<{ issue: PathwaysIssue | null }>(detailQuery, id)).issue);
@@ -2302,34 +2305,30 @@ export default async function plugin(bb: BbPluginApi) {
         const retroLibrary = join(projectsDir(), slug, "library");
         let retroDoc: string | null = null;
         if (existsSync(retroLibrary)) retroDoc = readdirSync(retroLibrary).filter((name) => /retro/i.test(name) && /\.md$/i.test(name)).sort()[0] ?? null;
-        const retro = { ...summarizePathwaysRetro(map, decisions.map((decision) => ({ id: decision.id, title: decision.request.title, state: decision.state })), Date.now()), doc: retroDoc ? join(retroLibrary, retroDoc) : null, hostId: retroDoc ? await onlyHost().catch(() => null) : null };
+        const retro = { ...summarizePathwaysRetro(map, retroDecisions(decisions), Date.now()), doc: retroDoc ? join(retroLibrary, retroDoc) : null, hostId: retroDoc ? await onlyHost().catch(() => null) : null };
         return { error: null, map, retro };
       } catch (error) {
-        const msg = error instanceof Error ? error.message : "";
-        if (msg === "HTTP 401" || msg === "HTTP 403") {
-          return failure(`Linear rejected linearApiKey (${msg}). Update linearApiKey in Orchestrator plugin settings, then click Refresh.`);
-        }
-        const rateLimit = /^HTTP 429(?::(\d+))?$/.exec(msg);
-        if (rateLimit) {
-          const wait = rateLimit[1] ? `about ${rateLimit[1]}s` : "a minute";
-          return failure(`Linear rate limit reached (HTTP 429). Wait ${wait} before clicking Refresh.`);
+        if (error instanceof LinearRequestError) {
+          if (error.status === 401 || error.status === 403) {
+            return failure(`Linear rejected linearApiKey (HTTP ${error.status}). Update linearApiKey in Orchestrator plugin settings, then click Refresh.`, "auth");
+          }
+          if (error.status === 429) {
+            const wait = error.retryAfter ? `about ${error.retryAfter}s` : "a minute";
+            return failure(`Linear rate limit reached (HTTP 429). Wait ${wait} before clicking Refresh.`, "rate-limit");
+          }
+          if (error.status != null && error.status >= 500) {
+            return failure(`Linear returned a server error (HTTP ${error.status}). Try Refresh again shortly.`, "server");
+          }
+          if (error.graphql !== null) {
+            const detail = error.graphql ? `: ${error.graphql}` : "";
+            return failure(`Linear GraphQL error${detail}. Check linearProjectId ("${linearProjectId}") in ${recordRel} and linearApiKey permissions in Orchestrator settings.`, "graphql");
+          }
+          return failure(`Linear request failed (HTTP ${error.status}). Check your connection and click Refresh.`, "network");
         }
         if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
-          return failure("Linear request timed out after 12s. Check Linear status or your connection, then click Refresh.");
+          return failure("Linear request timed out after 12s. Check Linear status or your connection, then click Refresh.", "timeout");
         }
-        const serverErr = /^HTTP (5\d\d)$/.exec(msg);
-        if (serverErr) {
-          return failure(`Linear returned a server error (HTTP ${serverErr[1]}). Try Refresh again shortly.`);
-        }
-        if (msg.startsWith("GraphQL error: ")) {
-          const detail = msg.slice("GraphQL error: ".length);
-          return failure(`Linear GraphQL error: ${detail}. Check linearProjectId ("${linearProjectId}") in projects/${slug}/project.json and linearApiKey permissions in Orchestrator settings.`);
-        }
-        if (msg === "GraphQL error") {
-          return failure(`Linear returned a GraphQL error for linearProjectId "${linearProjectId}". Check projects/${slug}/project.json and linearApiKey permissions in Orchestrator settings.`);
-        }
-        const reason = /^HTTP \d+$/.test(msg) ? msg : "network error";
-        return failure(`Linear request failed (${reason}). Check your connection and click Refresh.`);
+        return failure("Linear request failed (network error). Check your connection and click Refresh.", "network");
       } };
       const linearKey = `linear:${linearProjectId}:${linearMapIssue ?? ""}`;
       return pathwaysSnapshots.view(slug, refresh ?? false, read, linearKey);

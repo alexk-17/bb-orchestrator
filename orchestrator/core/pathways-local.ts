@@ -52,6 +52,17 @@ export type LocalPathwaysInput = {
   now: number;
 };
 
+function prReason(attention: string | null, state: PathwaysPr["state"], draft: boolean, checks: string, review: string, rawState: string): string {
+  if (attention) return attention;
+  if (state === "ready") return "Ready to merge";
+  if (draft) return "Draft PR";
+  if (checks === "failing") return "Checks failing";
+  if (review === "changes_requested") return "Changes requested";
+  if (review === "review_required") return "Review required";
+  if (checks === "pending") return "Checks pending";
+  return rawState || "open";
+}
+
 function toPathwaysPr(item: LocalPathwaysPr, url: string, now: number): PathwaysPr {
   const rawState = item.state.toLowerCase();
   const draft = rawState === "draft";
@@ -59,7 +70,7 @@ function toPathwaysPr(item: LocalPathwaysPr, url: string, now: number): Pathways
   const review = item.review ?? "not recorded";
   const ready = !draft && (item.attention === "ready_to_merge" || (review === "approved" && checks === "passing"));
   const state: PathwaysPr["state"] = rawState === "merged" ? "merged" : rawState === "closed" ? "closed" : ready ? "ready" : "blocked";
-  const reason = item.attention || (state === "ready" ? "Ready to merge" : draft ? "Draft PR" : checks === "failing" ? "Checks failing" : review === "changes_requested" ? "Changes requested" : review === "review_required" ? "Review required" : checks === "pending" ? "Checks pending" : rawState || "open");
+  const reason = prReason(item.attention, state, draft, checks, review, rawState);
   return {
     url,
     state,
@@ -225,14 +236,14 @@ export function localPathwaysMap(input: LocalPathwaysInput): PathwaysMap {
     if (canonical && !openPrsByUrl.has(canonical)) openPrsByUrl.set(canonical, pr);
   }
 
-  const attachPr = (ticket: PathwaysTicket, canonical: string, raw: LocalPathwaysPr) => {
+  const attachPr = (ticket: PathwaysTicket, canonical: string, raw: LocalPathwaysPr, computedPr?: PathwaysPr) => {
     if (!ticket.prLink.urls.includes(canonical)) {
       ticket.prLink.urls.push(canonical);
       ticket.prLink.urls.sort();
       ticket.prLink.state = "linked";
       ticket.prLink.source = null;
     }
-    const pr = toPathwaysPr(raw, canonical, input.now);
+    const pr = computedPr ?? toPathwaysPr(raw, canonical, input.now);
     const proof = reducePathwaysProof(pr, collectPathwaysProofRecords(canonical, input.deliverables));
     const mergeDecision = input.decisions.find((decision) => decision.action === "merge" && decision.prUrls.some((url) => canonicalPrUrl(url) === canonical));
     const waitLane = reducePathwaysWaitLane(
@@ -244,6 +255,19 @@ export function localPathwaysMap(input: LocalPathwaysInput): PathwaysMap {
     ticket.prs.push({ pr, proof, waitLane });
   };
 
+  const prNumberCounts = new Map<number, number>();
+  for (const raw of openPrsByUrl.values()) prNumberCounts.set(raw.number, (prNumberCounts.get(raw.number) ?? 0) + 1);
+  const usedPrIds = new Set<string>();
+  const uniquePrId = (canonical: string, num: number): string => {
+    const repo = /github\.com\/[^/]+\/([^/]+)\/pull\//i.exec(canonical)?.[1] ?? "";
+    let base = (prNumberCounts.get(num) ?? 0) > 1 && repo ? `PR-${repo}-${num}` : `PR-${num}`;
+    if (!usedPrIds.has(base)) { usedPrIds.add(base); return base; }
+    let suffix = 2;
+    while (usedPrIds.has(`${base}-${suffix}`)) suffix++;
+    const id = `${base}-${suffix}`;
+    usedPrIds.add(id);
+    return id;
+  };
   for (const [canonical, raw] of openPrsByUrl) {
     const matchedThreads = threadByPrUrl.get(canonical);
     if (matchedThreads?.length) {
@@ -256,7 +280,7 @@ export function localPathwaysMap(input: LocalPathwaysInput): PathwaysMap {
     }
     const prPreview = toPathwaysPr(raw, canonical, input.now);
     const prTicket = emptyTicket({
-      identifier: `PR-${raw.number}`,
+      identifier: uniquePrId(canonical, raw.number),
       title: `PR #${raw.number} · ${prPreview.reason}`,
       state: { type: "started", name: prPreview.state === "ready" ? "Ready" : "Open" },
       priority: 2,
@@ -267,7 +291,7 @@ export function localPathwaysMap(input: LocalPathwaysInput): PathwaysMap {
     });
     prTicket.url = canonical;
     addEdge(input.slug, prTicket.identifier, "sub-issue");
-    attachPr(prTicket, canonical, raw);
+    attachPr(prTicket, canonical, raw, prPreview);
     tickets.push(prTicket);
   }
 
