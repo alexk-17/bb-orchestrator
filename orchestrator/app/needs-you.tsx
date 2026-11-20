@@ -77,8 +77,23 @@ export function via(): "phone" | "desktop" {
 
 export type List = "cards" | "deferred";
 
+const STEPPER_OTHER_PLACEHOLDER = "Other: your own answer, or a note to go with an option. ⌘↵ saves";
+
+function toggleUnticked(current: Map<number, Set<number>>, block: number, item: number): Map<number, Set<number>> {
+  const next = new Map(current);
+  const off = new Set(next.get(block) ?? []);
+  if (off.has(item)) off.delete(item);
+  else off.add(item);
+  next.set(block, off);
+  return next;
+}
+
+function joinNoteWithUnticked(blocks: Card["blocks"], note: string, unticked: ReadonlyMap<number, ReadonlySet<number>>): string {
+  return [note.trim(), untickedText(blocks, cloneUnticked(unticked))].filter(Boolean).join("\n\n");
+}
+
 function formatDraftNote(card: Card, draft: StepperDraft): string {
-  return [draft.note.trim(), untickedText(card.blocks, cloneUnticked(draft.unticked))].filter(Boolean).join("\n\n");
+  return joinNoteWithUnticked(card.blocks, draft.note, draft.unticked);
 }
 
 /** The view without the cards a write took (this id at this rev), for the lists the write moved them out of. */
@@ -166,17 +181,9 @@ export type CardDraftProps = {
 export function CardView({ card, list, presets, isArmed, act, mon, monType = null, draft }: { card: Card; list: List; presets: Preset[]; isArmed: boolean; act: Act; mon: Face | null; monType?: string | null; draft?: CardDraftProps }) {
   const [note, setNote] = useState(() => draft?.value?.note ?? "");
   const [unticked, setUnticked] = useState<Map<number, Set<number>>>(() => cloneUnticked(draft?.value?.unticked));
-  const toggle = (block: number, item: number) =>
-    setUnticked((m) => {
-      const next = new Map(m);
-      const off = new Set(next.get(block) ?? []);
-      if (off.has(item)) off.delete(item);
-      else off.add(item);
-      next.set(block, off);
-      return next;
-    });
+  const toggle = (block: number, item: number) => setUnticked((m) => toggleUnticked(m, block, item));
   // an option's answer carries the lists' unticked items along with any note
-  const withLists = (n: string) => [n.trim(), untickedText(card.blocks, unticked)].filter(Boolean).join("\n\n");
+  const withLists = (n: string) => joinNoteWithUnticked(card.blocks, n, unticked);
   const order = cardBlockOrder(card.blocks);
   // the answer a number key picked, waiting for Enter (keys.ts); a card that changed rev starts without one
   const picked = draft ? (draft.value?.option ?? undefined) : keyState.picked.get(`${card.id}@${card.rev}`);
@@ -286,14 +293,24 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
               disabled={busy}
               sendLabel={draft ? "Save" : "Send"}
               onSend={() => (draft ? draft.onPick({ option: null, note, unticked }) : act.answer(card, list, null, withLists(note)))}
-              placeholder={draft ? "Other: your own answer, or a note to go with an option. ⌘↵ saves" : "Other: your own answer, or a note to go with an option. ⌘↵ sends"}
+              placeholder={draft ? STEPPER_OTHER_PLACEHOLDER : "Other: your own answer, or a note to go with an option. ⌘↵ sends"}
             />
           ) : null}
 
           <footer className="mt-2 flex items-center gap-2">
             <span className="ml-auto" />
             {draft?.value && draft.onClear ? (
-              <Btn tone="ghost" size="sm" data-draft-clear="" disabled={busy} onClick={draft.onClear}>
+              <Btn
+                tone="ghost"
+                size="sm"
+                data-draft-clear=""
+                disabled={busy}
+                onClick={() => {
+                  setNote("");
+                  setUnticked(new Map());
+                  draft.onClear?.();
+                }}
+              >
                 Clear draft
               </Btn>
             ) : null}
@@ -321,6 +338,67 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
             ) : null}
           </footer>
     </Frame>
+  );
+}
+
+function ReviewEditor({
+  card,
+  draft,
+  submitting,
+  onSave,
+  onClear,
+  onCancel,
+  onSecret,
+}: {
+  card: Card;
+  draft: StepperDraft | null;
+  submitting: boolean;
+  onSave: (draft: StepperDraft) => void;
+  onClear: () => void;
+  onCancel: () => void;
+  onSecret: (value: string) => void;
+}) {
+  const [note, setNote] = useState(() => draft?.note ?? "");
+  const [unticked, setUnticked] = useState<Map<number, Set<number>>>(() => cloneUnticked(draft?.unticked));
+  const toggle = (block: number, item: number) => setUnticked((m) => toggleUnticked(m, block, item));
+  const order = cardBlockOrder(card.blocks);
+
+  return (
+    <div data-review-editor={card.id} className="mt-2">
+      <Blocks blocks={card.blocks} prs={card.prs} busy={submitting} onPaste={onSecret} unticked={unticked} onToggle={toggle} only={order.after} />
+      <Options
+        disabled={submitting}
+        options={card.options.map((o) => ({
+          key: o.id,
+          label: o.label,
+          detail: o.detail,
+          recommended: o.recommended,
+          pressed: draft?.option ? draft.option === o.id : undefined,
+          data: { "data-option": o.id, "data-recommended": o.recommended ? "true" : undefined },
+          onPick: () => onSave({ option: o.id, note, unticked }),
+        }))}
+      />
+      {card.allowText ? (
+        <OtherBox
+          value={note}
+          onChange={setNote}
+          disabled={submitting}
+          sendLabel="Save"
+          onSend={() => onSave({ option: null, note, unticked })}
+          placeholder={STEPPER_OTHER_PLACEHOLDER}
+        />
+      ) : null}
+      <div className="mt-2 flex items-center justify-end gap-2">
+        {draft ? (
+          <Btn size="sm" tone="ghost" disabled={submitting} onClick={onClear}>
+            Skip
+          </Btn>
+        ) : null}
+        <Btn size="sm" tone="outline" disabled={submitting} onClick={onCancel}>
+          Cancel
+        </Btn>
+      </div>
+    </div>
   );
 }
 
@@ -353,27 +431,6 @@ function ReviewCard({
   onDismiss: () => void;
   onSecret: (value: string) => void;
 }) {
-  const [note, setNote] = useState(() => draft?.note ?? "");
-  const [unticked, setUnticked] = useState<Map<number, Set<number>>>(() => cloneUnticked(draft?.unticked));
-
-  useEffect(() => {
-    if (editing) {
-      setNote(draft?.note ?? "");
-      setUnticked(cloneUnticked(draft?.unticked));
-    }
-  }, [editing, draft]);
-
-  const toggle = (block: number, item: number) =>
-    setUnticked((m) => {
-      const next = new Map(m);
-      const off = new Set(next.get(block) ?? []);
-      if (off.has(item)) off.delete(item);
-      else off.add(item);
-      next.set(block, off);
-      return next;
-    });
-
-  const order = cardBlockOrder(card.blocks);
   const pickedOption = draft?.option ? card.options.find((o) => o.id === draft.option) : null;
   const noteSummary = draft ? formatDraftNote(card, draft) : "";
   const valid = draft ? isDraftValidForCard(card, draft, noteSummary) : true;
@@ -446,41 +503,16 @@ function ReviewCard({
           </div>
         </div>
       ) : (
-        <div data-review-editor={card.id} className="mt-2">
-          <Blocks blocks={card.blocks} prs={card.prs} busy={submitting} onPaste={onSecret} unticked={unticked} onToggle={toggle} only={order.after} />
-          <Options
-            disabled={submitting}
-            options={card.options.map((o) => ({
-              key: o.id,
-              label: o.label,
-              detail: o.detail,
-              recommended: o.recommended,
-              pressed: draft?.option ? draft.option === o.id : undefined,
-              data: { "data-option": o.id, "data-recommended": o.recommended ? "true" : undefined },
-              onPick: () => onSave({ option: o.id, note, unticked }),
-            }))}
-          />
-          {card.allowText ? (
-            <OtherBox
-              value={note}
-              onChange={setNote}
-              disabled={submitting}
-              sendLabel="Save"
-              onSend={() => onSave({ option: null, note, unticked })}
-              placeholder="Other: your own answer, or a note to go with an option. ⌘↵ saves"
-            />
-          ) : null}
-          <div className="mt-2 flex items-center justify-end gap-2">
-            {draft ? (
-              <Btn size="sm" tone="ghost" disabled={submitting} onClick={onClear}>
-                Skip
-              </Btn>
-            ) : null}
-            <Btn size="sm" tone="outline" disabled={submitting} onClick={onCancelEdit}>
-              Cancel
-            </Btn>
-          </div>
-        </div>
+        <ReviewEditor
+          key={`${card.id}@${card.rev}`}
+          card={card}
+          draft={draft}
+          submitting={submitting}
+          onSave={onSave}
+          onClear={onClear}
+          onCancel={onCancelEdit}
+          onSecret={onSecret}
+        />
       )}
     </Frame>
   );
