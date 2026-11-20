@@ -40,6 +40,17 @@ export function useGate(): number {
   return useSyncExternalStore(subscribe, () => version);
 }
 
+export function whenUnlocked(): Promise<void> {
+  if (gate.lock === null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const off = subscribe(() => {
+      if (gate.lock !== null) return;
+      off();
+      resolve();
+    });
+  });
+}
+
 // ---- the pointer: down on the panel, released anywhere ----
 
 let pressSeq = 0;

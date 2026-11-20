@@ -163,6 +163,13 @@ try {
       const pos2 = await page.locator("[data-stepper-pos]").textContent();
       if (!pos2?.includes(`2 of ${ids.length}`)) throw new Error(`expected 2 of ${ids.length}, got ${pos2}`);
 
+      await page.locator("[data-stepper-exit]").click();
+      await page.locator("[data-stepper]").waitFor({ state: "detached", timeout: 5_000 });
+      const resumeText = await page.locator("[data-stepper-start]").textContent();
+      if (!resumeText?.includes("1 drafted")) throw new Error(`expected Show all to keep drafts, got ${resumeText}`);
+      await page.locator("[data-stepper-start]").click();
+      await page.locator(`[data-card="${ids[1]}"]`).waitFor({ timeout: 5_000 });
+
       await page.locator("[data-stepper-back]").click();
       await page.locator(`[data-card="${ids[0]}"]`).waitFor({ timeout: 5_000 });
       const pressedBack = await card(ids[0]).locator('[data-option="1"]').getAttribute("aria-pressed");
@@ -177,10 +184,10 @@ try {
       await armed(ids[2], "1");
       await card(ids[2]).locator("[data-note]").fill("Schedule with dual-key overlap");
       await card(ids[2]).locator("[data-note-send]").click();
-      if (ids.length > 3) {
-        await page.locator(`[data-card="${ids[3]}"]`).waitFor({ timeout: 5_000 });
-        await armed(ids[3], "2");
-        await card(ids[3]).locator('[data-option="2"]').click();
+      for (let idx = 3; idx < ids.length; idx++) {
+        await page.locator(`[data-card="${ids[idx]}"]`).waitFor({ timeout: 5_000 });
+        await armed(ids[idx], "2");
+        await card(ids[idx]).locator('[data-option="2"]').click();
       }
 
       await page.locator("[data-stepper-review]").waitFor({ timeout: 5_000 });
@@ -188,11 +195,25 @@ try {
       if (overflowRev) throw new Error("horizontal overflow on review");
       await shot(`${name}-review`);
 
+      await page.locator(`[data-review-edit="${ids[0]}"][data-armed="true"]`).waitFor({ timeout: 10_000 });
       await page.locator(`[data-review-edit="${ids[0]}"]`).click();
+      await page.locator(`[data-review-editor="${ids[0]}"] [data-option="2"][data-armed="true"]`).waitFor({ timeout: 10_000 });
       await page.locator(`[data-review-editor="${ids[0]}"] [data-option="2"]`).click();
       await page.locator(`[data-review-editor="${ids[0]}"]`).waitFor({ state: "detached", timeout: 5_000 });
 
+      await page.locator('[data-stepper-submit][data-armed="true"]').waitFor({ timeout: 10_000 });
+
+      let holdingReads = false;
+      const heldRoutes = [];
       if (mode === "partial") {
+        holdingReads = true;
+        await page.route("**/api/harness/needs-you*", async (route) => {
+          if (!holdingReads) {
+            await route.continue().catch(() => {});
+            return;
+          }
+          heldRoutes.push(route);
+        });
         const bumpRes = await fetch(`${base}/harness/bump-rev`, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -201,12 +222,14 @@ try {
         if (!bumpRes.ok) throw new Error(`bump-rev failed: ${bumpRes.status}`);
       }
 
-      await page.locator('[data-stepper-submit][data-armed="true"]').waitFor({ timeout: 10_000 });
       await page.locator("[data-stepper-submit]").click();
 
       if (mode === "partial") {
         await page.locator(`[data-review-error="${ids[2]}"]`).waitFor({ timeout: 15_000 });
-        await page.waitForTimeout(800);
+        holdingReads = false;
+        await Promise.all(heldRoutes.splice(0).map((r) => r.continue().catch(() => {})));
+        await page.unroute("**/api/harness/needs-you*");
+        await page.locator(`[data-review-stale="${ids[2]}"]`).waitFor({ timeout: 10_000 });
         await shot(`${name}-partial-failure`);
         const failedCardCount = await page.locator(`[data-review-card="${ids[2]}"]`).count();
         const succeededCardCount = await page.locator(`[data-review-card="${ids[0]}"]`).count();
@@ -216,6 +239,10 @@ try {
         const keptDraft = await page.locator(`[data-review-answer="${ids[2]}"]`).textContent();
         if (!keptDraft?.includes("Schedule with dual-key overlap")) {
           throw new Error(`expected kept draft text, got ${keptDraft}`);
+        }
+        const retryDisabled = await page.locator("[data-stepper-submit]").isDisabled();
+        if (!retryDisabled) {
+          throw new Error("expected Retry to stay disabled while failed draft is stale");
         }
         report.after = Object.fromEntries(await Promise.all(ids.map(async (i) => [i, await state(i)])));
         if (report.after[ids[0]] !== "answered" || report.after[ids[1]] !== "asked" || report.after[ids[2]] !== "asked") {

@@ -1,20 +1,25 @@
-export type StepperDraft = {
+import type { Outcome } from "./store.ts";
+
+export type StepperDraftInput = {
   option: string | null;
   note: string;
   unticked: ReadonlyMap<number, ReadonlySet<number>>;
 };
 
+export type StepperDraft = StepperDraftInput & {
+  rev: number;
+};
+
 export type StepperFailure = {
   kind: string;
   message: string;
-  gone?: boolean;
 };
 
 export type StepperCard = {
   id: string;
   rev: number;
   allowText: boolean;
-  options: readonly { id: string; label: string }[];
+  options: readonly { id: string }[];
 };
 
 export type StepperState<C extends StepperCard = StepperCard> = {
@@ -24,7 +29,6 @@ export type StepperState<C extends StepperCard = StepperCard> = {
   failures: ReadonlyMap<string, StepperFailure>;
   droppedAnswered: number;
   droppedChanged: number;
-  submitEpoch: number;
 };
 
 export type BatchItem<C extends StepperCard> = {
@@ -32,24 +36,19 @@ export type BatchItem<C extends StepperCard> = {
   draft: StepperDraft;
 };
 
-export type BatchOutcome =
-  | { ok: true }
-  | { ok: false; kind: string; message: string }
-  | null;
-
 export type BatchResult = {
   succeeded: string[];
   failed: Map<string, StepperFailure>;
 };
 
 export type BatchDeps<C extends StepperCard> = {
-  waitForUnlock: () => Promise<boolean>;
+  waitForUnlock: () => Promise<void>;
   latestCard: (id: string) => C | undefined;
-  sendOne: (card: C, draft: StepperDraft) => Promise<BatchOutcome>;
-  onProgress?: (index: number, total: number, cardId: string) => void;
+  sendOne: (card: C, draft: StepperDraft) => Promise<Outcome | null>;
+  onProgress?: (index: number, total: number) => void;
 };
 
-const CONFLICT_MESSAGE = "This card changed before your answer reached it. Read it again.";
+const CONFLICT_MESSAGE = "This card changed before your answer reached it. Review and save again to retry.";
 const GONE_MESSAGE = "This card was answered elsewhere or closed before sending.";
 const BUSY_MESSAGE = "Another write held the page; this answer was not sent.";
 
@@ -65,7 +64,6 @@ export function openStepper<C extends StepperCard>(cards: readonly C[]): Stepper
     failures: new Map(),
     droppedAnswered: 0,
     droppedChanged: 0,
-    submitEpoch: 0,
   };
 }
 
@@ -75,6 +73,10 @@ export function isReview<C extends StepperCard>(state: StepperState<C>): boolean
 
 export function positionLabel<C extends StepperCard>(state: StepperState<C>): string {
   return isReview(state) ? "Review" : `${state.index + 1} of ${state.cards.length}`;
+}
+
+export function isStaleDraft(card: StepperCard, draft: StepperDraft): boolean {
+  return draft.rev !== card.rev;
 }
 
 export function cloneUnticked(source?: ReadonlyMap<number, ReadonlySet<number>>): Map<number, Set<number>> {
@@ -87,11 +89,14 @@ export function cloneUnticked(source?: ReadonlyMap<number, ReadonlySet<number>>)
 export function saveDraft<C extends StepperCard>(
   state: StepperState<C>,
   cardId: string,
-  draft: StepperDraft,
+  draft: StepperDraftInput,
   advance: boolean,
 ): StepperState<C> {
+  const card = state.cards.find((c) => c.id === cardId);
+  if (!card) return state;
   const drafts = new Map(state.drafts);
   drafts.set(cardId, {
+    rev: card.rev,
     option: draft.option,
     note: draft.note,
     unticked: cloneUnticked(draft.unticked),
@@ -104,7 +109,6 @@ export function saveDraft<C extends StepperCard>(
     index,
     drafts,
     failures,
-    submitEpoch: state.submitEpoch + 1,
   };
 }
 
@@ -118,26 +122,15 @@ export function clearDraft<C extends StepperCard>(state: StepperState<C>, cardId
     ...state,
     drafts,
     failures,
-    submitEpoch: state.submitEpoch + 1,
   };
 }
 
-export function dismissCard<C extends StepperCard>(state: StepperState<C>, cardId: string): StepperState<C> {
-  const idx = state.cards.findIndex((c) => c.id === cardId);
-  if (idx < 0) return state;
-  const nextCards = state.cards.filter((c) => c.id !== cardId);
-  const drafts = new Map(state.drafts);
-  drafts.delete(cardId);
-  const failures = new Map(state.failures);
-  failures.delete(cardId);
-  const nextIndex = idx < state.index ? state.index - 1 : state.index;
+export function clearNotice<C extends StepperCard>(state: StepperState<C>): StepperState<C> {
+  if (state.droppedAnswered === 0 && state.droppedChanged === 0) return state;
   return {
     ...state,
-    cards: nextCards,
-    index: Math.max(0, Math.min(nextCards.length, nextIndex)),
-    drafts,
-    failures,
-    submitEpoch: state.submitEpoch + 1,
+    droppedAnswered: 0,
+    droppedChanged: 0,
   };
 }
 
@@ -154,24 +147,22 @@ export function stepNext<C extends StepperCard>(state: StepperState<C>): Stepper
 export function isDraftValidForCard<C extends StepperCard>(
   card: C,
   draft: StepperDraft,
-  formattedNote?: string,
+  formattedNote: string,
 ): boolean {
   if (draft.option !== null) return card.options.some((o) => o.id === draft.option);
-  return card.allowText && (formattedNote ?? draft.note).trim() !== "";
+  return card.allowText && formattedNote.trim() !== "";
 }
 
 export function submittableDrafts<C extends StepperCard>(
   state: StepperState<C>,
-  formatNote?: (card: C, draft: StepperDraft) => string,
+  formatNote: (card: C, draft: StepperDraft) => string,
 ): BatchItem<C>[] {
   const out: BatchItem<C>[] = [];
   for (const card of state.cards) {
     const draft = state.drafts.get(card.id);
     if (!draft) continue;
-    const failure = state.failures.get(card.id);
-    if (failure?.gone) continue;
-    const text = formatNote ? formatNote(card, draft) : draft.note;
-    if (!isDraftValidForCard(card, draft, text)) continue;
+    if (isStaleDraft(card, draft)) continue;
+    if (!isDraftValidForCard(card, draft, formatNote(card, draft))) continue;
     out.push({ card, draft });
   }
   return out;
@@ -191,33 +182,15 @@ export function reconcileStepper<C extends StepperCard>(
   let droppedAnswered = state.droppedAnswered;
   let droppedChanged = state.droppedChanged;
   let changed = false;
-  let epochBump = false;
 
   for (let i = 0; i < state.cards.length; i++) {
     const card = state.cards[i]!;
     const fresh = liveById.get(card.id);
     const failed = state.failures.get(card.id);
 
-    if (failed) {
-      if (!fresh) {
-        nextCards.push(card);
-        if (!failed.gone) {
-          nextFailures.set(card.id, { ...failed, gone: true });
-          changed = true;
-          epochBump = true;
-        }
-      } else if (fresh.rev !== card.rev) {
-        nextCards.push(fresh);
-        changed = true;
-        epochBump = true;
-      } else {
-        nextCards.push(card);
-      }
-      continue;
-    }
-
     if (!fresh) {
-      if (nextDrafts.delete(card.id)) epochBump = true;
+      nextDrafts.delete(card.id);
+      nextFailures.delete(card.id);
       droppedAnswered += 1;
       if (i < state.index) nextIndex -= 1;
       changed = true;
@@ -225,7 +198,15 @@ export function reconcileStepper<C extends StepperCard>(
     }
 
     if (fresh.rev !== card.rev) {
-      if (nextDrafts.delete(card.id)) epochBump = true;
+      if (failed) {
+        nextCards.push(fresh);
+        if (failed.kind !== "conflict" || failed.message !== CONFLICT_MESSAGE) {
+          nextFailures.set(card.id, { kind: "conflict", message: CONFLICT_MESSAGE });
+        }
+        changed = true;
+        continue;
+      }
+      nextDrafts.delete(card.id);
       droppedChanged += 1;
       if (i < state.index) nextIndex -= 1;
       changed = true;
@@ -245,7 +226,6 @@ export function reconcileStepper<C extends StepperCard>(
     failures: nextFailures,
     droppedAnswered,
     droppedChanged,
-    submitEpoch: epochBump ? state.submitEpoch + 1 : state.submitEpoch,
   };
 }
 
@@ -267,17 +247,16 @@ export async function submitBatch<C extends StepperCard>(
 
   for (let i = 0; i < items.length; i++) {
     const { card, draft } = items[i]!;
-    deps.onProgress?.(i, items.length, card.id);
+    deps.onProgress?.(i, items.length);
 
-    const unlocked = await deps.waitForUnlock();
-    if (!unlocked) break;
+    await deps.waitForUnlock();
 
     const current = deps.latestCard(card.id);
     if (!current) {
-      failed.set(card.id, { kind: "conflict", message: GONE_MESSAGE, gone: true });
+      failed.set(card.id, { kind: "conflict", message: GONE_MESSAGE });
       continue;
     }
-    if (current.rev !== card.rev) {
+    if (current.rev !== card.rev || isStaleDraft(current, draft)) {
       failed.set(card.id, { kind: "conflict", message: CONFLICT_MESSAGE });
       continue;
     }
@@ -316,11 +295,11 @@ export function applyBatchResult<C extends StepperCard>(
   }
 
   return {
-    ...state,
     cards: nextCards,
     index: nextCards.length,
     drafts: nextDrafts,
     failures: nextFailures,
-    submitEpoch: state.submitEpoch + 1,
+    droppedAnswered: 0,
+    droppedChanged: 0,
   };
 }
