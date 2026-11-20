@@ -1062,7 +1062,7 @@ export function PathwaysTab({
   };
   return (
     <div
-      className="mx-auto max-w-[1500px] p-4 max-[1100px]:p-1"
+      className="mx-auto max-w-[2200px] p-4 max-[1100px]:p-1"
       data-pathways-tab=""
     >
       <div className="mb-4 flex flex-wrap items-center gap-3">
@@ -1225,7 +1225,7 @@ function PathwaysSection({ slug }: { slug: string }) {
         narrowGraph ? 166 : 208,
         narrowGraph ? 110 : 84,
         "orthogonal",
-        narrowGraph ? 54 : 100,
+        narrowGraph ? 54 : 64,
       )
     : null;
   const graphIdentity = `${slug}:${hideDone}:${narrowGraph}:${graphNodes.map((node) => node.id).join(",")}:${visibleEdges.map((edge) => `${edge.from}:${edge.to}`).join(",")}`;
@@ -2077,7 +2077,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                 </div>
               )}
               {!!map.claimed.length && (
-                <details className="rounded-lg border p-3" open={!map.firstPath.length && !map.ownerActions.length}>
+                <details className="rounded-lg border p-3" open={map.claimed.some((id) => !pathIds.has(id))}>
                   <summary className="cursor-pointer text-sm font-semibold">
                     Claimed · {map.claimed.length}
                   </summary>
@@ -2092,7 +2092,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                 </details>
               )}
               {!!map.blocked.length && (
-                <details className="rounded-lg border p-3" open>
+                <details className="rounded-lg border p-3" open={map.blocked.some((id) => !pathIds.has(id))}>
                   <summary className="cursor-pointer text-sm font-semibold">
                     Blocked on · {map.blocked.length}
                   </summary>

@@ -67,6 +67,8 @@ export function layout(nodes: readonly DNode[], edges: readonly DEdge[], directi
   });
   const at = new Map(boxes.map((b) => [b.id, b]));
   const lines: Line[] = [];
+  let skipLane = 0;
+  let corridorBottom = 0;
   for (const e of edges) {
     const a = at.get(e.from);
     const b = at.get(e.to);
@@ -82,11 +84,25 @@ export function layout(nodes: readonly DNode[], edges: readonly DEdge[], directi
       const y1 = a.y + ((outgoing.findIndex((edge) => edge.to === e.to) + 1) * a.h) / (outgoing.length + 1);
       const x2 = b.x;
       const y2 = b.y + ((incoming.findIndex((edge) => edge.from === e.from) + 1) * b.h) / (incoming.length + 1);
-      const lanes = edges.filter((edge) => at.get(edge.from)?.layer === a.layer && at.get(edge.to)?.layer === b.layer).sort((left, right) => at.get(left.from)!.y - at.get(right.from)!.y || at.get(left.to)!.y - at.get(right.to)!.y);
-      const bend = x1 + ((lanes.length - lanes.findIndex((edge) => edge.from === e.from && edge.to === e.to)) * (x2 - x1)) / (lanes.length + 1);
-      path = `M${x1},${y1} H${bend} V${y2} H${x2}`;
-      lx = bend;
-      ly = (y1 + y2) / 2;
+      const midBoxes = b.layer > a.layer + 1 ? boxes.filter((box) => box.layer > a.layer && box.layer < b.layer) : [];
+      const hitsMid = midBoxes.some((box) => (y1 >= box.y - 4 && y1 <= box.y + box.h + 4) || (y2 >= box.y - 4 && y2 <= box.y + box.h + 4));
+      if (hitsMid) {
+        const stub = Math.max(10, Math.min(20, layerGap / 3));
+        const exitX = x1 + stub;
+        const enterX = x2 - stub;
+        const maxBottom = Math.max(...midBoxes.map((box) => box.y + box.h), a.y + a.h, b.y + b.h);
+        const corridorY = maxBottom + 16 + skipLane++ * 10;
+        corridorBottom = Math.max(corridorBottom, corridorY + PAD);
+        path = `M${x1},${y1} H${exitX} V${corridorY} H${enterX} V${y2} H${x2}`;
+        lx = (exitX + enterX) / 2;
+        ly = corridorY;
+      } else {
+        const lanes = edges.filter((edge) => at.get(edge.from)?.layer === a.layer && at.get(edge.to)?.layer === b.layer).sort((left, right) => at.get(left.from)!.y - at.get(right.from)!.y || at.get(left.to)!.y - at.get(right.to)!.y);
+        const bend = x1 + ((lanes.length - lanes.findIndex((edge) => edge.from === e.from && edge.to === e.to)) * (x2 - x1)) / (lanes.length + 1);
+        path = `M${x1},${y1} H${bend} V${y2} H${x2}`;
+        lx = bend;
+        ly = (y1 + y2) / 2;
+      }
     } else if (right) {
       const [x1, y1] = back ? [a.x + a.w / 2, a.y + a.h] : [a.x + a.w, a.y + a.h / 2];
       const [x2, y2] = back ? [b.x + b.w / 2, b.y + b.h] : [b.x, b.y + b.h / 2];
@@ -105,6 +121,6 @@ export function layout(nodes: readonly DNode[], edges: readonly DEdge[], directi
     lines.push({ ...e, path, lx, ly, back });
   }
   const width = Math.max(...boxes.map((b) => b.x + b.w)) + PAD + (right ? 0 : lines.some((l) => l.back) ? 40 : 0);
-  const height = Math.max(...boxes.map((b) => b.y + b.h)) + PAD + (right && lines.some((l) => l.back) ? 32 : 0);
+  const height = Math.max(Math.max(...boxes.map((b) => b.y + b.h)) + PAD + (right && lines.some((l) => l.back) ? 32 : 0), corridorBottom);
   return { boxes, lines, width, height };
 }

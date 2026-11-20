@@ -55,4 +55,9 @@ test("no two boxes overlap, in either direction", () => {
   const wideGraph = layout(wider, wider.slice(1).map((node, index) => e(wider[index].id, node.id)), "right", 208, 76, "orthogonal");
   assert.equal(wideGraph.boxes.length, 25);
   assert(wideGraph.boxes.every((box) => box.x + box.w <= wideGraph.width && box.y + box.h <= wideGraph.height));
+  const skip = layout([n("a"), n("b"), n("c")], [e("a", "b"), e("b", "c"), e("a", "c")], "right", 208, 76, "orthogonal", 64);
+  const midBox = skip.boxes.find((b) => b.id === "b")!;
+  const skipLine = skip.lines.find((l) => l.from === "a" && l.to === "c")!;
+  assert.ok(skipLine.ly > midBox.y + midBox.h || skipLine.ly < midBox.y, `skip edge routed through intermediate box b: ${skipLine.path}`);
+  assert.ok(skipLine.ly < skip.height);
 });
