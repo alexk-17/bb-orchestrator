@@ -1503,7 +1503,7 @@ function PathwaysSection({ slug }: { slug: string }) {
         </p>
       )}
       {q.error ? (
-        <Alert>
+        <Alert variant="destructive" className="mt-3">
           <AlertDescription>
             Pathways failed: {q.error.message}
           </AlertDescription>
@@ -1515,16 +1515,22 @@ function PathwaysSection({ slug }: { slug: string }) {
             <EmptyTitle>
               {q.data.error.includes("Invalid JSON")
                 ? "Project record is invalid"
-                : q.data.error.includes("linearApiKey")
+                : q.data.error.includes("rejected linearApiKey")
                   ? "Linear authentication failed"
                   : q.data.error.includes("rate limit")
                     ? "Linear rate limit reached"
                     : q.data.error.includes("timed out")
                       ? "Linear request timed out"
-                      : q.data.error.includes("linearProjectId") ||
-                          q.data.error.includes("Linear project link")
-                        ? "No Linear map linked"
-                        : "Pathways unavailable"}
+                      : q.data.error.includes("server error")
+                        ? "Linear server error"
+                        : q.data.error.includes("GraphQL error")
+                          ? "Linear GraphQL error"
+                          : q.data.error.includes("Map issue") ||
+                              q.data.error.includes("wayfinder:map")
+                            ? "Linear map issue not found"
+                            : q.data.error.includes("was not found")
+                              ? "Linear project not found"
+                              : "Pathways unavailable"}
             </EmptyTitle>
             <EmptyDescription className="max-w-xl [overflow-wrap:anywhere]">{q.data.error}</EmptyDescription>
           </EmptyHeader>

@@ -239,6 +239,14 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
       const serverErr = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
       assert.match(serverErr.error ?? "", /server error/i);
       assert.match(serverErr.error ?? "", /500/);
+      globalThis.fetch = (async () => new Response(JSON.stringify({ errors: [{ message: "Entity not found" }] }), { status: 200 })) as typeof fetch;
+      const gqlErr = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+      assert.match(gqlErr.error ?? "", /Entity not found/);
+      assert.match(gqlErr.error ?? "", /proj-alpha/);
+      globalThis.fetch = (async () => new Response(JSON.stringify({ data: { project: null } }), { status: 200 })) as typeof fetch;
+      const notFoundErr = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+      assert.match(notFoundErr.error ?? "", /proj-alpha/);
+      assert.match(notFoundErr.error ?? "", /projects\/alpha\/project\.json/);
       globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
         const body = JSON.parse(String(init?.body ?? "{}")) as { query?: string; variables?: { id?: string } };
         if (body.query?.includes("project(id:")) {

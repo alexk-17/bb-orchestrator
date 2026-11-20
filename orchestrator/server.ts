@@ -2260,14 +2260,18 @@ export default async function plugin(bb: BbPluginApi) {
             }
             throw new Error(`HTTP ${response.status}`);
           }
-          const result = await response.json() as { data?: T; errors?: unknown[] };
-          if (result.errors?.length || !result.data) throw new Error("GraphQL error");
+          const result = await response.json() as { data?: T; errors?: { message?: unknown }[] };
+          if (result.errors?.length || !result.data) {
+            const firstMsg = result.errors?.find((e) => typeof e?.message === "string" && e.message.trim())?.message;
+            const detail = typeof firstMsg === "string" ? firstMsg.replace(/\s+/g, " ").trim().slice(0, 200) : "";
+            throw new Error(detail ? `GraphQL error: ${detail}` : "GraphQL error");
+          }
           return result.data;
         };
         const summary = await projectIssues((after) => request<{ project: { issues: { nodes: { identifier: string; parent: { identifier: string } | null; labels: { nodes: { name: string }[] } }[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } } | null }>(`query($id: String!, $after: String) { project(id: $id) { issues(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { identifier parent { identifier } labels { nodes { name } } } } } }`, linearProjectId, after));
-        if (!summary) return failure("Pathways Linear project not found. Check linearProjectId.");
+        if (!summary) return failure(`Linear project "${linearProjectId}" was not found. Update linearProjectId in projects/${slug}/project.json, then click Refresh.`);
         const mapIndex = selectPathwaysMap(summary, linearMapIssue);
-        if (!mapIndex) return failure(linearMapIssue ? `Pathways map issue ${linearMapIssue} not found in the linked Linear project.` : "No Pathways map issue (label wayfinder:map) found in the linked Linear project.");
+        if (!mapIndex) return failure(linearMapIssue ? `Map issue "${linearMapIssue}" was not found in Linear project "${linearProjectId}". Update linearMapIssue in projects/${slug}/project.json, then click Refresh.` : `No map issue with label "wayfinder:map" was found in Linear project "${linearProjectId}". Add that label in Linear or set linearMapIssue in projects/${slug}/project.json, then click Refresh.`);
         const ids = [mapIndex.identifier, ...summary.filter((issue) => issue.parent?.identifier === mapIndex.identifier).map((issue) => issue.identifier)];
         const detailQuery = `query($id: String!) { issue(id: $id) { identifier title url description updatedAt state { type name } priority estimate assignee { name } labels { nodes { name } } parent { identifier } attachments { nodes { id url } } relations { nodes { type relatedIssue { identifier title url state { type } } } } inverseRelations { nodes { type issue { identifier title url state { type } } } } } }`;
         const issues = await mapPathwaysLimited(ids, 8, async (id) => (await request<{ issue: PathwaysIssue | null }>(detailQuery, id)).issue);
@@ -2317,8 +2321,15 @@ export default async function plugin(bb: BbPluginApi) {
         if (serverErr) {
           return failure(`Linear returned a server error (HTTP ${serverErr[1]}). Try Refresh again shortly.`);
         }
-        const reason = /^HTTP \d+$/.test(msg) || msg === "GraphQL error" ? msg : "network error";
-        return failure(`Pathways Linear request failed: ${reason}. Check the connection and try Refresh.`);
+        if (msg.startsWith("GraphQL error: ")) {
+          const detail = msg.slice("GraphQL error: ".length);
+          return failure(`Linear GraphQL error: ${detail}. Check linearProjectId ("${linearProjectId}") in projects/${slug}/project.json and linearApiKey permissions in Orchestrator settings.`);
+        }
+        if (msg === "GraphQL error") {
+          return failure(`Linear returned a GraphQL error for linearProjectId "${linearProjectId}". Check projects/${slug}/project.json and linearApiKey permissions in Orchestrator settings.`);
+        }
+        const reason = /^HTTP \d+$/.test(msg) ? msg : "network error";
+        return failure(`Linear request failed (${reason}). Check your connection and click Refresh.`);
       } };
       const linearKey = `linear:${linearProjectId}:${linearMapIssue ?? ""}`;
       return pathwaysSnapshots.view(slug, refresh ?? false, read, linearKey);
