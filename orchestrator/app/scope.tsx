@@ -1373,14 +1373,15 @@ function PathwaysSection({ slug }: { slug: string }) {
   );
   const ticketFact = (ticket: PathwaysTicketView) =>
     [
-      ticket.prLink.state === "linked" &&
-      ticket.pr &&
-      ticket.pr.state !== "unavailable"
+      ticket.prLink.state === "linked" && ticket.pr
         ? (() => {
+            if (ticket.pr.state === "unavailable") return "PR linked · GitHub unavailable";
             const openCount = ticket.prs.filter(({ pr }) => pr.state !== "merged" && pr.state !== "closed").length;
             return `PR #${ticket.pr.number ?? "linked"} ${ticket.pr.state}${openCount > 1 ? ` (+${openCount - 1})` : ""}`;
           })()
         : "",
+      ticket.prLink.state === "linked" && ticket.proof?.state === "unrecorded" ? "proof needed" : "",
+      ticket.prLink.state === "linked" && ticket.proof?.state === "stale" ? "proof stale" : "",
       ticket.decision.waiting ? "decision awaiting answer" : "",
       ticket.preflight.state === "needs access" ? "proof needs access" : "",
     ]
@@ -1640,7 +1641,7 @@ function PathwaysSection({ slug }: { slug: string }) {
               </AlertDescription>
             </Alert>
           )}
-          <div className="mt-3 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(390px,420px)]">
+          <div className="mt-3 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(330px,370px)]">
             <div
               className="order-1 min-w-0 self-start rounded-lg border p-2 max-[1100px]:p-1"
               data-pathways-graph=""
@@ -2158,7 +2159,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                     {rows(map.claimed).map((ticket) =>
                       ticketRow(
                         ticket,
-                        ticketFact(ticket) || ticket.assignee || "Claimed",
+                        [ticket.assignee, ticketFact(ticket)].filter(Boolean).join(" · ") || "Claimed",
                       ),
                     )}
                   </div>
@@ -2195,7 +2196,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                 ) : null;
               })()}
               {!!map.fog.length && (
-                <details className="rounded-lg border p-3">
+                <details className="rounded-lg border p-3" open={map.fog.length <= 4}>
                   <summary className="cursor-pointer text-sm font-semibold">
                     Open questions · {map.fog.length}
                   </summary>
@@ -2385,20 +2386,60 @@ function PathwaysSection({ slug }: { slug: string }) {
                   </DialogHeader>
                   <Separator />
                   <div className="grid gap-3 text-sm">
-                    <div>
-                      <Badge variant="outline">{selected.displayState}</Badge> ·{" "}
-                      {selected.assignee ?? "Owner not recorded"}
-                      {selected.blockers.length
-                        ? ` · Blocked by ${selected.blockers.join(", ")}`
-                        : ""}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Badge variant="outline">{selected.displayState}</Badge>
+                      <span>· {selected.assignee ?? "Owner not recorded"}</span>
+                      {!!selected.blockers.length && (
+                        <span>
+                          · Blocked by{" "}
+                          {selected.blockers.map((blockerId, index) => {
+                            const inMap = tickets.get(blockerId);
+                            const ext = map.external.find((item) => item.identifier === blockerId);
+                            return (
+                              <span key={blockerId}>
+                                {index > 0 ? ", " : ""}
+                                {inMap ? (
+                                  <Button
+                                    type="button"
+                                    variant="link"
+                                    size="sm"
+                                    className="inline h-auto p-0 align-baseline font-mono text-xs underline"
+                                    onClick={() => openDetail(blockerId)}
+                                  >
+                                    {blockerId}
+                                  </Button>
+                                ) : ext?.url ? (
+                                  <a
+                                    href={ext.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="font-mono text-xs underline"
+                                    title={ext.title ?? blockerId}
+                                  >
+                                    {blockerId}
+                                  </a>
+                                ) : (
+                                  <span className="font-mono text-xs">{blockerId}</span>
+                                )}
+                              </span>
+                            );
+                          })}
+                        </span>
+                      )}
                     </div>
                     <UiCard className="gap-1 px-3 py-3">
                       <CardTitle className="text-sm">
-                        Readiness · {selected.readiness.state}
+                        Scope readiness ·{" "}
+                        {selected.readiness.state === "ready" &&
+                        (selected.displayState === "blocked" || selected.preflight.state === "needs access")
+                          ? "spec ready (blocked)"
+                          : selected.readiness.state}
                       </CardTitle>
                       <p className="mb-1 mt-2 text-xs">
                         {selected.readiness.reasons.join(" · ") ||
-                          "Scope and proof plan recorded"}
+                          (selected.displayState === "blocked" || selected.preflight.state === "needs access"
+                            ? "Scope and proof plan recorded, but work is gated by open blockers or proof access."
+                            : "Scope and proof plan recorded")}
                       </p>
                       <PathwaysLink
                         href={selected.readiness.source}
