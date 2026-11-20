@@ -73,6 +73,10 @@ Each card shows its question, which project and agent it comes from ("via" names
 - **More** opens the card's context and any extra detail.
 - **Defer ▾** takes the card off your list until a time you pick: 1 hour, this evening, tomorrow, or until you bring
   it back. Deferred cards wait under **Deferred**, with **Bring back**.
+- **Answer one at a time** appears when 2 or more owner cards wait. Step through them with **Back** and **Next** (picks
+  and **Other** answers save locally as drafts; **Next** without a pick skips the card), review or edit every answer on
+  the review step, then click **Submit** to send the drafts one at a time. Cards that fail stay on the review step with
+  their drafts kept; cards answered or changed elsewhere drop out with a notice.
 
 Labels on a card:
 

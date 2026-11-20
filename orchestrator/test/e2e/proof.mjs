@@ -18,7 +18,15 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { checkBase, isLiveBase } from "./live-guard.ts";
 
-const { values, positionals } = parseArgs({ allowPositionals: true, options: { out: { type: "string" }, base: { type: "string" }, live: { type: "boolean", default: false } } });
+const { values, positionals } = parseArgs({
+  allowPositionals: true,
+  options: {
+    out: { type: "string" },
+    base: { type: "string" },
+    live: { type: "boolean", default: false },
+    mobile: { type: "boolean", default: false },
+  },
+});
 const base = checkBase(values.base, values.live);
 const out = values.out;
 if (!out) throw new Error("--out DIR");
@@ -35,7 +43,12 @@ const state = async (id) =>
 // Playwright loads only after the base passed the guard
 const { chromium } = await import("playwright-core");
 const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+const context = await browser.newContext({
+  viewport: values.mobile ? { width: 390, height: 844 } : { width: 1440, height: 1000 },
+  hasTouch: values.mobile,
+  isMobile: values.mobile,
+});
+const page = await context.newPage();
 page.on("console", (m) => { if (m.type() === "error") report.console.push(m.text()); });
 page.on("pageerror", (e) => report.console.push(String(e)));
 const shot = async (name) => { await page.waitForTimeout(300); await page.screenshot({ path: join(out, `${name}.png`), fullPage: true }); report.notes.push(`screenshot ${name}.png`); };
@@ -129,6 +142,96 @@ try {
       if (report.after[b] !== "asked") throw new Error(`${b} was answered by the second click`);
       break;
     }
+    case "stepper": {
+      const [mode, name] = args;
+      await go();
+      const ids = await page.locator("[data-card]").evaluateAll((els) => els.map((e) => e.getAttribute("data-card")));
+      if (ids.length < 3) throw new Error(`need >=3 cards for stepper proof, got ${ids.length}`);
+      await page.locator("[data-stepper-start]").waitFor({ timeout: 5_000 });
+      await shot(`${name}-offer`);
+      await page.locator("[data-stepper-start]").click();
+      await page.locator("[data-stepper]").waitFor({ timeout: 5_000 });
+      const pos1 = await page.locator("[data-stepper-pos]").textContent();
+      if (!pos1?.includes(`1 of ${ids.length}`)) throw new Error(`expected 1 of ${ids.length}, got ${pos1}`);
+      await shot(`${name}-step1`);
+      const overflow1 = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+      if (overflow1) throw new Error("horizontal overflow on step 1");
+
+      await armed(ids[0], "1");
+      await card(ids[0]).locator('[data-option="1"]').click();
+      await page.locator(`[data-card="${ids[1]}"]`).waitFor({ timeout: 5_000 });
+      const pos2 = await page.locator("[data-stepper-pos]").textContent();
+      if (!pos2?.includes(`2 of ${ids.length}`)) throw new Error(`expected 2 of ${ids.length}, got ${pos2}`);
+
+      await page.locator("[data-stepper-back]").click();
+      await page.locator(`[data-card="${ids[0]}"]`).waitFor({ timeout: 5_000 });
+      const pressedBack = await card(ids[0]).locator('[data-option="1"]').getAttribute("aria-pressed");
+      if (pressedBack !== "true") throw new Error(`expected Back to keep pick on ${ids[0]}, got aria-pressed=${pressedBack}`);
+      await shot(`${name}-back-kept`);
+
+      await page.locator("[data-stepper-next]").click();
+      await page.locator(`[data-card="${ids[1]}"]`).waitFor({ timeout: 5_000 });
+      await page.locator("[data-stepper-next]").click();
+      await page.locator(`[data-card="${ids[2]}"]`).waitFor({ timeout: 5_000 });
+
+      await armed(ids[2], "1");
+      await card(ids[2]).locator("[data-note]").fill("Schedule with dual-key overlap");
+      await card(ids[2]).locator("[data-note-send]").click();
+      if (ids.length > 3) {
+        await page.locator(`[data-card="${ids[3]}"]`).waitFor({ timeout: 5_000 });
+        await armed(ids[3], "2");
+        await card(ids[3]).locator('[data-option="2"]').click();
+      }
+
+      await page.locator("[data-stepper-review]").waitFor({ timeout: 5_000 });
+      const overflowRev = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+      if (overflowRev) throw new Error("horizontal overflow on review");
+      await shot(`${name}-review`);
+
+      await page.locator(`[data-review-edit="${ids[0]}"]`).click();
+      await page.locator(`[data-review-editor="${ids[0]}"] [data-option="2"]`).click();
+      await page.locator(`[data-review-editor="${ids[0]}"]`).waitFor({ state: "detached", timeout: 5_000 });
+
+      if (mode === "partial") {
+        const bumpRes = await fetch(`${base}/harness/bump-rev`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: ids[2], question: "Updated question: rotate webhook key immediately?" }),
+        });
+        if (!bumpRes.ok) throw new Error(`bump-rev failed: ${bumpRes.status}`);
+      }
+
+      await page.locator('[data-stepper-submit][data-armed="true"]').waitFor({ timeout: 10_000 });
+      await page.locator("[data-stepper-submit]").click();
+
+      if (mode === "partial") {
+        await page.locator(`[data-review-error="${ids[2]}"]`).waitFor({ timeout: 15_000 });
+        await page.waitForTimeout(800);
+        await shot(`${name}-partial-failure`);
+        const failedCardCount = await page.locator(`[data-review-card="${ids[2]}"]`).count();
+        const succeededCardCount = await page.locator(`[data-review-card="${ids[0]}"]`).count();
+        if (failedCardCount !== 1 || succeededCardCount !== 0) {
+          throw new Error(`expected failed ${ids[2]} kept (${failedCardCount}) and succeeded ${ids[0]} gone (${succeededCardCount})`);
+        }
+        const keptDraft = await page.locator(`[data-review-answer="${ids[2]}"]`).textContent();
+        if (!keptDraft?.includes("Schedule with dual-key overlap")) {
+          throw new Error(`expected kept draft text, got ${keptDraft}`);
+        }
+        report.after = Object.fromEntries(await Promise.all(ids.map(async (i) => [i, await state(i)])));
+        if (report.after[ids[0]] !== "answered" || report.after[ids[1]] !== "asked" || report.after[ids[2]] !== "asked") {
+          throw new Error(`unexpected partial states: ${JSON.stringify(report.after)}`);
+        }
+      } else {
+        await page.locator("[data-stepper]").waitFor({ state: "detached", timeout: 15_000 });
+        await page.waitForTimeout(800);
+        await shot(`${name}-submitted`);
+        report.after = Object.fromEntries(await Promise.all(ids.map(async (i) => [i, await state(i)])));
+        if (report.after[ids[0]] !== "answered" || report.after[ids[1]] !== "asked" || report.after[ids[2]] !== "answered") {
+          throw new Error(`unexpected submitted states: ${JSON.stringify(report.after)}`);
+        }
+      }
+      break;
+    }
     case "revoke": {
       const [ruleId, name] = args;
       await go("rules");
@@ -201,6 +304,7 @@ try {
   await page.screenshot({ path: join(out, `error-${step}.png`), fullPage: true }).catch(() => {});
 } finally {
   writeFileSync(join(out, `report-${step}-${Date.now()}.json`), JSON.stringify(report, null, 2));
+  await context.close();
   await browser.close();
 }
 console.log(JSON.stringify(report, null, 2));

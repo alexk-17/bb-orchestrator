@@ -28,12 +28,34 @@ import { changed, gate, gone, pruneGone, useGate, write, type Hide, type WriteKi
 import { KIND_TONES, css } from "./palette.ts";
 import { ACCENT, accentTone, accentVars } from "./accent.ts";
 import { ChevronDown, CircleAlert, CircleCheck } from "lucide-react";
+import { Alert, AlertDescription } from "./ui/alert.tsx";
 import { Card as Frame } from "./ui/card.tsx";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu.tsx";
 import { Item, ItemGroup } from "./ui/item.tsx";
 import { cn } from "./ui/utils.ts";
 import { AgentFace, type Face } from "./face.tsx";
 import { Btn, EmptyState, Kind, ReadState, Section, Tag, Who, when } from "./ui.tsx";
+import {
+  applyBatchResult,
+  canOfferStepper,
+  clearDraft,
+  cloneUnticked,
+  dismissCard,
+  droppedNotice,
+  isDraftValidForCard,
+  isReview,
+  openStepper,
+  positionLabel,
+  reconcileStepper,
+  saveDraft,
+  stepBack,
+  stepNext,
+  submitBatch,
+  submittableDrafts,
+  type StepperDraft,
+  type StepperFailure,
+  type StepperState,
+} from "./answer-stepper.ts";
 
 /** The device's zone, which the server works the defer presets out in. One value, so every read shares a cache entry. */
 export const ZONE: string = (() => {
@@ -54,6 +76,10 @@ export function via(): "phone" | "desktop" {
 }
 
 export type List = "cards" | "deferred";
+
+function formatDraftNote(card: Card, draft: StepperDraft): string {
+  return [draft.note.trim(), untickedText(card.blocks, cloneUnticked(draft.unticked))].filter(Boolean).join("\n\n");
+}
 
 /** The view without the cards a write took (this id at this rev), for the lists the write moved them out of. */
 function visible(v: NeedsYou): NeedsYou {
@@ -78,8 +104,8 @@ export function useArming(root: RefObject<HTMLDivElement | null>) {
     const now = performance.now();
     const next = new Map<string, Seen>();
     let restarted = false;
-    el.querySelectorAll<HTMLElement>("[data-card]").forEach((c) => {
-      const id = c.dataset.card ?? "";
+    el.querySelectorAll<HTMLElement>("[data-card], [data-arm]").forEach((c) => {
+      const id = c.dataset.card ?? c.dataset.arm ?? "";
       const prev = seen.current.get(id);
       const s = track(prev, Number(c.dataset.rev), c.getBoundingClientRect().top - base, now);
       if (s !== prev) restarted = true;
@@ -130,10 +156,16 @@ export type Act = {
   secret: (card: Card, list: List, value: string) => void;
 };
 
+export type CardDraftProps = {
+  value: StepperDraft | null;
+  onPick: (draft: StepperDraft) => void;
+  onClear?: () => void;
+};
+
 /** One card, answerable in place: Needs you's cards, and the Scope tab's (with no defer presets there). */
-export function CardView({ card, list, presets, isArmed, act, mon, monType = null }: { card: Card; list: List; presets: Preset[]; isArmed: boolean; act: Act; mon: Face | null; monType?: string | null }) {
-  const [note, setNote] = useState("");
-  const [unticked, setUnticked] = useState<Map<number, Set<number>>>(() => new Map());
+export function CardView({ card, list, presets, isArmed, act, mon, monType = null, draft }: { card: Card; list: List; presets: Preset[]; isArmed: boolean; act: Act; mon: Face | null; monType?: string | null; draft?: CardDraftProps }) {
+  const [note, setNote] = useState(() => draft?.value?.note ?? "");
+  const [unticked, setUnticked] = useState<Map<number, Set<number>>>(() => cloneUnticked(draft?.value?.unticked));
   const toggle = (block: number, item: number) =>
     setUnticked((m) => {
       const next = new Map(m);
@@ -147,13 +179,13 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
   const withLists = (n: string) => [n.trim(), untickedText(card.blocks, unticked)].filter(Boolean).join("\n\n");
   const order = cardBlockOrder(card.blocks);
   // the answer a number key picked, waiting for Enter (keys.ts); a card that changed rev starts without one
-  const picked = keyState.picked.get(`${card.id}@${card.rev}`);
+  const picked = draft ? (draft.value?.option ?? undefined) : keyState.picked.get(`${card.id}@${card.rev}`);
 
   const lock = gate.lock;
   const busy = lock !== null; // a write anywhere on the page turns every write off
   const mine = lock && lock.cardId === card.id && lock.ok !== false ? lock : null;
   const state = mine?.kind === "answer" ? "answered" : mine?.kind === "defer" || card.deferred ? "deferred" : "open";
-  const mark = mine?.kind === "answer" ? "Answered ✓" : mine?.kind === "defer" ? "Deferred" : mine?.kind === "return" ? "Bringing back" : null;
+  const mark = mine?.kind === "answer" ? "Answered ✓" : mine?.kind === "defer" ? "Deferred" : mine?.kind === "return" ? "Bringing back" : draft?.value ? "Draft saved" : null;
   const markColor = mine ? css(KIND_TONES[mine.kind === "answer" ? "done" : mine.kind === "defer" ? "deferred" : "asked"]) : undefined;
   // notices change the card's height, so they show only while nothing holds the page
   const notice = busy ? null : (changed.get(card.id) ?? (gate.error?.where === card.id ? gate.error.message : null));
@@ -241,7 +273,7 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
               recommended: o.recommended,
               pressed: picked ? picked === o.id : undefined,
               data: { "data-option": o.id, "data-armed": isArmed ? "true" : "false", "data-recommended": o.recommended ? "true" : undefined },
-              onPick: () => act.answer(card, list, o.id, withLists(note)),
+              onPick: () => (draft ? draft.onPick({ option: o.id, note, unticked }) : act.answer(card, list, o.id, withLists(note))),
             }))}
           />
 
@@ -252,13 +284,19 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
               value={note}
               onChange={setNote}
               disabled={busy}
-              onSend={() => act.answer(card, list, null, withLists(note))}
-              placeholder="Other: your own answer, or a note to go with an option. ⌘↵ sends"
+              sendLabel={draft ? "Save" : "Send"}
+              onSend={() => (draft ? draft.onPick({ option: null, note, unticked }) : act.answer(card, list, null, withLists(note)))}
+              placeholder={draft ? "Other: your own answer, or a note to go with an option. ⌘↵ saves" : "Other: your own answer, or a note to go with an option. ⌘↵ sends"}
             />
           ) : null}
 
           <footer className="mt-2 flex items-center gap-2">
             <span className="ml-auto" />
+            {draft?.value && draft.onClear ? (
+              <Btn tone="ghost" size="sm" data-draft-clear="" disabled={busy} onClick={draft.onClear}>
+                Clear draft
+              </Btn>
+            ) : null}
             {list === "deferred" ? (
               <Btn data-return="" disabled={busy} onClick={() => act.bringBack(card)}>
                 Bring back
@@ -286,13 +324,177 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
   );
 }
 
+function ReviewCard({
+  card,
+  draft,
+  failure,
+  editing,
+  submitting,
+  mon,
+  monType,
+  onStartEdit,
+  onCancelEdit,
+  onSave,
+  onClear,
+  onDismiss,
+  onSecret,
+}: {
+  card: Card;
+  draft: StepperDraft | null;
+  failure: StepperFailure | null;
+  editing: boolean;
+  submitting: boolean;
+  mon: Face | null;
+  monType: string | null;
+  onStartEdit: () => void;
+  onCancelEdit: () => void;
+  onSave: (draft: StepperDraft) => void;
+  onClear: () => void;
+  onDismiss: () => void;
+  onSecret: (value: string) => void;
+}) {
+  const [note, setNote] = useState(() => draft?.note ?? "");
+  const [unticked, setUnticked] = useState<Map<number, Set<number>>>(() => cloneUnticked(draft?.unticked));
+
+  useEffect(() => {
+    if (editing) {
+      setNote(draft?.note ?? "");
+      setUnticked(cloneUnticked(draft?.unticked));
+    }
+  }, [editing, draft]);
+
+  const toggle = (block: number, item: number) =>
+    setUnticked((m) => {
+      const next = new Map(m);
+      const off = new Set(next.get(block) ?? []);
+      if (off.has(item)) off.delete(item);
+      else off.add(item);
+      next.set(block, off);
+      return next;
+    });
+
+  const order = cardBlockOrder(card.blocks);
+  const pickedOption = draft?.option ? card.options.find((o) => o.id === draft.option) : null;
+  const noteSummary = draft ? formatDraftNote(card, draft) : "";
+  const valid = draft ? isDraftValidForCard(card, draft, noteSummary) : true;
+
+  return (
+    <Frame role="article" data-review-card={card.id} data-rev={card.rev} data-accent={monType ?? undefined} className="gap-0 p-4" style={accentVars(monType)}>
+      <header className="flex items-start gap-3">
+        <AgentFace face={mon} address={card.origin} size={28} />
+        <div className="min-w-0 flex-1">
+          <h4 className="m-0 text-sm leading-5 font-semibold [overflow-wrap:anywhere]">{card.title}</h4>
+          <p className={META}>
+            <span style={accentTone(monType) ? { color: ACCENT, fontWeight: 600 } : undefined}>{card.project ?? "no project"}</span>
+            <span aria-hidden>·</span>
+            <span className="orch-mono">{card.origin}</span>
+          </p>
+        </div>
+        <div className="flex-none">
+          {failure ? (
+            <Kind of="failed" group="alarm" data-review-status="failed">
+              Failed
+            </Kind>
+          ) : draft ? (
+            <Tag data-review-status="draft">Draft</Tag>
+          ) : (
+            <Tag data-review-status="skipped">Skipped</Tag>
+          )}
+        </div>
+      </header>
+
+      <p className="m-0 mt-2 text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">{card.question}</p>
+
+      {failure ? (
+        <p role="status" data-review-error={card.id} className="orch-danger m-0 mt-2 text-xs">
+          {failure.message}
+        </p>
+      ) : null}
+
+      {!editing ? (
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+          <div data-review-answer={card.id} className="min-w-0 flex-1 text-sm [overflow-wrap:anywhere]">
+            {draft ? (
+              <div className="flex flex-col gap-0.5">
+                {draft.option !== null ? (
+                  <span className={cn("font-medium", !pickedOption && "orch-danger")}>
+                    {pickedOption ? pickedOption.label : "Picked option is no longer available — edit before sending"}
+                  </span>
+                ) : null}
+                {noteSummary ? <span className="text-muted-foreground whitespace-pre-wrap">{noteSummary}</span> : null}
+                {!valid && draft.option === null ? <span className="orch-danger text-xs">Edit this answer before sending</span> : null}
+              </div>
+            ) : (
+              <span className="text-muted-foreground">Skipped — stays open on Needs you</span>
+            )}
+          </div>
+          <div className="flex flex-none flex-wrap items-center gap-1.5">
+            {!failure?.gone ? (
+              <Btn size="sm" tone="outline" data-review-edit={card.id} disabled={submitting} onClick={onStartEdit}>
+                {draft ? "Edit" : "Answer"}
+              </Btn>
+            ) : null}
+            {failure?.gone ? (
+              <Btn size="sm" tone="ghost" data-review-dismiss={card.id} disabled={submitting} onClick={onDismiss}>
+                Dismiss
+              </Btn>
+            ) : draft ? (
+              <Btn size="sm" tone="ghost" data-review-skip={card.id} disabled={submitting} onClick={onClear}>
+                Skip
+              </Btn>
+            ) : null}
+          </div>
+        </div>
+      ) : (
+        <div data-review-editor={card.id} className="mt-2">
+          <Blocks blocks={card.blocks} prs={card.prs} busy={submitting} onPaste={onSecret} unticked={unticked} onToggle={toggle} only={order.after} />
+          <Options
+            disabled={submitting}
+            options={card.options.map((o) => ({
+              key: o.id,
+              label: o.label,
+              detail: o.detail,
+              recommended: o.recommended,
+              pressed: draft?.option ? draft.option === o.id : undefined,
+              data: { "data-option": o.id, "data-recommended": o.recommended ? "true" : undefined },
+              onPick: () => onSave({ option: o.id, note, unticked }),
+            }))}
+          />
+          {card.allowText ? (
+            <OtherBox
+              value={note}
+              onChange={setNote}
+              disabled={submitting}
+              sendLabel="Save"
+              onSend={() => onSave({ option: null, note, unticked })}
+              placeholder="Other: your own answer, or a note to go with an option. ⌘↵ saves"
+            />
+          ) : null}
+          <div className="mt-2 flex items-center justify-end gap-2">
+            {draft ? (
+              <Btn size="sm" tone="ghost" disabled={submitting} onClick={onClear}>
+                Skip
+              </Btn>
+            ) : null}
+            <Btn size="sm" tone="outline" disabled={submitting} onClick={onCancelEdit}>
+              Cancel
+            </Btn>
+          </div>
+        </div>
+      )}
+    </Frame>
+  );
+}
+
 type Query = { data: NeedsYou | undefined; error: { message: string } | null; refetch: () => Promise<void> };
 
 /** `mons`: address → its face (its Pokémon or person), from the board's agents (for the asker's sprite on each card). */
 export function NeedsYouView({ q, refetchAll, mons, threads, accents }: { q: Query; refetchAll: () => void; mons: ReadonlyMap<string, Face>; threads: ReadonlyMap<string, string>; accents?: ReadonlyMap<string, string | null> }) {
-  useGate();
+  const gateVersion = useGate();
   const navigate = useBbNavigate();
   const live = q.data;
+  const liveRef = useRef<NeedsYou | undefined>(live);
+  liveRef.current = live;
   // no reflow under a pressed pointer or while a write holds the page: draw what was drawn last
   const frozen = gate.pointerDown || gate.lock !== null;
   const last = useRef<NeedsYou | undefined>(undefined);
@@ -303,6 +505,45 @@ export function NeedsYouView({ q, refetchAll, mons, threads, accents }: { q: Que
   useEffect(() => {
     if (live) pruneGone(new Set([...live.cards.map((c) => `${c.id}@${c.rev}`), ...live.interactions.map((i) => `${ixKey(i)}@0`)]), new Set(live.deferred.map((c) => `${c.id}@${c.rev}`)));
   }, [live]);
+
+  const [stepper, setStepper] = useState<StepperState<Card> | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [progress, setProgress] = useState<{ index: number; total: number } | null>(null);
+  const submittingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const unlockWaiterRef = useRef<((ok: boolean) => void) | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const resolve = unlockWaiterRef.current;
+      unlockWaiterRef.current = null;
+      resolve?.(false);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (gate.lock === null && unlockWaiterRef.current) {
+      const resolve = unlockWaiterRef.current;
+      unlockWaiterRef.current = null;
+      resolve(true);
+    }
+  }, [gateVersion]);
+
+  const waitForUnlock = useCallback((): Promise<boolean> => {
+    if (!mountedRef.current) return Promise.resolve(false);
+    if (gate.lock === null) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      unlockWaiterRef.current = resolve;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!live || submitting) return;
+    setStepper((cur) => (cur ? reconcileStepper(cur, live.cards) : cur));
+  }, [live, submitting]);
 
   const root = useRef<HTMLDivElement>(null);
   const arming = useArming(root);
@@ -388,9 +629,80 @@ export function NeedsYouView({ q, refetchAll, mons, threads, accents }: { q: Que
     );
   }
 
+  const busy = gate.lock !== null;
   const n = view.badge;
   const questions = view.interactions.filter((i) => i.questions.length > 0);
   const prompts = view.interactions.filter((i) => i.questions.length === 0);
+  const offerStepper = !stepper && canOfferStepper(view.cards);
+  const stepperNotice = stepper ? droppedNotice(stepper) : null;
+  const currentCard = stepper && !isReview(stepper) ? stepper.cards[stepper.index] ?? null : null;
+  const sendable = stepper ? submittableDrafts(stepper, formatDraftNote) : [];
+  const submitArmed = stepper ? arming.isArmed("stepper-submit", stepper.submitEpoch) : false;
+
+  const startStepper = () => {
+    if (busy || !canOfferStepper(view.cards)) return;
+    setEditingId(null);
+    setStepper(openStepper(view.cards));
+  };
+
+  const exitStepper = () => {
+    if (submittingRef.current) return;
+    setEditingId(null);
+    setStepper(null);
+  };
+
+  const handleSubmit = async () => {
+    if (submittingRef.current || gate.lock !== null || !stepper) return;
+    if (!arming.check("stepper-submit", stepper.submitEpoch)) return;
+    const items = submittableDrafts(stepper, formatDraftNote);
+    if (items.length === 0) return;
+
+    submittingRef.current = true;
+    setSubmitting(true);
+    setEditingId(null);
+    setProgress({ index: 0, total: items.length });
+
+    const viaDevice = via();
+    const result = await submitBatch(items, {
+      waitForUnlock,
+      latestCard: (id) => liveRef.current?.cards.find((c) => c.id === id),
+      sendOne: async (card, draft) => {
+        const noteText = formatDraftNote(card, draft);
+        const body: z.input<typeof answerBody> = {
+          id: card.id,
+          rev: card.rev,
+          option: draft.option,
+          text: noteText.trim() ? noteText : null,
+          via: viaDevice,
+        };
+        return write(WRITES.answer, body, {
+          card: { id: card.id, rev: card.rev, hide: "both" },
+          kind: "answer",
+          after: refetchAll,
+        });
+      },
+      onProgress: (index, total) => {
+        if (mountedRef.current) setProgress({ index, total });
+      },
+    });
+
+    await waitForUnlock();
+    submittingRef.current = false;
+    if (!mountedRef.current) return;
+    setSubmitting(false);
+    setProgress(null);
+
+    if (result.failed.size === 0) {
+      setStepper(null);
+    } else {
+      setStepper((cur) => {
+        if (!cur) return null;
+        const applied = applyBatchResult(cur, result);
+        return liveRef.current ? reconcileStepper(applied, liveRef.current.cards) : applied;
+      });
+    }
+  };
+
   return (
     <div ref={root} className="flex flex-col gap-4 pb-8">
       <style href={styleHref("orch-answer", answerCss)} precedence="default">
@@ -399,24 +711,167 @@ export function NeedsYouView({ q, refetchAll, mons, threads, accents }: { q: Que
       {/* the count, then one Card per decision; when none waits, shadcn's empty state */}
       <section className="flex flex-col gap-3" aria-label="Needs you">
         {n > 0 ? (
-          <h3 className="m-0 flex items-center gap-2 text-sm font-semibold">
-            <CircleAlert className="size-4 text-(--warning-text)" aria-hidden />
-            <span data-count={String(n)}>{`${n} ${n === 1 ? "needs" : "need"} your input`}</span>
-            {q.error ? <span className="orch-danger ml-auto text-xs font-normal">Stale: {q.error.message}</span> : null}
-          </h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="m-0 flex items-center gap-2 text-sm font-semibold">
+              <CircleAlert className="size-4 text-(--warning-text)" aria-hidden />
+              <span data-count={String(n)}>{`${n} ${n === 1 ? "needs" : "need"} your input`}</span>
+            </h3>
+            {offerStepper ? (
+              <Btn size="sm" tone="outline" className="ml-auto" data-stepper-start="" disabled={busy} onClick={startStepper}>
+                Answer one at a time
+              </Btn>
+            ) : null}
+            {q.error ? <span className={cn("orch-danger text-xs font-normal", !offerStepper && "ml-auto")}>Stale: {q.error.message}</span> : null}
+          </div>
         ) : (
           <EmptyState title={<span data-count="0">All caught up</span>} text="Nothing waiting on you – new decisions show up here." icon={<CircleCheck />} action={q.error ? <span className="orch-danger text-xs">Stale: {q.error.message}</span> : undefined} />
         )}
-        <div className="flex flex-col gap-3" data-list="cards">
-          {view.cards.map((c) => (
-            <CardView key={c.id} card={c} list="cards" presets={view.presets} isArmed={arming.isArmed(c.id, c.rev)} act={act} mon={mons.get(c.origin) ?? null} monType={c.project ? (accents?.get(c.project) ?? null) : null} />
-          ))}
+
+        {stepper ? (
+          <div data-stepper="" className="flex flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                <span data-stepper-pos="">{positionLabel(stepper)}</span>
+                {stepper.drafts.size > 0 ? <Tag data-stepper-drafted="">{`${stepper.drafts.size} drafted`}</Tag> : null}
+              </div>
+              <Btn size="sm" tone="ghost" data-stepper-exit="" disabled={submitting} onClick={exitStepper}>
+                Show all
+              </Btn>
+            </div>
+
+            {stepperNotice ? (
+              <Alert data-stepper-notice="">
+                <AlertDescription>{stepperNotice}</AlertDescription>
+              </Alert>
+            ) : null}
+
+            {currentCard ? (
+              <>
+                <div className="flex flex-col gap-3" data-list="cards">
+                  <CardView
+                    key={`${currentCard.id}@${currentCard.rev}`}
+                    card={currentCard}
+                    list="cards"
+                    presets={[]}
+                    isArmed={arming.isArmed(currentCard.id, currentCard.rev)}
+                    act={act}
+                    mon={mons.get(currentCard.origin) ?? null}
+                    monType={currentCard.project ? (accents?.get(currentCard.project) ?? null) : null}
+                    draft={{
+                      value: stepper.drafts.get(currentCard.id) ?? null,
+                      onPick: (d) => {
+                        if (!arming.check(currentCard.id, currentCard.rev)) return;
+                        setStepper((cur) => (cur ? saveDraft(cur, currentCard.id, d, true) : cur));
+                      },
+                      onClear: () => setStepper((cur) => (cur ? clearDraft(cur, currentCard.id) : cur)),
+                    }}
+                  />
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <Btn tone="outline" data-stepper-back="" disabled={stepper.index === 0 || submitting} onClick={() => setStepper((cur) => (cur ? stepBack(cur) : cur))}>
+                    Back
+                  </Btn>
+                  <Btn tone="outline" data-stepper-next="" disabled={submitting} onClick={() => setStepper((cur) => (cur ? stepNext(cur) : cur))}>
+                    Next
+                  </Btn>
+                </div>
+              </>
+            ) : (
+              <div data-stepper-review="" className="flex flex-col gap-3">
+                {stepper.failures.size > 0 ? (
+                  <Alert variant="destructive" data-stepper-errors="">
+                    <AlertDescription>
+                      {`${stepper.failures.size} ${stepper.failures.size === 1 ? "answer could" : "answers could"} not be sent. Your ${stepper.failures.size === 1 ? "draft is" : "drafts are"} kept below.`}
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
+
+                {stepper.cards.length === 0 ? (
+                  <EmptyState
+                    title="Nothing left in this batch"
+                    text="Every card from this batch was already answered or updated elsewhere."
+                    icon={<CircleCheck />}
+                    action={
+                      <Btn tone="outline" onClick={exitStepper}>
+                        Back to Needs you
+                      </Btn>
+                    }
+                  />
+                ) : (
+                  <>
+                    {stepper.cards.map((c) => (
+                      <ReviewCard
+                        key={`${c.id}@${c.rev}`}
+                        card={c}
+                        draft={stepper.drafts.get(c.id) ?? null}
+                        failure={stepper.failures.get(c.id) ?? null}
+                        editing={editingId === c.id}
+                        submitting={submitting}
+                        mon={mons.get(c.origin) ?? null}
+                        monType={c.project ? (accents?.get(c.project) ?? null) : null}
+                        onStartEdit={() => setEditingId(c.id)}
+                        onCancelEdit={() => setEditingId(null)}
+                        onSave={(d) => {
+                          setStepper((cur) => (cur ? saveDraft(cur, c.id, d, false) : cur));
+                          setEditingId(null);
+                        }}
+                        onClear={() => {
+                          setStepper((cur) => (cur ? clearDraft(cur, c.id) : cur));
+                          if (editingId === c.id) setEditingId(null);
+                        }}
+                        onDismiss={() => {
+                          setStepper((cur) => (cur ? dismissCard(cur, c.id) : cur));
+                          if (editingId === c.id) setEditingId(null);
+                        }}
+                        onSecret={(v) => act.secret(c, "cards", v)}
+                      />
+                    ))}
+                    <div data-arm="stepper-submit" data-rev={stepper.submitEpoch} className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                      <Btn tone="outline" data-stepper-back="" disabled={submitting} onClick={() => { setEditingId(null); setStepper((cur) => (cur ? stepBack(cur) : cur)); }}>
+                        Back
+                      </Btn>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {progress ? <span data-stepper-progress="" className="text-xs text-muted-foreground">{`Sending ${progress.index + 1} of ${progress.total}…`}</span> : null}
+                        <Btn
+                          tone="primary"
+                          data-stepper-submit=""
+                          data-armed={submitArmed ? "true" : "false"}
+                          disabled={submitting || busy || sendable.length === 0}
+                          onClick={() => void handleSubmit()}
+                        >
+                          {submitting
+                            ? "Sending…"
+                            : stepper.failures.size > 0
+                              ? `Retry ${sendable.length} ${sendable.length === 1 ? "answer" : "answers"}`
+                              : `Submit ${sendable.length} ${sendable.length === 1 ? "answer" : "answers"}`}
+                        </Btn>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3" data-list="cards">
+            {view.cards.map((c) => (
+              <CardView key={c.id} card={c} list="cards" presets={view.presets} isArmed={arming.isArmed(c.id, c.rev)} act={act} mon={mons.get(c.origin) ?? null} monType={c.project ? (accents?.get(c.project) ?? null) : null} />
+            ))}
+            {questions.map((i) => (
+              <QuestionCard key={i.id} ix={i} isArmed={arming.isArmed(ixKey(i), 0)} mon={mons.get(i.address) ?? null} onSend={(a) => answerQuestion(i, a)} onOpen={() => navigate.toThread(i.threadId)} />
+            ))}
+            {view.cards.length + questions.length === 0 && n > 0 ? <p className="m-0 text-sm text-muted-foreground">No cards to answer: the threads below wait on you.</p> : null}
+          </div>
+        )}
+      </section>
+
+      {stepper && questions.length > 0 ? (
+        <section className="flex flex-col gap-3" aria-label="Agent questions">
           {questions.map((i) => (
             <QuestionCard key={i.id} ix={i} isArmed={arming.isArmed(ixKey(i), 0)} mon={mons.get(i.address) ?? null} onSend={(a) => answerQuestion(i, a)} onOpen={() => navigate.toThread(i.threadId)} />
           ))}
-          {view.cards.length + questions.length === 0 && n > 0 ? <p className="m-0 text-sm text-muted-foreground">No cards to answer: the threads below wait on you.</p> : null}
-        </div>
-      </section>
+        </section>
+      ) : null}
 
       {prompts.length > 0 ? (
         <Section title="Waiting on an agent" count={prompts.length}>
