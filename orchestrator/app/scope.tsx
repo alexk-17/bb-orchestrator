@@ -1305,7 +1305,7 @@ function PathwaysSection({ slug }: { slug: string }) {
       graphFit.current = null;
       graphFocus.current = null;
     };
-  }, [graphIdentity, graph?.width, graph?.height, focusBox?.x, focusBox?.y]);
+  }, [graphIdentity, graph?.width, graph?.height, focusBox?.x, focusBox?.y, hideDone, visible.length]);
   const zoomAtCenter = (factor: number) => {
     const svg = graphViewport.current;
     if (svg && graphZoom.current) {
@@ -1321,6 +1321,12 @@ function PathwaysSection({ slug }: { slug: string }) {
       }
       select(svg).call(graphZoom.current.scaleBy, factor, anchor);
     }
+  };
+  const setHideDoneAndPersist = (checked: boolean) => {
+    setHideDone(checked);
+    try {
+      localStorage.setItem(`pathways:hide-done:${slug}`, String(checked));
+    } catch {}
   };
   const fitGraph = () => {
     graphFit.current?.();
@@ -1465,16 +1471,7 @@ function PathwaysSection({ slug }: { slug: string }) {
               <Checkbox
                 id={`pathways-hide-done-${slug}`}
                 checked={hideDone}
-                onCheckedChange={(value) => {
-                  const checked = value === true;
-                  setHideDone(checked);
-                  try {
-                    localStorage.setItem(
-                      `pathways:hide-done:${slug}`,
-                      String(checked),
-                    );
-                  } catch {}
-                }}
+                onCheckedChange={(value) => setHideDoneAndPersist(value === true)}
               />
               <Label htmlFor={`pathways-hide-done-${slug}`} className="whitespace-nowrap text-xs">
                 Hide done
@@ -1685,6 +1682,42 @@ function PathwaysSection({ slug }: { slug: string }) {
               className="order-1 min-w-0 self-start rounded-lg border p-2 max-[1100px]:p-1"
               data-pathways-graph=""
             >
+              {hideDone && visible.length === 0 && map.tickets.length > 0 ? (
+                <Empty className="min-h-[300px] border-0" data-pathways-hidden-done="">
+                  <EmptyHeader>
+                    <Badge variant="outline" className="gap-1">
+                      <Check className="size-3" aria-hidden />
+                      All {map.tickets.length} done
+                    </Badge>
+                    <EmptyTitle>
+                      {map.tickets.length} completed{" "}
+                      {map.tickets.length === 1
+                        ? map.source === "orchestrator"
+                          ? "item"
+                          : "ticket"
+                        : map.source === "orchestrator"
+                          ? "items"
+                          : "tickets"}{" "}
+                      hidden
+                    </EmptyTitle>
+                    <EmptyDescription>
+                      Every {map.source === "orchestrator" ? "item" : "ticket"} on
+                      this map is complete and hidden by the Hide done filter.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="mt-3"
+                    onClick={() => setHideDoneAndPersist(false)}
+                  >
+                    Show completed{" "}
+                    {map.source === "orchestrator" ? "items" : "tickets"}
+                  </Button>
+                </Empty>
+              ) : (
+                <>
               <div
                 className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs"
                 aria-label="Pathways state legend"
@@ -2105,6 +2138,8 @@ function PathwaysSection({ slug }: { slug: string }) {
                 </g>
               </svg>
               </div>
+                </>
+              )}
             </div>
             <div
               className="order-2 grid min-w-0 content-start gap-3 overflow-hidden rounded-xl border bg-card p-3"
