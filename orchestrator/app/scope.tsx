@@ -1460,7 +1460,7 @@ function PathwaysSection({ slug }: { slug: string }) {
           )}
         </div>
         <div className="flex shrink-0 items-center gap-3">
-          {map && (
+          {map && map.tickets.length > 0 && (
             <div className="flex shrink-0 items-center gap-2">
               <Checkbox
                 id={`pathways-hide-done-${slug}`}
@@ -1541,12 +1541,38 @@ function PathwaysSection({ slug }: { slug: string }) {
         <Empty data-pathways-empty="">
           <EmptyHeader>
             <EmptyTitle>No plan or active work yet</EmptyTitle>
-            <EmptyDescription>
-              Publish a lead status, start a thread, open a PR, or raise a
-              decision card to populate this local map — or set linearProjectId
-              in project.json with a Linear API key to map Linear issues.
+            <EmptyDescription className="max-w-xl">
+              Pathways maps what comes next for{" "}
+              <span className="font-mono text-foreground">{slug}</span> from
+              local orchestrator activity or an optional Linear project.
             </EmptyDescription>
           </EmptyHeader>
+          <div className="mt-4 grid w-full max-w-2xl grid-cols-1 gap-3 text-left text-xs sm:grid-cols-2">
+            <div className="rounded-lg border border-border bg-card p-3">
+              <div className="font-medium text-foreground">
+                1. Local map (default)
+              </div>
+              <p className="mt-1 mb-0 leading-relaxed text-muted-foreground">
+                Have the project lead publish a plan, start a thread, open a PR,
+                or file a decision card, then click Refresh.
+              </p>
+            </div>
+            <div className="rounded-lg border border-border bg-card p-3">
+              <div className="font-medium text-foreground">
+                2. Link Linear (optional)
+              </div>
+              <p className="mt-1 mb-0 leading-relaxed text-muted-foreground">
+                Set <code className="font-mono text-foreground">linearApiKey</code>{" "}
+                in Orchestrator plugin settings and add{" "}
+                <code className="font-mono text-foreground">linearProjectId</code>{" "}
+                to{" "}
+                <code className="font-mono text-foreground">
+                  projects/{slug}/project.json
+                </code>
+                , then click Refresh.
+              </p>
+            </div>
+          </div>
         </Empty>
       ) : (
         <>

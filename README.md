@@ -139,15 +139,19 @@ so in Activity. Desktop and web then get only the CoS thread's notifications. To
 
 ### The Pathways tab
 
-Pathways shows a read-only Linear dependency map for one project at a time. Set the Orchestrator's `linearApiKey`, then
-set `linearProjectId` in that project's `project.json` to its Linear project ID. The project card opens its map in one
-click. Set `linearMapIssue` to an identifier such as `ENG-123` to use that issue and its direct sub-issues regardless
-of labels; otherwise Pathways uses the `wayfinder:map` label. Each ticket shows every open PR explicitly linked in its
-Linear attachments or description, with separate state, proof and wait lane. Merged and closed PRs leave the forward
-view. The page never writes to Linear; the included [pathways-linear skill](orchestrator/skills/pathways-linear/SKILL.md)
-tells agents how to build and update a map in Linear with a key you give them.
-Projects without a Linear API key or `linearProjectId` still show a local what's-next map built from the project's lead status steps, active threads, open decision cards and open PRs.
-Wheel or pinch to zoom the map, drag to pan, and use +, −, or Fit to reset its view.
+Pathways shows a read-only dependency and what's-next map for one project at a time. Every project works out of the box
+with a local map built from its lead status steps, active threads, open decision cards, and open PRs. To map a Linear
+project instead, set `linearApiKey` in Orchestrator plugin settings and add `linearProjectId` to
+`projects/<slug>/project.json` (if `linearProjectId` is set without `linearApiKey`, Pathways falls back to the local
+map with a notice). Optionally set `linearMapIssue` to an identifier such as `ENG-123` to use that issue and its
+direct sub-issues regardless of labels; otherwise Pathways looks for the `wayfinder:map` label.
+
+Each ticket shows every open PR explicitly linked in its Linear attachments or description, with separate state, proof,
+and wait lane; merged and closed PRs leave the forward view. Dependency cycles are highlighted with a warning banner and
+red back-edges. The page never writes to Linear; the included
+[pathways-linear skill](orchestrator/skills/pathways-linear/SKILL.md) tells agents how to build and update a map in
+Linear with a key you give them. Wheel or pinch to zoom, drag to pan, and use `+`, `−`, `Next`, or `Fit` to navigate
+the canvas.
 
 ### The Cloud tab
 

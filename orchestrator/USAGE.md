@@ -269,18 +269,21 @@ shown by their GitHub login, never guessed.
 
 ## Pathways
 
-The **Pathways** tab shows a read-only Linear dependency map for one project at a time, to answer "what comes next and
-what stands in the way". Every project card on Projects has a **Pathways** button that opens it on that project; the
-tab's picker remembers the last one. Hide the tab with `hiddenTabs: pathways`.
+The **Pathways** tab shows a read-only dependency and what's-next map for one project at a time, to answer "what comes
+next and what stands in the way". Every project card on Projects has a **Pathways** button that opens it on that project;
+the tab's picker remembers the last one. Hide the tab with `hiddenTabs: pathways`.
 
-- **Setup:** set `linearApiKey` (a Linear personal API key, stored as a secret) in the plugin settings, then set
-  `linearProjectId` in the project's `project.json` to its Linear project ID. When either is unset, Pathways builds a
-  local what's-next map from the project's lead status steps, active threads, open decision cards and open PRs. Set `linearMapIssue` to an issue identifier such as `ENG-123` to use an existing map issue in that project,
-  regardless of its labels. Without it, Pathways looks for the `wayfinder:map` label.
-- **The map:** one Linear issue labelled `wayfinder:map` and its sub-issues, drawn as a graph with blockers as edges, the
-  first path numbered, and a What's next column (First path, Needs you, Claimed, Blocked on, Open questions). Click a
-  ticket for its readiness, owner actions, linked PR and wait lane, proof at the PR's head, preflight and decision impact.
-  Wheel or pinch to zoom around the pointer, drag to pan, and use +, −, or Fit to control the view.
+- **Setup:** every project works immediately in local mode, building a map from its lead status steps, active threads,
+  open decision cards, and open PRs. To map a Linear project instead, set `linearApiKey` (a Linear personal API key,
+  stored as a secret) in Orchestrator plugin settings and add `linearProjectId` to `projects/<slug>/project.json`. If
+  `linearProjectId` is set while `linearApiKey` is unset, Pathways shows the local map with a reminder notice. Set
+  `linearMapIssue` to an issue identifier such as `ENG-123` to pin a specific map issue regardless of labels; otherwise
+  Pathways looks for the `wayfinder:map` label.
+- **The map:** drawn as a dependency graph with blockers as edges, dependency cycles flagged with a warning banner and
+  red back-edges, the first path numbered, and a What's next column (First path, Needs you, Ready, Needs details,
+  Claimed, Blocked on, Open questions). Click or activate any ticket (Enter/Space) for its readiness, owner actions,
+  linked PR and wait lane, proof at the PR's head, preflight, and decision impact. Wheel or pinch to zoom around the
+  pointer, drag to pan, and use `+`, `−`, `Next`, or `Fit` to control the view.
 - **Links fail closed:** a ticket links to a PR only through a GitHub PR URL in its Linear attachments or description,
   never by a similar title. Linked PR state is read through a connected machine's own `gh` login; without one the tab
   says "GitHub unavailable" rather than guessing. A ticket can show several open linked PRs, each with its own state,
