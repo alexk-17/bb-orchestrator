@@ -1114,6 +1114,11 @@ function PathwaysSection({ slug }: { slug: string }) {
   const refreshSeen = useRef(false);
   const [retroOpen, setRetroOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const lastFocusedRef = useRef<Element | null>(null);
+  const openDetail = (id: string) => {
+    lastFocusedRef.current = document.activeElement;
+    setSelectedId(id);
+  };
   const [narrowGraph, setNarrowGraph] = useState(
     () => window.innerWidth < 1100,
   );
@@ -1299,7 +1304,7 @@ function PathwaysSection({ slug }: { slug: string }) {
       <Button
         type="button"
         variant="ghost"
-        onClick={() => setSelectedId(ticket.identifier)}
+        onClick={() => openDetail(ticket.identifier)}
         className="flex h-auto min-w-0 w-full items-start gap-2 rounded-md px-2 py-2 text-left text-xs hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-offset-2"
         data-pathways-row={ticket.identifier}
       >
@@ -1544,7 +1549,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                       variant="link"
                       size="sm"
                       className="inline h-auto p-0 align-baseline font-mono text-xs font-semibold"
-                      onClick={() => setSelectedId(pathHead.identifier)}
+                      onClick={() => openDetail(pathHead.identifier)}
                     >
                       {pathHead.identifier}
                     </Button>
@@ -1558,7 +1563,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                           variant="link"
                           size="sm"
                           className="inline h-auto p-0 align-baseline font-mono text-xs font-semibold"
-                          onClick={() => setSelectedId(needsYouNow.identifier)}
+                          onClick={() => openDetail(needsYouNow.identifier)}
                         >
                           {needsYouNow.identifier}
                         </Button>
@@ -1576,7 +1581,7 @@ function PathwaysSection({ slug }: { slug: string }) {
                       variant="link"
                       size="sm"
                       className="inline h-auto p-0 align-baseline font-mono text-xs font-semibold"
-                      onClick={() => setSelectedId(needsYouNow.identifier)}
+                      onClick={() => openDetail(needsYouNow.identifier)}
                     >
                       {needsYouNow.identifier}
                     </Button>
@@ -1615,35 +1620,28 @@ function PathwaysSection({ slug }: { slug: string }) {
                     visible.some((ticket) => ticket.displayState === state),
                   )
                   .map(([state, color]) => (
-                    <Tooltip key={state}>
-                      <TooltipTrigger asChild>
-                        <Badge
-                          variant="outline"
-                          tabIndex={0}
-                          className="gap-1 px-1.5 py-0.5"
-                        >
-                          <span
-                            aria-hidden
-                            style={{
-                              background: color,
-                              width: 9,
-                              height: 9,
-                              borderRadius: 2,
-                            }}
-                          />
-                          {state === "needs-you" && (
-                            <UserRound className="size-3" aria-hidden />
-                          )}
-                          {state === "done" && (
-                            <Check className="size-3" aria-hidden />
-                          )}
-                          {state}
-                        </Badge>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        {state} tickets in this map
-                      </TooltipContent>
-                    </Tooltip>
+                    <Badge
+                      key={state}
+                      variant="outline"
+                      className="gap-1 px-1.5 py-0.5"
+                    >
+                      <span
+                        aria-hidden
+                        style={{
+                          background: color,
+                          width: 9,
+                          height: 9,
+                          borderRadius: 2,
+                        }}
+                      />
+                      {state === "needs-you" && (
+                        <UserRound className="size-3" aria-hidden />
+                      )}
+                      {state === "done" && (
+                        <Check className="size-3" aria-hidden />
+                      )}
+                      {state}
+                    </Badge>
                   ))}
                 {!!map.firstPath.length && (
                   <span className="flex items-center gap-1">
@@ -1819,16 +1817,33 @@ function PathwaysSection({ slug }: { slug: string }) {
                     <a
                       key={box.id}
                       href={ticket ? "#" : (outside?.url ?? map.url)}
+                      role={ticket ? "button" : undefined}
+                      aria-label={
+                        ticket
+                          ? `${box.id}: ${title} (${ticket.displayState}${pathIds.has(box.id) ? `, first path step ${map.firstPath.indexOf(box.id) + 1}` : ""})`
+                          : `${box.id}: ${title}${outside ? " (external blocker)" : ""}`
+                      }
                       target={ticket ? undefined : "_blank"}
                       rel={ticket ? undefined : "noreferrer"}
                       onClick={
                         ticket
                           ? (event) => {
                               event.preventDefault();
-                              setSelectedId(box.id);
+                              openDetail(box.id);
                             }
                           : undefined
                       }
+                      onKeyDown={
+                        ticket
+                          ? (event) => {
+                              if (event.key === " " || event.key === "Spacebar") {
+                                event.preventDefault();
+                                openDetail(box.id);
+                              }
+                            }
+                          : undefined
+                      }
+                      data-pathways-node={box.id}
                       data-pathways-state={
                         ticket?.displayState ?? (outside ? "external" : "map")
                       }
@@ -2256,6 +2271,13 @@ function PathwaysSection({ slug }: { slug: string }) {
           >
             <DialogContent
               showCloseButton={false}
+              onCloseAutoFocus={(event) => {
+                const target = lastFocusedRef.current;
+                if (target instanceof Element && target.isConnected && "focus" in target && typeof (target as HTMLElement).focus === "function") {
+                  event.preventDefault();
+                  (target as HTMLElement).focus();
+                }
+              }}
               className="fixed inset-y-0 right-0 left-auto top-0 h-dvh w-full max-w-[520px] content-start translate-x-0 translate-y-0 overflow-y-auto rounded-none p-5 sm:max-w-[520px]"
               data-pathways-detail={selected?.identifier}
             >
