@@ -16,13 +16,13 @@
 // 2026-11-17: while nothing in the entry waits on the owner, one status card stands where the cards would (who is
 // scoping, what they are on now, what is done so far, what comes next), in a slim column beside the chat when the pane
 // is wide, so no column stands blank. With anything waiting the entry is as before.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { select } from "d3-selection";
 import { zoom, zoomIdentity, type ZoomBehavior } from "d3-zoom";
 import type { z } from "zod";
 import { experimental_useRpcQuery, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { Check, ChevronRight, Hourglass, Minus, Plus, UserRound } from "lucide-react";
-import { WRITES, rpcContract, type Card, type Deliverables, type Projects, type Scope, type Pathways, type answerBody, type secretBody } from "../contract.ts";
+import { WRITES, guideDecisionOptions, pathwaysGuideResultSchema, rpcContract, type Card, type Deliverables, type Projects, type Scope, type Pathways, type PathwaysErrorKind, type PathwaysGuideResult, type answerBody, type secretBody } from "../contract.ts";
 import { layout } from "./diagram-layout.ts";
 import { openInBb } from "./open-proof.ts";
 import { ccCss } from "./cc-lines.tsx";
@@ -59,7 +59,7 @@ import { useElementWidth, usePaneFits } from "./panes.tsx";
 import { useMinute } from "./status-bar.tsx";
 import { useIdentity } from "./identity.ts";
 import { ownerOnScreen } from "../core/owner.ts";
-import { gate, gone, useGate, write, type Hide, type WriteKind } from "./store.ts";
+import { gate, gone, stage, useGate, write, type Hide, type WriteKind } from "./store.ts";
 import { Btn, EmptyState, ReadState } from "./ui.tsx";
 import { styleHref } from "./style-href.ts";
 
@@ -464,21 +464,82 @@ export function ScopeView({ q, projects, deliverables, refetchAll, mons, accents
   );
 }
 
-const pathwaysPathColor = "teal";
-const pathwaysColors = { ready: "var(--success)", claimed: "royalblue", blocked: "var(--muted-foreground)", unknown: "blueviolet", "needs-you": "var(--warning-text)", done: "color-mix(in srgb, var(--success) 65%, var(--muted-foreground))" } as const;
+const pathwaysPathColor = "var(--pathways-path, teal)";
+const pathwaysColors = { ready: "var(--success)", claimed: "var(--pathways-claimed, royalblue)", blocked: "var(--muted-foreground)", unknown: "var(--pathways-unknown, blueviolet)", "needs-you": "var(--warning-text)", done: "color-mix(in srgb, var(--success) 65%, var(--muted-foreground))" } as const;
+
+function charWidth(ch: string): number {
+  const cp = ch.codePointAt(0) ?? 0;
+  return cp >= 0x1100 && (cp <= 0x115f || cp >= 0x2e80 && cp <= 0xa4cf || cp >= 0xac00 && cp <= 0xd7a3 || cp >= 0xf900 && cp <= 0xfaff || cp >= 0x1f300) ? 2 : 1;
+}
+
+function fitText(text: string, limit: number): { head: string; rest: string } {
+  let width = 0;
+  const chars = [...text];
+  let index = 0;
+  while (index < chars.length) {
+    const w = charWidth(chars[index]!);
+    if (width + w > limit && index > 0) break;
+    width += w;
+    index++;
+  }
+  return { head: chars.slice(0, index).join(""), rest: chars.slice(index).join("") };
+}
+
+function textWidth(text: string): number {
+  let width = 0;
+  for (const ch of text) width += charWidth(ch);
+  return width;
+}
 
 function titleLines(title: string, limit = 27, count = 2): string[] {
   const lines: string[] = [];
-  for (const word of title.split(/\s+/)) {
-    const last = lines.length - 1;
-    if (last < 0 || lines[last]!.length + word.length + 1 > limit) lines.push(word);
-    else lines[last] += ` ${word}`;
+  let overflow = false;
+  for (const word of title.trim().split(/\s+/).filter(Boolean)) {
+    if (overflow) break;
+    let remaining = word;
+    while (remaining) {
+      const last = lines.length - 1;
+      const current = last >= 0 ? lines[last]! : "";
+      const wordW = textWidth(remaining);
+      if (last >= 0 && textWidth(current) + 1 + wordW <= limit) {
+        lines[last] = `${current} ${remaining}`;
+        break;
+      }
+      if (lines.length >= count) {
+        overflow = true;
+        break;
+      }
+      if (wordW <= limit) {
+        lines.push(remaining);
+        break;
+      }
+      const { head, rest } = fitText(remaining, limit);
+      lines.push(head);
+      remaining = rest;
+    }
   }
-  if (lines.length <= count) return lines;
-  return [...lines.slice(0, count - 1), `${lines.slice(count - 1).join(" ").slice(0, limit - 1)}…`];
+  if (!overflow || !lines.length) return lines;
+  const last = lines.length - 1;
+  lines[last] = `${fitText(lines[last]!, Math.max(1, limit - 1)).head.trimEnd()}…`;
+  return lines;
 }
 
 type PathwaysTicketView = NonNullable<Pathways["map"]>["tickets"][number];
+
+const openTicketPrs = (ticket: PathwaysTicketView) =>
+  ticket.prs.filter(({ pr }) => pr.state !== "merged" && pr.state !== "closed");
+
+const pathwaysErrorTitles: Record<PathwaysErrorKind, string> = {
+  "invalid-record": "Project record is invalid",
+  auth: "Linear authentication failed",
+  "rate-limit": "Linear rate limit reached",
+  timeout: "Linear request timed out",
+  server: "Linear server error",
+  graphql: "Linear GraphQL error",
+  "map-missing": "Linear map issue not found",
+  "project-missing": "Linear project not found",
+  network: "Pathways unavailable",
+};
 
 function pathwaysAge(at: number): string {
   const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
@@ -510,6 +571,31 @@ function PathwaysNodeGlyph({
   );
 }
 
+function PathwaysLink({
+  href,
+  className,
+  fallbackClassName,
+  fallback,
+  children,
+  ...rest
+}: {
+  href?: string | null;
+  className?: string;
+  fallbackClassName?: string;
+  fallback?: React.ReactNode;
+  children: React.ReactNode;
+} & React.HTMLAttributes<HTMLSpanElement>) {
+  return href ? (
+    <a href={href} target="_blank" rel="noreferrer" className={className}>
+      {children}
+    </a>
+  ) : (
+    <span className={fallbackClassName ?? className} {...rest}>
+      {fallback ?? children}
+    </span>
+  );
+}
+
 function PathwaysDecisionPreview({
   ticket,
   tickets,
@@ -530,18 +616,13 @@ function PathwaysDecisionPreview({
       ? ids.map((id, index) => (
           <span key={id}>
             {index > 0 && ", "}
-            {tickets.get(id) ? (
-              <a
-                href={tickets.get(id)!.url}
-                target="_blank"
-                rel="noreferrer"
-                className="underline underline-offset-2"
-              >
-                {id}
-              </a>
-            ) : (
-              id
-            )}
+            <PathwaysLink
+              href={tickets.get(id)?.url}
+              className="underline underline-offset-2"
+              fallbackClassName=""
+            >
+              {id}
+            </PathwaysLink>
           </span>
         ))
       : "none";
@@ -822,7 +903,7 @@ function PathwaysPrItem({ ticket, entry }: { ticket: PathwaysTicketView; entry: 
         {pr.reason !== "Merged" && <span>{pr.reason}</span>}
       </div>
       <div className="mt-1 text-muted-foreground">
-        Via {ticket.prLink.source ?? "source not recorded"} · Read{" "}
+        {ticket.prLink.source ? `Via ${ticket.prLink.source} · ` : ""}Read{" "}
         {new Date(pr.retrievedAt).toLocaleString()}
       </div>
       {proofState !== "unrecorded" && (
@@ -871,18 +952,231 @@ function PathwaysPrItem({ ticket, entry }: { ticket: PathwaysTicketView; entry: 
 }
 
 function PathwaysPrBadge({ ticket }: { ticket: PathwaysTicketView }) {
-  if (ticket.prLink.state === "missing") return <span className="mt-1 block text-xs text-muted-foreground">PR link missing</span>;
+  if (ticket.prLink.state === "missing") return ticket.type === "decision" ? null : <span className="mt-1 block text-xs text-muted-foreground">PR link missing</span>;
   const active = ticket.prs.filter(({ pr }) => pr.state !== "merged" && pr.state !== "closed");
   return active.length ? <div>{active.map((entry) => <PathwaysPrItem key={entry.pr.url} ticket={ticket} entry={entry} />)}</div> : <span className="mt-1 block text-xs text-muted-foreground">No open linked PRs</span>;
+}
+
+let guideActiveKey: string | null = null;
+const guideListeners = new Set<() => void>();
+const guideCache = new Map<string, PathwaysGuideResult>();
+function emitGuide() {
+  for (const listener of guideListeners) listener();
+}
+const subscribeGuide = (listener: () => void) => {
+  guideListeners.add(listener);
+  return () => {
+    guideListeners.delete(listener);
+  };
+};
+function useGuideActive(): string | null {
+  return useSyncExternalStore(subscribeGuide, () => guideActiveKey);
+}
+
+function PathwaysGuideView({
+  ticket,
+  slug,
+  guideConfig,
+  onUseOptions,
+}: {
+  ticket: PathwaysTicketView;
+  slug: string;
+  guideConfig: { provider: string; model: string } | null;
+  onUseOptions: (options: { label: string; detail: string }[]) => void;
+}) {
+  const eligible = ticket.readiness.state === "needs decision" || !!ticket.decisionDraft;
+  const key = `${slug}:${ticket.identifier}`;
+  const cacheKey = `${key}:${ticket.title}:${ticket.description ?? ""}:${ticket.blockers.join(",")}`;
+  const activeKey = useGuideActive();
+  const runningHere = activeKey === key;
+  const busy = activeKey !== null;
+  const [result, setResult] = useState<PathwaysGuideResult | null>(() => guideCache.get(cacheKey) ?? null);
+  useEffect(() => {
+    setResult(guideCache.get(cacheKey) ?? null);
+  }, [cacheKey]);
+  if (!eligible) return null;
+  const missingConfig = guideConfig !== null && (!guideConfig.provider || !guideConfig.model);
+  const canUseOptions =
+    !!ticket.decisionDraft &&
+    !(ticket.decision.state === "linked" && ticket.decision.waiting && ticket.decision.cardId);
+
+  const ask = async (refresh: boolean) => {
+    if (guideActiveKey !== null || missingConfig) return;
+    guideActiveKey = key;
+    emitGuide();
+    try {
+      const outcome = await stage(
+        WRITES.pathwaysGuide,
+        { slug, ticketId: ticket.identifier, ...(refresh ? { refresh: true } : {}) },
+        135_000,
+      );
+      const fail = (error: string): PathwaysGuideResult => ({
+        guide: null,
+        error,
+        provider: guideConfig?.provider ?? "",
+        model: guideConfig?.model ?? "",
+        cached: false,
+      });
+      const parsed = outcome.ok ? pathwaysGuideResultSchema.safeParse(outcome.result) : null;
+      const next = !outcome.ok
+        ? fail(outcome.message)
+        : parsed?.success
+          ? parsed.data
+          : fail("The guide's answer didn't parse");
+      if (next.guide) {
+        if (guideCache.size >= 32) {
+          const oldest = guideCache.keys().next().value;
+          if (oldest) guideCache.delete(oldest);
+        }
+        guideCache.set(cacheKey, next);
+      }
+      setResult(next);
+    } finally {
+      guideActiveKey = null;
+      emitGuide();
+    }
+  };
+
+  const guide = result?.guide ?? null;
+
+  return (
+    <div className="mt-2 grid min-w-0 gap-2 text-xs" data-pathways-guide={ticket.identifier}>
+      {!guide && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            className="border"
+            data-pathways-guide-run=""
+            disabled={busy || missingConfig}
+            onClick={() => void ask(false)}
+          >
+            {runningHere ? "Thinking…" : "Guide me"}
+          </Button>
+          {result?.error && !runningHere && !missingConfig && (
+            <Button
+              variant="outline"
+              size="sm"
+              data-pathways-guide-refresh=""
+              disabled={busy}
+              onClick={() => void ask(true)}
+            >
+              Ask again
+            </Button>
+          )}
+        </div>
+      )}
+      {missingConfig && (
+        <p className="m-0 text-muted-foreground [overflow-wrap:anywhere]" data-pathways-guide-disabled="">
+          Set guideProvider and guideModel in Orchestrator plugin settings to use Pathways Guide.
+        </p>
+      )}
+      {runningHere && (
+        <div className="grid gap-1.5" data-pathways-guide-loading="">
+          <span className="text-muted-foreground">Asking the guide…</span>
+          <Skeleton className="h-4 w-3/4" />
+          <Skeleton className="h-4 w-1/2" />
+        </div>
+      )}
+      {busy && !runningHere && (
+        <p className="m-0 text-muted-foreground">Another guide run is already in progress on this page.</p>
+      )}
+      {result?.error && !runningHere && (
+        <Alert variant="destructive" data-pathways-guide-error="">
+          <AlertDescription className="text-xs [overflow-wrap:anywhere]">{result.error}</AlertDescription>
+        </Alert>
+      )}
+      {result && guide && !runningHere && (
+        <UiCard className="min-w-0 gap-2.5 px-3 py-3" data-pathways-guide-card="">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle className="text-sm">Pathways Guide</CardTitle>
+            <span className="text-muted-foreground [overflow-wrap:anywhere]" data-pathways-guide-notice="">
+              Advice from {result.provider} / {result.model} — you still decide{result.cached ? " · cached" : ""}
+            </span>
+          </div>
+          <div className="grid gap-1">
+            <div className="font-medium text-muted-foreground">Framing</div>
+            <p className="m-0 [overflow-wrap:anywhere]" data-pathways-guide-framing="">{guide.framing}</p>
+          </div>
+          <div className="grid gap-2">
+            <div className="font-medium text-muted-foreground">Routes</div>
+            {guide.routes.map((route, index) => (
+              <div
+                key={`${route.label}-${index}`}
+                className="grid min-w-0 gap-1.5 rounded-md border p-2.5"
+                data-pathways-guide-route={index}
+                data-recommended={index === guide.recommended ? "true" : "false"}
+              >
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-medium [overflow-wrap:anywhere]">{route.label}</span>
+                  {index === guide.recommended && <Badge variant="secondary">Recommended</Badge>}
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  <Badge variant="outline">Risk: {route.risk}</Badge>
+                  <Badge variant="outline">Reversible: {route.reversible}</Badge>
+                  <Badge variant="outline">Size: {route.size}</Badge>
+                </div>
+                <p className="m-0 [overflow-wrap:anywhere]">{route.approach}</p>
+                <p className="m-0 text-muted-foreground [overflow-wrap:anywhere]">Tradeoffs: {route.tradeoffs}</p>
+                <p className="m-0 [overflow-wrap:anywhere]">First step: {route.firstStep}</p>
+                <p className="m-0 text-muted-foreground [overflow-wrap:anywhere]">Proof: {route.proof}</p>
+              </div>
+            ))}
+          </div>
+          <div className="grid gap-1" data-pathways-guide-recommendation="">
+            <div className="font-medium text-muted-foreground">
+              Recommended · {guide.routes[guide.recommended]!.label}
+            </div>
+            <p className="m-0 [overflow-wrap:anywhere]">{guide.why}</p>
+            <div className="text-muted-foreground">
+              Principles: {guide.principles.map((n) => `#${n}`).join(", ")}
+            </div>
+          </div>
+          {guide.risks.length > 0 && (
+            <div className="grid gap-1" data-pathways-guide-risks="">
+              <div className="font-medium text-muted-foreground">Watch out</div>
+              <ul className="m-0 grid gap-1 pl-4">
+                {guide.risks.map((risk, index) => (
+                  <li key={index} className="[overflow-wrap:anywhere]">{risk}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className="flex flex-wrap gap-2 pt-1">
+            {canUseOptions && (
+              <Button
+                size="sm"
+                data-pathways-guide-apply=""
+                onClick={() => onUseOptions(guideDecisionOptions(guide))}
+              >
+                Use these as the decision options
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              data-pathways-guide-refresh=""
+              disabled={busy || missingConfig}
+              onClick={() => void ask(true)}
+            >
+              Ask again
+            </Button>
+          </div>
+        </UiCard>
+      )}
+    </div>
+  );
 }
 
 function PathwaysDecisionDraftView({
   ticket,
   slug,
+  appliedOptions,
   onSubmitted,
 }: {
   ticket: PathwaysTicketView;
   slug: string;
+  appliedOptions?: { options: { label: string; detail: string }[]; seq: number } | null;
   onSubmitted: () => void;
 }) {
   const draft = ticket.decisionDraft;
@@ -891,6 +1185,11 @@ function PathwaysDecisionDraftView({
     draft?.options ?? [],
   );
   const [submitted, setSubmitted] = useState<string | null>(null);
+  useEffect(() => {
+    if (!appliedOptions) return;
+    setOptions(appliedOptions.options);
+    setOpen(true);
+  }, [appliedOptions?.seq]);
   if (
     ticket.decision.state === "linked" &&
     ticket.decision.waiting &&
@@ -898,11 +1197,18 @@ function PathwaysDecisionDraftView({
   )
     return (
       <div
-        className="mt-2 text-xs font-medium"
+        className="mt-2 flex flex-wrap items-center gap-2 text-xs font-medium"
         style={{ color: "var(--foreground)" }}
       >
-        Filed {ticket.decision.cardId} · linked to {ticket.identifier} · in
-        Needs you
+        <span>Filed {ticket.decision.cardId} · linked to {ticket.identifier}</span>
+        <OpenRef
+          open={panel("board", `[data-decision="${ticket.decision.cardId}"]`)}
+          title="Answer decision card in Needs you"
+          data="card"
+          className="underline"
+        >
+          Open in Needs you
+        </OpenRef>
       </div>
     );
   if (!draft) return null;
@@ -1028,10 +1334,36 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
   const graphContent = useRef<SVGGElement>(null);
   const graphZoom = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null);
   const graphFit = useRef<(() => void) | null>(null);
+  const graphFocus = useRef<(() => void) | null>(null);
+  const zoomTransformRef = useRef(zoomIdentity);
+  const [zoomBounds, setZoomBounds] = useState({ k: 1, min: 0.1, max: 2 });
   const [refresh, setRefresh] = useState(false);
   const refreshSeen = useRef(false);
   const [retroOpen, setRetroOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [appliedDraftOptions, setAppliedDraftOptions] = useState<{ options: { label: string; detail: string }[]; seq: number } | null>(null);
+  const configQuery = experimental_useRpcQuery({
+    contract: rpcContract,
+    method: "config",
+    input: null,
+  });
+  const guideConfig =
+    configQuery.data && ("guideProvider" in configQuery.data || "guideModel" in configQuery.data)
+      ? {
+          provider: (configQuery.data.guideProvider ?? "").trim(),
+          model: (configQuery.data.guideModel ?? "").trim(),
+        }
+      : null;
+  const lastFocusedRef = useRef<Element | null>(null);
+  const openDetail = (id: string) => {
+    if (selectedId === null) lastFocusedRef.current = document.activeElement;
+    setAppliedDraftOptions(null);
+    setSelectedId(id);
+  };
+  const closeDetail = () => {
+    setAppliedDraftOptions(null);
+    setSelectedId(null);
+  };
   const [narrowWindow, setNarrowGraph] = useState(
     () => window.innerWidth < 1100,
   );
@@ -1144,34 +1476,72 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
         narrowGraph ? 166 : 208,
         narrowGraph ? 110 : 84,
         "orthogonal",
-        narrowGraph ? 54 : 100,
+        narrowGraph ? 54 : 64,
       )
     : null;
   const graphIdentity = `${slug}:${hideDone}:${narrowGraph}:${graphNodes.map((node) => node.id).join(",")}:${visibleEdges.map((edge) => `${edge.from}:${edge.to}`).join(",")}`;
+  const focusTargetId = map?.firstPath[0] ?? visible.find((ticket) => ticket.displayState === "needs-you")?.identifier ?? null;
+  const focusBox = graph?.boxes.find((box) => box.id === focusTargetId) ?? null;
+  const focusBoxRef = useRef(focusBox);
+  focusBoxRef.current = focusBox;
+  const showGraphCanvas = !(hideDone && visible.length === 0 && (map?.tickets.length ?? 0) > 0);
   useEffect(() => {
     const svg = graphViewport.current;
     const content = graphContent.current;
-    if (!svg || !content || !graph) return;
+    if (!svg || !content || !graph || !showGraphCanvas) return;
     const selection = select(svg);
+    let minScale = 0.05;
+    let maxScale = 2;
     const behavior = zoom<SVGSVGElement, unknown>()
       .clickDistance(4)
-      .translateExtent([[0, 0], [graph.width, graph.height]])
+      .translateExtent([[-80, -80], [graph.width + 80, graph.height + 80]])
       .on("zoom", (event) => {
+        zoomTransformRef.current = event.transform;
         content.setAttribute("transform", event.transform.toString());
+        const nextK = event.transform.k;
+        setZoomBounds((prev) =>
+          Math.round(prev.k * 100) === Math.round(nextK * 100) &&
+          prev.min === minScale &&
+          prev.max === maxScale
+            ? prev
+            : { k: nextK, min: minScale, max: maxScale },
+        );
       });
     graphZoom.current = behavior;
     const fit = () => {
       const { width, height } = svg.getBoundingClientRect();
       if (!width || !height) return;
-      const scale = Math.min(width / graph.width, height / graph.height) * 0.9;
-      behavior.extent([[0, 0], [width, height]]).scaleExtent([scale / 2, scale * 4]);
+      const topPad = 48;
+      const availH = Math.max(120, height - topPad);
+      const scale = Math.min(1.15, Math.min(width / graph.width, availH / graph.height) * 0.92);
+      minScale = Math.min(scale * 0.5, 0.5);
+      maxScale = Math.max(2, scale * 3);
+      behavior.extent([[0, 0], [width, height]]).scaleExtent([minScale, maxScale]);
+      const tx = (width - graph.width * scale) / 2;
+      const freeY = Math.max(0, availH - graph.height * scale);
+      const ty = topPad + Math.min(freeY / 2, 24);
       selection.call(behavior).call(
         behavior.transform,
-        zoomIdentity.translate((width - graph.width * scale) / 2, (height - graph.height * scale) / 2).scale(scale),
+        zoomIdentity.translate(tx, ty).scale(scale),
+      );
+    };
+    const focusNext = () => {
+      const box = focusBoxRef.current;
+      if (!box) return;
+      const { width, height } = svg.getBoundingClientRect();
+      if (!width || !height) return;
+      const cx = box.x + box.w / 2;
+      const cy = box.y + box.h / 2;
+      const tx = width * 0.28 - cx;
+      const ty = Math.max(64, height * 0.28) - cy;
+      selection.call(behavior).call(
+        behavior.transform,
+        zoomIdentity.translate(tx, ty).scale(1),
       );
     };
     const observer = new ResizeObserver(fit);
     graphFit.current = fit;
+    graphFocus.current = focusNext;
     observer.observe(svg);
     fit();
     return () => {
@@ -1179,17 +1549,37 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
       selection.on(".zoom", null);
       graphZoom.current = null;
       graphFit.current = null;
+      graphFocus.current = null;
     };
-  }, [graphIdentity, graph?.width, graph?.height]);
+  }, [graphIdentity, graph?.width, graph?.height, showGraphCanvas]);
   const zoomAtCenter = (factor: number) => {
     const svg = graphViewport.current;
     if (svg && graphZoom.current) {
       const { width, height } = svg.getBoundingClientRect();
-      select(svg).call(graphZoom.current.scaleBy, factor, [width / 2, height / 2]);
+      const t = zoomTransformRef.current;
+      const box = focusBoxRef.current;
+      let anchor: [number, number] = [width / 2, height / 2];
+      if (factor > 1 && box && t.k < 0.75) {
+        const sx = t.applyX(box.x + box.w / 2);
+        const sy = t.applyY(box.y + box.h / 2);
+        if (sx >= 0 && sx <= width && sy >= 0 && sy <= height) {
+          anchor = [sx, sy];
+        }
+      }
+      select(svg).call(graphZoom.current.scaleBy, factor, anchor);
     }
+  };
+  const setHideDoneAndPersist = (checked: boolean) => {
+    setHideDone(checked);
+    try {
+      localStorage.setItem(`pathways:hide-done:${slug}`, String(checked));
+    } catch {}
   };
   const fitGraph = () => {
     graphFit.current?.();
+  };
+  const focusNextGraph = () => {
+    graphFocus.current?.();
   };
   const rows = (ids: string[]) =>
     ids
@@ -1198,7 +1588,47 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
   const pathIds = new Set(map?.firstPath ?? []);
   const pathHead = tickets.get(map?.firstPath[0] ?? "");
   const needsYouNow = visible.find(
-    (ticket) => ticket.displayState === "needs-you",
+    (ticket) =>
+      ticket.displayState === "needs-you" &&
+      ticket.identifier !== pathHead?.identifier,
+  );
+  const noun = (n: number) =>
+    map?.source === "orchestrator"
+      ? n === 1 ? "item" : "items"
+      : n === 1 ? "ticket" : "tickets";
+  const cycleEdges = new Set<string>();
+  for (const cycle of map?.cycles ?? []) {
+    for (let i = 0; i < cycle.length; i++) {
+      cycleEdges.add(`${cycle[i]}:${cycle[(i + 1) % cycle.length]}`);
+    }
+  }
+  const doNow = pathHead ?? needsYouNow;
+  const alsoNow = pathHead ? needsYouNow : undefined;
+  const doNowVerb = (ticket: PathwaysTicketView) =>
+    ticket.displayState === "needs-you"
+      ? ticket.type === "decision" ? "answer" : "complete"
+      : ticket.type === "research"
+        ? "investigate"
+        : ticket.displayState === "claimed"
+          ? "continue"
+          : ticket.readiness.state === "ready"
+            ? "start"
+            : "resolve scope for";
+  const doNowSpan = (ticket: PathwaysTicketView) => (
+    <>
+      {doNowVerb(ticket)}{" "}
+      <Button
+        type="button"
+        variant="link"
+        size="sm"
+        className="inline h-auto p-0 align-baseline font-mono text-xs font-semibold"
+        onClick={() => openDetail(ticket.identifier)}
+      >
+        {ticket.identifier}
+      </Button>
+      {" — "}
+      {ticket.title}.
+    </>
   );
   const pathEdges = new Set(
     (map?.firstPath ?? [])
@@ -1211,7 +1641,7 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
       <Button
         type="button"
         variant="ghost"
-        onClick={() => setSelectedId(ticket.identifier)}
+        onClick={() => openDetail(ticket.identifier)}
         className="flex h-auto min-w-0 w-full items-start gap-2 rounded-md px-2 py-2 text-left text-xs hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-offset-2"
         data-pathways-row={ticket.identifier}
       >
@@ -1226,12 +1656,12 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
           />
         )}
         <span className="min-w-0 flex-1">
-          <span className="block text-balance">
+          <span className="block whitespace-normal [overflow-wrap:anywhere]">
             <span className="font-mono">{ticket.identifier}</span> ·{" "}
             {ticket.title}
           </span>
           {detail && (
-            <span className="mt-0.5 block whitespace-normal text-muted-foreground">
+            <span className="mt-0.5 block whitespace-normal [overflow-wrap:anywhere] text-muted-foreground">
               {detail}
             </span>
           )}
@@ -1241,11 +1671,15 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
   );
   const ticketFact = (ticket: PathwaysTicketView) =>
     [
-      ticket.prLink.state === "linked" &&
-      ticket.pr &&
-      ticket.pr.state !== "unavailable"
-        ? `PR #${ticket.pr.number ?? "linked"} ${ticket.pr.state}`
+      ticket.prLink.state === "linked" && ticket.pr
+        ? (() => {
+            if (ticket.pr.state === "unavailable") return "PR linked · GitHub unavailable";
+            const openCount = openTicketPrs(ticket).length;
+            return `PR #${ticket.pr.number ?? "linked"} ${ticket.pr.state}${openCount > 1 ? ` (+${openCount - 1})` : ""}`;
+          })()
         : "",
+      ticket.prLink.state === "linked" && ticket.proof?.state === "unrecorded" ? "proof needed" : "",
+      ticket.prLink.state === "linked" && ticket.proof?.state === "stale" ? "proof stale" : "",
       ticket.decision.waiting ? "decision awaiting answer" : "",
       ticket.preflight.state === "needs access" ? "proof needs access" : "",
     ]
@@ -1255,9 +1689,15 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
     [
       ticket.type === "research"
         ? "Investigate this research question first"
-        : ticket.blockers.length
-          ? `Waits on ${ticket.blockers.join(", ")}`
-          : "Ready to start",
+        : ticket.displayState === "needs-you"
+          ? "Needs you"
+          : ticket.blockers.length
+            ? `Waits on ${ticket.blockers.join(", ")}`
+            : ticket.displayState === "claimed"
+              ? ticket.assignee
+                ? `In progress · ${ticket.assignee}`
+                : "In progress"
+              : "Ready to start",
       ticketFact(ticket),
     ]
       .filter(Boolean)
@@ -1271,7 +1711,7 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
       )
         ? "External blocker"
         : "",
-      ticket.estimate == null ? "No estimate" : "",
+      map?.source !== "orchestrator" && ticket.estimate == null ? "No estimate" : "",
       ...ticket.unknown,
       ticketFact(ticket),
     ]
@@ -1283,40 +1723,46 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
       data-pathways={slug}
       aria-label="Pathways"
     >
-      <style>{`@keyframes pathways-flow { to { stroke-dashoffset: -20; } } @media (prefers-reduced-motion: no-preference) { [data-pathways] .pathways-flow { animation: pathways-flow 1s linear infinite; } }`}</style>
+      <style>{`[data-pathways] { --pathways-path: teal; --pathways-claimed: royalblue; --pathways-unknown: blueviolet; } .dark [data-pathways] { --pathways-path: lightseagreen; --pathways-claimed: cornflowerblue; --pathways-unknown: mediumpurple; } @keyframes pathways-flow { to { stroke-dashoffset: -20; } } @media (prefers-reduced-motion: no-preference) { [data-pathways] .pathways-flow { animation: pathways-flow 1s linear infinite; } }`}</style>
       <div className="flex items-center justify-between gap-3">
-        <div>
+        <div className="flex min-w-0 flex-wrap items-center gap-2 [overflow-wrap:anywhere]">
           {map && (
-            <a
-              href={map.url}
-              target="_blank"
-              rel="noreferrer"
+            <Badge variant="outline" className="shrink-0 text-[11px]" data-pathways-source-badge="">
+              {map.source === "orchestrator" ? "Local" : "Linear"}
+            </Badge>
+          )}
+          {map && (
+            <PathwaysLink
+              href={map.source === "orchestrator" ? null : map.url}
               className="text-xs text-muted-foreground"
+              data-pathways-source={
+                map.source === "orchestrator" ? "orchestrator" : undefined
+              }
+              fallback={
+                <>
+                  <span className="font-mono">{map.identifier}</span>
+                  {map.title && map.title !== map.identifier ? ` · ${map.title}` : ""}
+                  {" "}· Built from this project's plan, threads and cards
+                </>
+              }
             >
               <span className="font-mono">{map.identifier}</span> · {map.title}
-            </a>
+            </PathwaysLink>
           )}
         </div>
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            <Checkbox
-              id={`pathways-hide-done-${slug}`}
-              checked={hideDone}
-              onCheckedChange={(value) => {
-                const checked = value === true;
-                setHideDone(checked);
-                try {
-                  localStorage.setItem(
-                    `pathways:hide-done:${slug}`,
-                    String(checked),
-                  );
-                } catch {}
-              }}
-            />
-            <Label htmlFor={`pathways-hide-done-${slug}`} className="text-xs">
-              Hide done
-            </Label>
-          </div>
+        <div className="flex shrink-0 items-center gap-3">
+          {map && map.tickets.length > 0 && (
+            <div className="flex shrink-0 items-center gap-2">
+              <Checkbox
+                id={`pathways-hide-done-${slug}`}
+                checked={hideDone}
+                onCheckedChange={(value) => setHideDoneAndPersist(value === true)}
+              />
+              <Label htmlFor={`pathways-hide-done-${slug}`} className="whitespace-nowrap text-xs">
+                Hide done
+              </Label>
+            </div>
+          )}
           <Button
             variant="secondary"
             size="sm"
@@ -1333,36 +1779,94 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
         <p className="m-0 text-xs text-muted-foreground" data-pathways-freshness="">
           Updated {pathwaysAge(q.data.fetchedAt)}
           {q.data.refreshing ? " · refreshing" : ""}
+          {q.data.error && !q.data.refreshing ? (
+            <span className="font-medium text-destructive"> · stale (refresh failed)</span>
+          ) : null}
         </p>
       )}
       {q.error ? (
-        <Alert>
+        <Alert variant="destructive" className="mt-3">
           <AlertDescription>
             Pathways failed: {q.error.message}
           </AlertDescription>
         </Alert>
       ) : q.data?.error && !map ? (
-        <Empty>
+        <Empty className="border border-destructive/40 bg-destructive/5" data-pathways-error="">
           <EmptyHeader>
+            <Badge variant="destructive">Error</Badge>
             <EmptyTitle>
-              {q.data.error.includes("linearProjectId") ||
-              q.data.error.includes("Linear project link")
-                ? "No Linear map linked"
+              {q.data.errorKind
+                ? pathwaysErrorTitles[q.data.errorKind]
                 : "Pathways unavailable"}
             </EmptyTitle>
-            <EmptyDescription>{q.data.error}</EmptyDescription>
+            <EmptyDescription className="max-w-xl [overflow-wrap:anywhere]">{q.data.error}</EmptyDescription>
           </EmptyHeader>
         </Empty>
       ) : !map || !graph ? (
         <Skeleton className="mt-3 h-80 w-full" />
+      ) : map.source === "orchestrator" && !map.tickets.length ? (
+        <Empty data-pathways-empty="">
+          <EmptyHeader>
+            <EmptyTitle>No plan or active work yet</EmptyTitle>
+            <EmptyDescription className="max-w-xl">
+              Pathways maps what comes next for{" "}
+              <span className="font-mono text-foreground">{slug}</span> from
+              local orchestrator activity or an optional Linear project.
+            </EmptyDescription>
+          </EmptyHeader>
+          <div className="mt-4 grid w-full max-w-2xl grid-cols-1 gap-3 text-left text-xs sm:grid-cols-2">
+            <div className="rounded-lg border border-border bg-card p-3">
+              <div className="font-medium text-foreground">
+                1. Local map (default)
+              </div>
+              <p className="mt-1 mb-0 leading-relaxed text-muted-foreground">
+                Have the project lead publish a plan, start a thread, open a PR,
+                or file a decision card, then click Refresh.
+              </p>
+            </div>
+            <div className="rounded-lg border border-border bg-card p-3">
+              <div className="font-medium text-foreground">
+                2. Link Linear (optional)
+              </div>
+              <p className="mt-1 mb-0 leading-relaxed text-muted-foreground">
+                Set <code className="font-mono text-foreground">linearApiKey</code>{" "}
+                in Orchestrator plugin settings and add{" "}
+                <code className="font-mono text-foreground">linearProjectId</code>{" "}
+                to{" "}
+                <code className="font-mono text-foreground">
+                  projects/{slug}/project.json
+                </code>
+                , then click Refresh.
+              </p>
+            </div>
+          </div>
+        </Empty>
       ) : (
         <>
           {q.data?.error && (
-            <Alert className="mt-3 py-2 text-xs" data-pathways-refresh-error="">
-              <AlertDescription>Refresh failed; showing the last map. {q.data.error}</AlertDescription>
+            <Alert variant="destructive" className="mt-3 py-2 text-xs" data-pathways-refresh-error="">
+              <AlertDescription>
+                Showing stale cached data{q.data.fetchedAt != null ? ` from ${pathwaysAge(q.data.fetchedAt)}` : ""}. {q.data.error}
+              </AlertDescription>
+            </Alert>
+          )}
+          {q.data?.notice && (
+            <Alert className="mt-3 py-2 text-xs" data-pathways-notice="">
+              <AlertDescription>{q.data.notice}</AlertDescription>
+            </Alert>
+          )}
+          {!!map.cycles?.length && (
+            <Alert variant="destructive" className="mt-3 py-2 text-xs" data-pathways-cycles="">
+              <AlertDescription>
+                Dependency cycle detected:{" "}
+                {map.cycles.slice(0, 3).map((cycle) => [...cycle, cycle[0]].join(" → ")).join("; ")}
+                {map.cycles.length > 3 ? ` (and ${map.cycles.length - 3} more)` : ""}.
+                {" "}Remove one blocking relation to unblock these tickets.
+              </AlertDescription>
             </Alert>
           )}
           {(pathHead ||
+            needsYouNow ||
             visible.some((ticket) => ticket.pr?.state === "unavailable")) && (
             <Alert
               className="mt-3 py-2 text-xs"
@@ -1372,19 +1876,11 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                   : undefined
               }
             >
-              <AlertDescription>
-                {pathHead && (
+              <AlertDescription className="block [overflow-wrap:anywhere]">
+                {doNow && (
                   <>
-                    Do now:{" "}
-                    {pathHead.type === "research"
-                      ? "investigate"
-                      : pathHead.readiness.state === "ready"
-                        ? "start"
-                        : "resolve scope for"}{" "}
-                    {pathHead.identifier}.
-                    {needsYouNow && (
-                      <> In parallel, complete {needsYouNow.identifier}.</>
-                    )}
+                    Do now: {doNowSpan(doNow)}
+                    {alsoNow && <> In parallel, {doNowSpan(alsoNow)}</>}
                   </>
                 )}
                 {visible.some(
@@ -1399,11 +1895,37 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
               </AlertDescription>
             </Alert>
           )}
-          <div className="mt-3 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(390px,420px)]">
+          <div className="mt-3 grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(330px,370px)]">
             <div
               className="order-1 min-w-0 self-start rounded-lg border p-2 max-[1100px]:p-1"
               data-pathways-graph=""
             >
+              {hideDone && visible.length === 0 && map.tickets.length > 0 ? (
+                <Empty className="min-h-[300px] border-0" data-pathways-hidden-done="">
+                  <EmptyHeader>
+                    <Badge variant="outline" className="gap-1">
+                      <Check className="size-3" aria-hidden />
+                      All {map.tickets.length} done
+                    </Badge>
+                    <EmptyTitle>
+                      {map.tickets.length} completed {noun(map.tickets.length)} hidden
+                    </EmptyTitle>
+                    <EmptyDescription>
+                      Every {noun(1)} on this map is complete and hidden by the Hide done filter.
+                    </EmptyDescription>
+                  </EmptyHeader>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="mt-3"
+                    onClick={() => setHideDoneAndPersist(false)}
+                  >
+                    Show completed {noun(map.tickets.length)}
+                  </Button>
+                </Empty>
+              ) : (
+                <>
               <div
                 className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs"
                 aria-label="Pathways state legend"
@@ -1418,35 +1940,28 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                     visible.some((ticket) => ticket.displayState === state),
                   )
                   .map(([state, color]) => (
-                    <Tooltip key={state}>
-                      <TooltipTrigger asChild>
-                        <Badge
-                          variant="outline"
-                          tabIndex={0}
-                          className="gap-1 px-1.5 py-0.5"
-                        >
-                          <span
-                            aria-hidden
-                            style={{
-                              background: color,
-                              width: 9,
-                              height: 9,
-                              borderRadius: 2,
-                            }}
-                          />
-                          {state === "needs-you" && (
-                            <UserRound className="size-3" aria-hidden />
-                          )}
-                          {state === "done" && (
-                            <Check className="size-3" aria-hidden />
-                          )}
-                          {state}
-                        </Badge>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        {state} tickets in this map
-                      </TooltipContent>
-                    </Tooltip>
+                    <Badge
+                      key={state}
+                      variant="outline"
+                      className="gap-1 px-1.5 py-0.5"
+                    >
+                      <span
+                        aria-hidden
+                        style={{
+                          background: color,
+                          width: 9,
+                          height: 9,
+                          borderRadius: 2,
+                        }}
+                      />
+                      {state === "needs-you" && (
+                        <UserRound className="size-3" aria-hidden />
+                      )}
+                      {state === "done" && (
+                        <Check className="size-3" aria-hidden />
+                      )}
+                      {state}
+                    </Badge>
                   ))}
                 {!!map.firstPath.length && (
                   <span className="flex items-center gap-1">
@@ -1475,16 +1990,19 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                     external blocker
                   </span>
                 )}
-                <span className="flex items-center gap-1">
-                  <span
-                    aria-hidden
-                    className="inline-block w-3 border-t border-dashed border-muted-foreground"
-                  />
-                  open blocker
-                </span>
-                {!!visible.some(
-                  (ticket) => ticket.displayState === "needs-you",
-                ) && (
+                {visibleEdges.some((edge) => {
+                  const b = tickets.get(edge.from) ?? map.external.find((item) => item.identifier === edge.from);
+                  return edge.type === "blocks" && b?.state.type !== "completed" && b?.state.type !== "canceled";
+                }) && (
+                  <span className="flex items-center gap-1">
+                    <span
+                      aria-hidden
+                      className="inline-block w-3 border-t border-dashed border-muted-foreground"
+                    />
+                    open blocker
+                  </span>
+                )}
+                {visibleEdges.some((edge) => edge.type === "blocks" && tickets.get(edge.from)?.displayState === "needs-you") && (
                   <span className="flex items-center gap-1">
                     <span
                       aria-hidden
@@ -1494,26 +2012,37 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                     needs-you blocker
                   </span>
                 )}
-                <span className="flex items-center gap-1">
-                  <span
-                    aria-hidden
-                    className="inline-block w-3 border-t border-dotted"
-                    style={{ borderColor: pathwaysColors.done }}
-                  />
-                  done dependency
-                </span>
+                {visibleEdges.some((edge) => {
+                  const b = tickets.get(edge.from) ?? map.external.find((item) => item.identifier === edge.from);
+                  return edge.type !== "blocks" || b?.state.type === "completed" || b?.state.type === "canceled";
+                }) && (
+                  <span className="flex items-center gap-1">
+                    <span
+                      aria-hidden
+                      className="inline-block w-3 border-t border-dotted"
+                      style={{ borderColor: pathwaysColors.done }}
+                    />
+                    done dependency
+                  </span>
+                )}
               </div>
               <Separator className="mb-2" />
               <div className="relative">
-              <div className="absolute right-2 top-2 z-10 flex gap-1 rounded-md border bg-background/95 p-1 shadow-sm">
-                <Button variant="outline" size="icon" aria-label="Zoom in" onClick={() => zoomAtCenter(1.4)}><Plus className="size-4" /></Button>
-                <Button variant="outline" size="icon" aria-label="Zoom out" onClick={() => zoomAtCenter(1 / 1.4)}><Minus className="size-4" /></Button>
+              <div className="absolute right-2 top-2 z-10 flex items-center gap-1 rounded-md border bg-background/95 p-1 shadow-sm">
+                <span className="px-1.5 font-mono text-[11px] text-muted-foreground" data-pathways-zoom="">
+                  {Math.round(zoomBounds.k * 100)}%
+                </span>
+                <Button variant="outline" size="icon" aria-label="Zoom in" disabled={zoomBounds.k >= zoomBounds.max - 0.01} onClick={() => zoomAtCenter(1.4)}><Plus className="size-4" /></Button>
+                <Button variant="outline" size="icon" aria-label="Zoom out" disabled={zoomBounds.k <= zoomBounds.min + 0.005} onClick={() => zoomAtCenter(1 / 1.4)}><Minus className="size-4" /></Button>
+                {focusBox && (
+                  <Button variant="outline" size="sm" aria-label="Focus next step" onClick={focusNextGraph}>Next</Button>
+                )}
                 <Button variant="outline" size="sm" aria-label="Fit to view" onClick={fitGraph}>Fit</Button>
               </div>
               <svg
                 ref={graphViewport}
-                className="block w-full min-h-[320px] h-[min(70vh,720px)] cursor-grab active:cursor-grabbing"
-                role="img"
+                className="block w-full min-h-[300px] h-[min(70vh,720px)] max-[1100px]:h-[min(44vh,360px)] cursor-grab text-foreground active:cursor-grabbing"
+                role="group"
                 aria-label="Pathways map graph"
               >
                 <g ref={graphContent}>
@@ -1533,20 +2062,22 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                         d={line.path}
                         fill="none"
                         stroke={
-                          first
-                            ? pathwaysPathColor
-                            : blockerTicket
-                              ? pathwaysColors[blockerTicket.displayState]
-                              : "var(--muted-foreground)"
+                          line.label === "blocks" && cycleEdges.has(`${line.from}:${line.to}`)
+                            ? "var(--destructive)"
+                            : first
+                              ? pathwaysPathColor
+                              : blockerTicket
+                                ? pathwaysColors[blockerTicket.displayState]
+                                : "var(--muted-foreground)"
                         }
-                        strokeWidth={first ? 2 : 1.25}
+                        strokeWidth={first ? 2 : 1.5}
                         strokeDasharray={
-                          active && !first ? "6 4" : !active ? "2 5" : undefined
+                          active && !first ? "6 4" : !active ? "2 4" : undefined
                         }
                         className={
                           active && !first ? "pathways-flow" : undefined
                         }
-                        opacity={first ? 1 : active ? 0.75 : 0.5}
+                        opacity={first ? 1 : active ? 0.9 : 0.72}
                         markerEnd={
                           first
                             ? "url(#pathways-arrow-first)"
@@ -1612,16 +2143,33 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                     <a
                       key={box.id}
                       href={ticket ? "#" : (outside?.url ?? map.url)}
+                      role={ticket ? "button" : undefined}
+                      aria-label={
+                        ticket
+                          ? `${box.id}: ${title} (${ticket.displayState}${pathIds.has(box.id) ? `, first path step ${map.firstPath.indexOf(box.id) + 1}` : ""})`
+                          : `${box.id}: ${title}${outside ? " (external blocker)" : ""}`
+                      }
                       target={ticket ? undefined : "_blank"}
                       rel={ticket ? undefined : "noreferrer"}
                       onClick={
                         ticket
                           ? (event) => {
                               event.preventDefault();
-                              setSelectedId(box.id);
+                              openDetail(box.id);
                             }
                           : undefined
                       }
+                      onKeyDown={
+                        ticket
+                          ? (event) => {
+                              if (event.key === " ") {
+                                event.preventDefault();
+                                openDetail(box.id);
+                              }
+                            }
+                          : undefined
+                      }
+                      data-pathways-node={box.id}
                       data-pathways-state={
                         ticket?.displayState ?? (outside ? "external" : "map")
                       }
@@ -1632,15 +2180,11 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                         width={box.w}
                         height={box.h}
                         rx="6"
-                        fill={
-                          ticket?.displayState === "done"
-                            ? "var(--muted)"
-                            : "var(--card)"
-                        }
+                        fill="var(--card)"
                         stroke="var(--border)"
                         strokeWidth={1}
                         strokeDasharray={outside ? "5 4" : undefined}
-                        opacity={ticket?.displayState === "done" ? 0.85 : 1}
+                        opacity={ticket?.displayState === "done" ? 0.68 : 1}
                       />
                       {ticket && (
                         <rect
@@ -1673,7 +2217,7 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                       )}
                       {ticket?.waitsOnYou && (
                         <Hourglass
-                          x={box.x + box.w - 22}
+                          x={box.x + box.w - (pathIds.has(box.id) ? 42 : 22)}
                           y={box.y + 7}
                           width={14}
                           height={14}
@@ -1749,7 +2293,11 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                             {ticket.prLink.state === "linked" &&
                               ticket.pr && (
                                 <PathwaysNodeGlyph
-                                  label={ticket.pr.state === "unavailable" ? "GitHub unavailable" : `PR ${ticket.pr.state}`}
+                                  label={(() => {
+                                    const openCount = openTicketPrs(ticket).length;
+                                    if (ticket.pr.state === "unavailable") return "GitHub unavailable";
+                                    return openCount > 1 ? `${openCount} PRs · ${ticket.pr.state}` : `PR ${ticket.pr.state}`;
+                                  })()}
                                   meaning={ticket.pr.state === "unavailable" ? "Linked PR state could not be read" : `Linked PR ${ticket.pr.number ?? "number not recorded"} is ${ticket.pr.state}`}
                                 />
                               )}
@@ -1798,6 +2346,8 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                 </g>
               </svg>
               </div>
+                </>
+              )}
             </div>
             <div
               className="order-2 grid min-w-0 content-start gap-3 overflow-hidden rounded-xl border bg-card p-3"
@@ -1806,14 +2356,33 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
               <div className="flex items-baseline justify-between">
                 <h4 className="m-0 text-base font-semibold">What’s next</h4>
                 <span className="text-xs text-muted-foreground">
-                  {visible.length} tickets
+                  {(() => {
+                    const doneCount = map.tickets.filter((t) => t.displayState === "done").length;
+                    const openCount = map.tickets.length - doneCount;
+                    const noun = map.source === "orchestrator" ? (visible.length === 1 ? "item" : "items") : (visible.length === 1 ? "ticket" : "tickets");
+                    if (openCount === 0 && doneCount > 0) return `All ${doneCount} done`;
+                    if (doneCount > 0) return `${openCount} open · ${doneCount} done`;
+                    return `${visible.length} ${noun}`;
+                  })()}
                 </span>
               </div>
               <Separator />
+              {map.tickets.length > 0 && map.tickets.every((t) => t.displayState === "done") && (
+                <div className="rounded-lg bg-muted/30 p-3 text-xs" data-pathways-all-done="">
+                  <div className="font-semibold">All done</div>
+                  <p className="mb-0 mt-1 text-muted-foreground">
+                    All {map.tickets.length}{" "}
+                    {map.source === "orchestrator"
+                      ? map.tickets.length === 1 ? "item" : "items"
+                      : map.tickets.length === 1 ? "ticket" : "tickets"}{" "}
+                    complete — nothing left open.
+                  </p>
+                </div>
+              )}
               {!!map.firstPath.length && (
                 <div className="rounded-lg bg-muted/30 p-3">
                   <h5 className="m-0 text-sm font-semibold">
-                    First path · {map.firstPath.length} steps
+                    First path · {map.firstPath.length} {map.firstPath.length === 1 ? "step" : "steps"}
                   </h5>
                   <div className="mt-2 grid gap-1">
                     {rows(map.firstPath).map((ticket) =>
@@ -1846,8 +2415,25 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                   </div>
                 </div>
               )}
+              {(() => {
+                const readyExtra = map.frontier.filter(
+                  (id) => !pathIds.has(id) && tickets.get(id)?.displayState === "ready",
+                );
+                return readyExtra.length ? (
+                  <details className="rounded-lg border p-3" open>
+                    <summary className="cursor-pointer text-sm font-semibold">
+                      Ready · {readyExtra.length}
+                    </summary>
+                    <div className="mt-2 grid gap-1">
+                      {rows(readyExtra).map((ticket) =>
+                        ticketRow(ticket, ticketFact(ticket) || "Ready to start"),
+                      )}
+                    </div>
+                  </details>
+                ) : null;
+              })()}
               {!!map.claimed.length && (
-                <details className="rounded-lg border p-3">
+                <details className="rounded-lg border p-3" open={map.claimed.some((id) => !pathIds.has(id))}>
                   <summary className="cursor-pointer text-sm font-semibold">
                     Claimed · {map.claimed.length}
                   </summary>
@@ -1855,14 +2441,14 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                     {rows(map.claimed).map((ticket) =>
                       ticketRow(
                         ticket,
-                        ticketFact(ticket) || ticket.assignee || "Claimed",
+                        [ticket.assignee, ticketFact(ticket)].filter(Boolean).join(" · ") || "Claimed",
                       ),
                     )}
                   </div>
                 </details>
               )}
               {!!map.blocked.length && (
-                <details className="rounded-lg border p-3" open>
+                <details className="rounded-lg border p-3" open={map.blocked.some((id) => !pathIds.has(id))}>
                   <summary className="cursor-pointer text-sm font-semibold">
                     Blocked on · {map.blocked.length}
                   </summary>
@@ -1873,8 +2459,26 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                   </div>
                 </details>
               )}
+              {(() => {
+                const unknownIds = visible.filter((t) => t.displayState === "unknown" && !pathIds.has(t.identifier)).map((t) => t.identifier);
+                return unknownIds.length ? (
+                  <details className="rounded-lg border p-3">
+                    <summary className="cursor-pointer text-sm font-semibold">
+                      Needs details · {unknownIds.length}
+                    </summary>
+                    <div className="mt-2 grid gap-1">
+                      {rows(unknownIds).map((ticket) =>
+                        ticketRow(
+                          ticket,
+                          ticket.unknown.join(" · ") || "Missing scope details",
+                        ),
+                      )}
+                    </div>
+                  </details>
+                ) : null;
+              })()}
               {!!map.fog.length && (
-                <details className="rounded-lg border p-3">
+                <details className="rounded-lg border p-3" open={map.fog.length <= 4}>
                   <summary className="cursor-pointer text-sm font-semibold">
                     Open questions · {map.fog.length}
                   </summary>
@@ -1912,14 +2516,26 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                       {q.data?.retro?.finished.length
                         ? q.data.retro.finished.map((item) => (
                             <span key={item.label}>
-                              <a
-                                href={item.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="underline"
-                              >
-                                {item.label}
-                              </a>
+                              {item.url ? (
+                                <a
+                                  href={item.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="underline"
+                                >
+                                  {item.label}
+                                </a>
+                              ) : (
+                                <Button
+                                  type="button"
+                                  variant="link"
+                                  size="sm"
+                                  className="inline h-auto p-0 align-baseline text-xs underline"
+                                  onClick={() => openDetail(item.label)}
+                                >
+                                  {item.label}
+                                </Button>
+                              )}
                               {item.prUrl && (
                                 <>
                                   {" "}
@@ -1978,14 +2594,26 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                       {q.data?.retro?.stalled.length
                         ? q.data.retro.stalled.map((item) => (
                             <div key={item.label}>
-                              <a
-                                href={item.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="underline"
-                              >
-                                {item.label}
-                              </a>{" "}
+                              {item.url ? (
+                                <a
+                                  href={item.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="underline"
+                                >
+                                  {item.label}
+                                </a>
+                              ) : (
+                                <Button
+                                  type="button"
+                                  variant="link"
+                                  size="sm"
+                                  className="inline h-auto p-0 align-baseline text-xs underline"
+                                  onClick={() => openDetail(item.label)}
+                                >
+                                  {item.label}
+                                </Button>
+                              )}{" "}
                               · {item.kind} ·{" "}
                               {Math.round(item.durationMs / 3_600_000)}h from
                               recorded start
@@ -2021,11 +2649,18 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
           <Dialog
             open={!!selected}
             onOpenChange={(open) => {
-              if (!open) setSelectedId(null);
+              if (!open) closeDetail();
             }}
           >
             <DialogContent
               showCloseButton={false}
+              onCloseAutoFocus={(event) => {
+                const target = lastFocusedRef.current;
+                if ((target instanceof HTMLElement || target instanceof SVGElement) && target.isConnected) {
+                  event.preventDefault();
+                  target.focus();
+                }
+              }}
               className="fixed inset-y-0 right-0 left-auto top-0 h-dvh w-full max-w-[520px] content-start translate-x-0 translate-y-0 overflow-y-auto rounded-none p-5 sm:max-w-[520px]"
               data-pathways-detail={selected?.identifier}
             >
@@ -2033,54 +2668,97 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                 <>
                   <DialogHeader className="flex-row items-start justify-between gap-3 text-left">
                     <div>
-                      <a
+                      <PathwaysLink
                         href={selected.url}
-                        target="_blank"
-                        rel="noreferrer"
                         className="font-mono text-sm underline"
+                        fallbackClassName="font-mono text-sm"
                       >
                         {selected.identifier}
-                      </a>
-                      <DialogTitle className="mt-1 text-lg">
+                      </PathwaysLink>
+                      <DialogTitle className="mt-1 text-lg [overflow-wrap:anywhere]">
                         {selected.title}
                       </DialogTitle>
                       <DialogDescription>
-                        Ticket details and next actions
+                        {selected.type === "decision"
+                          ? "Decision card details and next actions"
+                          : map.source === "orchestrator"
+                            ? "Project item details and next actions"
+                            : "Ticket details and next actions"}
                       </DialogDescription>
                     </div>
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setSelectedId(null)}
+                      onClick={closeDetail}
                     >
                       Close
                     </Button>
                   </DialogHeader>
                   <Separator />
                   <div className="grid gap-3 text-sm">
-                    <div>
-                      <Badge variant="outline">{selected.displayState}</Badge> ·{" "}
-                      {selected.assignee ?? "Owner not recorded"}
-                      {selected.blockers.length
-                        ? ` · Blocked by ${selected.blockers.join(", ")}`
-                        : ""}
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Badge variant="outline">{selected.displayState}</Badge>
+                      {(selected.assignee || selected.type !== "decision") && (
+                        <span>· {selected.assignee ?? "Owner not recorded"}</span>
+                      )}
+                      {!!selected.blockers.length && (
+                        <span>
+                          · Blocked by{" "}
+                          {selected.blockers.map((blockerId, index) => {
+                            const inMap = tickets.get(blockerId);
+                            const ext = map.external.find((item) => item.identifier === blockerId);
+                            return (
+                              <span key={blockerId}>
+                                {index > 0 ? ", " : ""}
+                                {inMap ? (
+                                  <Button
+                                    type="button"
+                                    variant="link"
+                                    size="sm"
+                                    className="inline h-auto p-0 align-baseline font-mono text-xs underline"
+                                    onClick={() => openDetail(blockerId)}
+                                  >
+                                    {blockerId}
+                                  </Button>
+                                ) : ext?.url ? (
+                                  <a
+                                    href={ext.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="font-mono text-xs underline"
+                                    title={ext.title ?? blockerId}
+                                  >
+                                    {blockerId}
+                                  </a>
+                                ) : (
+                                  <span className="font-mono text-xs">{blockerId}</span>
+                                )}
+                              </span>
+                            );
+                          })}
+                        </span>
+                      )}
                     </div>
                     <UiCard className="gap-1 px-3 py-3">
                       <CardTitle className="text-sm">
-                        Readiness · {selected.readiness.state}
+                        {selected.type === "decision"
+                          ? `Decision status · ${selected.decision.waiting ? "awaiting answer" : selected.displayState}`
+                          : `Scope readiness · ${selected.readiness.state === "ready" && (selected.displayState === "blocked" || selected.preflight.state === "needs access") ? "spec ready (blocked)" : selected.readiness.state}`}
                       </CardTitle>
                       <p className="mb-1 mt-2 text-xs">
                         {selected.readiness.reasons.join(" · ") ||
-                          "Scope and proof plan recorded"}
+                          (selected.displayState === "blocked" || selected.preflight.state === "needs access"
+                            ? "Scope and proof plan recorded, but work is gated by open blockers or proof access."
+                            : "Scope and proof plan recorded")}
                       </p>
-                      <a
+                      <PathwaysLink
                         href={selected.readiness.source}
-                        target="_blank"
-                        rel="noreferrer"
                         className="text-xs underline"
+                        fallbackClassName="text-xs text-muted-foreground"
+                        fallback="Source: orchestrator"
                       >
                         Source: Linear ticket
-                      </a>
+                      </PathwaysLink>
                     </UiCard>
                     {map.ownerActions
                       .filter(
@@ -2104,9 +2782,23 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                       ticket={selected}
                       tickets={tickets}
                     />
-                    <PathwaysDecisionDraftView
+                    <PathwaysGuideView
+                      key={`guide-${selected.identifier}`}
                       ticket={selected}
                       slug={slug}
+                      guideConfig={guideConfig}
+                      onUseOptions={(options) =>
+                        setAppliedDraftOptions((prev) => ({
+                          options,
+                          seq: (prev?.seq ?? 0) + 1,
+                        }))
+                      }
+                    />
+                    <PathwaysDecisionDraftView
+                      key={`draft-${selected.identifier}`}
+                      ticket={selected}
+                      slug={slug}
+                      appliedOptions={appliedDraftOptions}
                       onSubmitted={() => {
                         setRefresh(true);
                         void q.refetch();

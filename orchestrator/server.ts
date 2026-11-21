@@ -11,10 +11,12 @@ import { cliRun, setupSidebar } from "./core/sidebar.ts";
 // deliverables
 import { chmodSync, closeSync, cpSync, createReadStream, openSync, readdirSync, readSync, rmSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
-import { approveBody, type DeliverableFolders, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody, type Pathways } from "./contract.ts";
+import { approveBody, type DeliverableFolders, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody, type Pathways, type PathwaysErrorKind } from "./contract.ts";
 import { projectIssues, pathwaysMap, linkPathwaysDecisions, attachPathwaysPreflight, draftPathwaysDecision, summarizePathwaysRetro, pathwaysDecisionKey, submitPathwaysDecision, mapPathwaysLimited, selectPathwaysMap, type PathwaysIssue } from "./core/pathways.ts";
 import { collectPathwaysProofRecords, reducePathwaysPr, reducePathwaysProof, reducePathwaysWaitLane } from "./core/pathways-pr.ts";
 import { createPathwaysSnapshots, type PathwaysSnapshot, type PathwaysView } from "./core/pathways-snapshot.ts";
+import { localPathwaysMap } from "./core/pathways-local.ts";
+import { GUIDE_DEFAULTS, GUIDE_MS, guideCacheKey, runGuide, type GuideSdk } from "./core/pathways-guide.ts";
 import type { FeedPrompt } from "./core/feed.ts";
 import { type DeliverPlace, type OutputPlace, type ProofInput, SCOPING_SUMMARY_MAX, SCOPING_TASK_NAME_MAX, SECRET_TTL_MS } from "./core/engine.ts";
 import { deliverBlocks, deliverPoints, fromJson, inputBlocksSchema, lessTextRefusal, looksLikeCode } from "./blocks.ts";
@@ -67,6 +69,9 @@ import {
   watchMoveBody,
   watchRetargetBody,
   pathwaysDecisionSubmitBody,
+  pathwaysGuideBody,
+  type PathwaysGuide,
+  type PathwaysGuideResult,
   WRITES,
   type Card,
   type Watchers,
@@ -226,6 +231,8 @@ export default async function plugin(bb: BbPluginApi) {
     aiPlayerSessionCalls: { type: "number", label: "Game Boy AI player: calls per session (one toggle-on)", default: 100 },
     aiPlayerDayCalls: { type: "number", label: "Game Boy AI player: calls per day (UTC)", default: 500 },
     linearApiKey: { type: "string", secret: true, label: "Pathways: Linear personal API key" },
+    guideProvider: { type: "string", label: "Pathways Guide: provider", default: GUIDE_DEFAULTS.provider },
+    guideModel: { type: "string", label: "Pathways Guide: model", default: GUIDE_DEFAULTS.model },
   });
   // The retired name of cosCompactTokens: never carried over, only unset (retireClearSetting).
   const retired = bb.settings.define({
@@ -2107,6 +2114,8 @@ export default async function plugin(bb: BbPluginApi) {
         linearTeams: cfg.linearTeams.split(",").map((t) => t.trim()).filter(Boolean),
         hiddenTabs: cfg.hiddenTabs.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean),
         shown: shownUntilUsed({ boards: multiplayer.store.boards().length, queueSetUp: queueSetUp(reviewQueue.store.get(), cfg.reviewQueueDryRun !== false), gameboy: cfg.showGameBoy === true, cloud: cfg.showCloud === true }),
+        guideProvider: (cfg.guideProvider ?? "").trim(),
+        guideModel: (cfg.guideModel ?? "").trim(),
       };
     },
     async needsYou({ zone }) {
@@ -2265,32 +2274,112 @@ export default async function plugin(bb: BbPluginApi) {
       return { projects, badge: projects.reduce((n, p) => n + p.cards.length, 0) };
     },
     async pathways({ slug, refresh }): Promise<PathwaysView> {
-      const failure = (error: string): PathwaysView => ({ error, map: null, retro: null, fetchedAt: null, refreshing: false });
+      const failure = (error: string, errorKind: PathwaysErrorKind | null = null): PathwaysView => ({ error, errorKind, map: null, retro: null, fetchedAt: null, refreshing: false });
+      const recordRel = `projects/${slug}/${projectRecord()}`;
+      const retroDecisions = (list: ReturnType<typeof engine.decisions>) =>
+        list.map((decision) => ({ id: decision.id, title: decision.ask?.title ?? decision.request.title, state: decision.state }));
+      if (!engine.project(slug)) return failure("Pathways project not found.", "project-missing");
       const apiKey = cfg.linearApiKey?.trim();
-      if (!apiKey) return failure("Set the Pathways Linear API key in Orchestrator plugin settings.");
-      if (!engine.project(slug)) return failure("Pathways project not found.");
       let linearProjectId: string | undefined;
       let linearMapIssue: string | undefined;
-      try {
-        const record = JSON.parse(readFileSync(join(projectsDir(), slug, projectRecord()), "utf8")) as { linearProjectId?: unknown; linearMapIssue?: unknown };
-        linearProjectId = typeof record.linearProjectId === "string" ? record.linearProjectId.trim() : undefined;
-        linearMapIssue = typeof record.linearMapIssue === "string" ? record.linearMapIssue.trim() : undefined;
-      } catch {
-        return failure("Set the Pathways Linear project link in this project's record.");
+      const recordPath = join(projectsDir(), slug, projectRecord());
+      if (existsSync(recordPath)) {
+        try {
+          const parsed = JSON.parse(readFileSync(recordPath, "utf8")) as unknown;
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            return failure(`Invalid JSON in ${recordRel}: expected a JSON object. Fix the file, then click Refresh.`, "invalid-record");
+          }
+          const record = parsed as { linearProjectId?: unknown; linearMapIssue?: unknown };
+          linearProjectId = typeof record.linearProjectId === "string" ? record.linearProjectId.trim() : undefined;
+          linearMapIssue = typeof record.linearMapIssue === "string" ? record.linearMapIssue.trim() : undefined;
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          return failure(`Invalid JSON in ${recordRel}: ${detail}. Fix the JSON syntax, then click Refresh.`, "invalid-record");
+        }
       }
-      if (!linearProjectId) return failure("Set linearProjectId in this project's record for Pathways.");
+      if (!apiKey || !linearProjectId) {
+        const readLocal = async (): Promise<Pathways> => {
+          const now = Date.now();
+          const status = engine.leadStatus(slug);
+          const rawThreads = engine.agents().filter((a) => a.role === "thread" && a.project === slug && a.status !== "archived");
+          const threads = await mapPathwaysLimited(rawThreads, 8, async (a) => {
+            const info = (await bb.sdk.threads.get({ threadId: a.threadId }).catch(() => null)) as { title?: string | null; status?: string | null } | null;
+            const pr = engine.prFor(a.environmentId);
+            return {
+              address: a.address,
+              threadId: a.threadId,
+              title: info?.title?.trim() || engine.lastReport(a.address)?.split("\n")[0]?.trim() || a.address,
+              status: info?.status?.trim() || a.status,
+              prUrls: pr?.url ? [pr.url] : [],
+            };
+          });
+          const decisions = engine.decisions(5000).filter((decision) => decision.project === slug);
+          const prs = engine.knownPrs().filter((p) => p.project === slug);
+          const deliverables = engine.deliverables().filter((deliverable) => deliverable.project === slug);
+          const waits = engine.openWaits();
+          const map = localPathwaysMap({
+            slug,
+            status,
+            threads,
+            decisions: decisions.map((decision) => ({
+              id: decision.id,
+              state: decision.state,
+              title: decision.ask?.title ?? decision.request.title,
+              question: decision.ask?.question ?? decision.request.question,
+              action: decision.orchestrator.action,
+              createdAt: decision.created_at,
+              prUrls: (decision.request.blocks ?? []).flatMap((block) => (block.kind === "pr" ? [block.url] : [])),
+            })),
+            prs,
+            deliverables,
+            waits,
+            now,
+          });
+          const retroSummary = summarizePathwaysRetro(map, retroDecisions(decisions), now);
+          const retro =
+            retroSummary.finished.length ||
+            retroSummary.mergedPrs.length ||
+            retroSummary.decisions.length ||
+            retroSummary.stalled.length
+              ? { ...retroSummary, doc: null, hostId: null }
+              : null;
+          const notice = linearProjectId && !apiKey ? "Linear project is linked (linearProjectId is set), but linearApiKey is unset in Orchestrator plugin settings. Showing the local map until you set linearApiKey and refresh." : null;
+          return { error: null, notice, map, retro };
+        };
+        const localKey = `local:${linearProjectId ? "unkeyed" : "direct"}`;
+        return pathwaysSnapshots.view(slug, refresh ?? false, readLocal, localKey);
+      }
+      class LinearRequestError extends Error {
+        readonly status: number | null;
+        readonly retryAfter: number | null;
+        readonly graphql: string | null;
+        constructor(opts: { status?: number | null; retryAfter?: number | null; graphql?: string | null }) {
+          super("Linear request failed");
+          this.status = opts.status ?? null;
+          this.retryAfter = opts.retryAfter ?? null;
+          this.graphql = opts.graphql ?? null;
+        }
+      }
       const read = async (): Promise<Pathways> => { try {
         const request = async <T,>(query: string, id: string, after: string | null = null): Promise<T> => {
-          const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables: { id, after } }) });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const result = await response.json() as { data?: T; errors?: unknown[] };
-          if (result.errors?.length || !result.data) throw new Error("GraphQL error");
+          const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables: { id, after } }), signal: AbortSignal.timeout(12_000) });
+          if (!response.ok) {
+            const rawRetry = response.status === 429 ? response.headers.get("retry-after")?.trim() : undefined;
+            const secs = rawRetry && /^\d+$/.test(rawRetry) ? Number(rawRetry) : null;
+            throw new LinearRequestError({ status: response.status, retryAfter: secs && secs > 0 ? secs : null });
+          }
+          const result = await response.json() as { data?: T; errors?: { message?: unknown }[] };
+          if (result.errors?.length || !result.data) {
+            const firstMsg = result.errors?.find((e) => typeof e?.message === "string" && e.message.trim())?.message;
+            const detail = typeof firstMsg === "string" ? firstMsg.replace(/\s+/g, " ").trim().slice(0, 200) : "";
+            throw new LinearRequestError({ graphql: detail });
+          }
           return result.data;
         };
         const summary = await projectIssues((after) => request<{ project: { issues: { nodes: { identifier: string; parent: { identifier: string } | null; labels: { nodes: { name: string }[] } }[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } } | null }>(`query($id: String!, $after: String) { project(id: $id) { issues(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { identifier parent { identifier } labels { nodes { name } } } } } }`, linearProjectId, after));
-        if (!summary) return failure("Pathways Linear project not found. Check linearProjectId.");
+        if (!summary) return failure(`Linear project "${linearProjectId}" was not found. Update linearProjectId in ${recordRel}, then click Refresh.`, "project-missing");
         const mapIndex = selectPathwaysMap(summary, linearMapIssue);
-        if (!mapIndex) return failure(linearMapIssue ? `Pathways map issue ${linearMapIssue} not found in the linked Linear project.` : "No Pathways map issue (label wayfinder:map) found in the linked Linear project.");
+        if (!mapIndex) return failure(linearMapIssue ? `Map issue "${linearMapIssue}" was not found in Linear project "${linearProjectId}". Update linearMapIssue in ${recordRel}, then click Refresh.` : `No map issue with label "wayfinder:map" was found in Linear project "${linearProjectId}". Add that label in Linear or set linearMapIssue in ${recordRel}, then click Refresh.`, "map-missing");
         const ids = [mapIndex.identifier, ...summary.filter((issue) => issue.parent?.identifier === mapIndex.identifier).map((issue) => issue.identifier)];
         const detailQuery = `query($id: String!) { issue(id: $id) { identifier title url description updatedAt state { type name } priority estimate assignee { name } labels { nodes { name } } parent { identifier } attachments { nodes { id url } } relations { nodes { type relatedIssue { identifier title url state { type } } } } inverseRelations { nodes { type issue { identifier title url state { type } } } } } }`;
         const issues = await mapPathwaysLimited(ids, 8, async (id) => (await request<{ issue: PathwaysIssue | null }>(detailQuery, id)).issue);
@@ -2321,13 +2410,33 @@ export default async function plugin(bb: BbPluginApi) {
         const retroLibrary = join(projectsDir(), slug, "library");
         let retroDoc: string | null = null;
         if (existsSync(retroLibrary)) retroDoc = readdirSync(retroLibrary).filter((name) => /retro/i.test(name) && /\.md$/i.test(name)).sort()[0] ?? null;
-        const retro = { ...summarizePathwaysRetro(map, decisions.map((decision) => ({ id: decision.id, title: decision.request.title, state: decision.state })), Date.now()), doc: retroDoc ? join(retroLibrary, retroDoc) : null, hostId: retroDoc ? await onlyHost().catch(() => null) : null };
+        const retro = { ...summarizePathwaysRetro(map, retroDecisions(decisions), Date.now()), doc: retroDoc ? join(retroLibrary, retroDoc) : null, hostId: retroDoc ? await onlyHost().catch(() => null) : null };
         return { error: null, map, retro };
       } catch (error) {
-        const reason = error instanceof Error && (/^HTTP \d+$/.test(error.message) || error.message === "GraphQL error") ? error.message : "network error";
-        return failure(`Pathways Linear request failed: ${reason}. Check the connection and try Refresh.`);
+        if (error instanceof LinearRequestError) {
+          if (error.status === 401 || error.status === 403) {
+            return failure(`Linear rejected linearApiKey (HTTP ${error.status}). Update linearApiKey in Orchestrator plugin settings, then click Refresh.`, "auth");
+          }
+          if (error.status === 429) {
+            const wait = error.retryAfter ? `about ${error.retryAfter}s` : "a minute";
+            return failure(`Linear rate limit reached (HTTP 429). Wait ${wait} before clicking Refresh.`, "rate-limit");
+          }
+          if (error.status != null && error.status >= 500) {
+            return failure(`Linear returned a server error (HTTP ${error.status}). Try Refresh again shortly.`, "server");
+          }
+          if (error.graphql !== null) {
+            const detail = error.graphql ? `: ${error.graphql}` : "";
+            return failure(`Linear GraphQL error${detail}. Check linearProjectId ("${linearProjectId}") in ${recordRel} and linearApiKey permissions in Orchestrator settings.`, "graphql");
+          }
+          return failure(`Linear request failed (HTTP ${error.status}). Check your connection and click Refresh.`, "network");
+        }
+        if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+          return failure("Linear request timed out after 12s. Check Linear status or your connection, then click Refresh.", "timeout");
+        }
+        return failure("Linear request failed (network error). Check your connection and click Refresh.", "network");
       } };
-      return pathwaysSnapshots.view(slug, refresh ?? false, read);
+      const linearKey = `linear:${linearProjectId}:${linearMapIssue ?? ""}`;
+      return pathwaysSnapshots.view(slug, refresh ?? false, read, linearKey);
     },
     feed({ cursor, filter }) {
       return engine.feed({ cursor, filter }, feedPrompts);
@@ -2476,7 +2585,9 @@ export default async function plugin(bb: BbPluginApi) {
     const prior = engine.decisionByRequestKey(lead.address, pathwaysDecisionKey(b.ticketId, b.question));
     if (prior) return prior.id;
     const project = engine.project(b.slug);
-    const ticket = pathwaysSnapshots.peek(b.slug)?.value.map?.tickets.find((item) => item.identifier === b.ticketId);
+    const snapshotMap = pathwaysSnapshots.peek(b.slug)?.value.map;
+    if (snapshotMap?.source === "orchestrator") throw new EngineError("bad_state", "Decision drafts are only supported for Linear maps");
+    const ticket = snapshotMap?.tickets.find((item) => item.identifier === b.ticketId);
     if (!project || !ticket) throw new EngineError("not_found", "Project or ticket not found; refresh Pathways");
     if (ticket.readiness.state !== "needs decision" && ticket.displayState !== "blocked") throw new EngineError("bad_state", "Ticket has no recorded decision blocker");
     const draft = draftPathwaysDecision(ticket);
@@ -2485,6 +2596,67 @@ export default async function plugin(bb: BbPluginApi) {
     const id = submitPathwaysDecision(draft, { existing: (key) => engine.decisionByRequestKey(lead.address, key)?.id ?? null, create: (key, value) => engine.ask(lead, { title: value.title, question: value.question, context: value.context, options: value.options, key }).id });
     pathwaysSnapshots.markStale(b.slug);
     return id;
+  });
+  const pathwaysGuideCache = new Map<string, PathwaysGuide>();
+  let pathwaysGuideRunning = false;
+  write(WRITES.pathwaysGuide, pathwaysGuideBody, async (b): Promise<PathwaysGuideResult> => {
+    const provider = (cfg.guideProvider ?? "").trim();
+    const model = (cfg.guideModel ?? "").trim();
+    const fail = (error: string): PathwaysGuideResult => ({ guide: null, error, provider, model, cached: false });
+    if (!provider || !model) {
+      return fail("Set both guideProvider and guideModel in Orchestrator plugin settings to use Pathways Guide.");
+    }
+    const snapshotMap = pathwaysSnapshots.peek(b.slug)?.value.map;
+    const ticket = snapshotMap?.tickets.find((item) => item.identifier === b.ticketId);
+    if (!snapshotMap || !ticket) throw new EngineError("not_found", "Project or ticket not found; refresh Pathways");
+    if (ticket.readiness.state !== "needs decision" && !ticket.decisionDraft) {
+      throw new EngineError("bad_state", "Pathways Guide is only available for tickets that need a decision");
+    }
+    const cacheKey = guideCacheKey(ticket, snapshotMap, provider, model);
+    if (!b.refresh) {
+      const hit = pathwaysGuideCache.get(cacheKey);
+      if (hit) return { guide: hit, error: null, provider, model, cached: true };
+    }
+    if (pathwaysGuideRunning) return fail("A guide run is already in progress. Wait for it to finish.");
+    pathwaysGuideRunning = true;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(new DOMException("Pathways Guide timed out", "TimeoutError")), GUIDE_MS + 5_000);
+    try {
+      let target: { projectId: string; hostId: string };
+      try {
+        target = await homeProject();
+      } catch {
+        return fail("Pathways Guide needs a connected bb host and project.");
+      }
+      const res = await runGuide(
+        bb.sdk as unknown as GuideSdk,
+        ticket,
+        snapshotMap,
+        { provider, model, hostId: target.hostId, projectId: target.projectId, timeoutMs: GUIDE_MS },
+        ctl.signal,
+      );
+      if (!res.guide) return fail(res.error);
+      if (pathwaysGuideCache.size >= 64) {
+        const oldest = pathwaysGuideCache.keys().next().value;
+        if (oldest) pathwaysGuideCache.delete(oldest);
+      }
+      pathwaysGuideCache.set(cacheKey, res.guide);
+      return { guide: res.guide, error: null, provider, model, cached: false };
+    } catch (e) {
+      const message = errText(e);
+      const timedOut = (e instanceof DOMException && e.name === "TimeoutError") || /timed out/i.test(message);
+      const safeProviderErr = /^(provider |model |could not list |Pathways Guide needs )/i.test(message);
+      return fail(
+        timedOut
+          ? "The guide timed out. Try Ask again."
+          : safeProviderErr
+            ? message
+            : "The guide couldn't run right now. Check provider settings and try again.",
+      );
+    } finally {
+      clearTimeout(timer);
+      pathwaysGuideRunning = false;
+    }
   });
   write(WRITES.answer, answerBody, (b) =>
     b.option === null && looksLikeCode(b.text) ? keepSecret(b.id, b.rev, b.text!, b.via, true) : engine.personAnswer(b.id, b.rev, b.option, b.text, b.via).rev,

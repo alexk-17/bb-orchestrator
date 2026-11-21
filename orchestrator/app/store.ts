@@ -88,9 +88,9 @@ function tryUnlock() {
 }
 
 const TIMEOUT_MS = 30_000;
-async function post(path: string, body: unknown): Promise<Outcome> {
+async function post(path: string, body: unknown, timeoutMs = TIMEOUT_MS): Promise<Outcome> {
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const res = await fetch(WRITE_BASE + path, {
       method: "POST",
@@ -112,7 +112,7 @@ async function post(path: string, body: unknown): Promise<Outcome> {
     return { ok: false, kind: "error", message: `Unexpected answer from the server (HTTP ${res.status})` };
   } catch (e) {
     const aborted = e instanceof DOMException && e.name === "AbortError";
-    return { ok: false, kind: "network", message: aborted ? "No answer from the server in 30 s; reload to check." : e instanceof Error ? e.message : String(e) };
+    return { ok: false, kind: "network", message: aborted ? `No answer from the server in ${Math.round(timeoutMs / 1000)} s; reload to check.` : e instanceof Error ? e.message : String(e) };
   } finally {
     clearTimeout(timer);
   }
@@ -122,8 +122,8 @@ async function post(path: string, body: unknown): Promise<Outcome> {
  * A file staged for a write that follows (2026-11-17: a screenshot for a message to a lead), outside the gate: staging
  * changes nothing the page shows, and the message that names it goes through `write` as every write does.
  */
-export function stage(path: string, body: unknown): Promise<Outcome> {
-  return post(path, body);
+export function stage(path: string, body: unknown, timeoutMs = TIMEOUT_MS): Promise<Outcome> {
+  return post(path, body, timeoutMs);
 }
 
 export type WriteOptions = {

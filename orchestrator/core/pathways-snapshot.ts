@@ -1,6 +1,6 @@
 import type { Pathways } from "../contract.ts";
 
-export type PathwaysSnapshot = { value: Pathways; fetchedAt: number };
+export type PathwaysSnapshot = { value: Pathways; fetchedAt: number; sourceKey?: string };
 export type PathwaysView = Pathways & { fetchedAt: number | null; refreshing: boolean };
 
 export type PathwaysSnapshotDeps = {
@@ -16,6 +16,7 @@ export function createPathwaysSnapshots(deps: PathwaysSnapshotDeps) {
   const refreshErrors = new Map<string, string>();
   const failedAt = new Map<string, number>();
   const stale = new Set<string>();
+  const latestSource = new Map<string, string>();
 
   const current = (slug: string): PathwaysSnapshot | null => {
     const known = memory.get(slug);
@@ -25,12 +26,24 @@ export function createPathwaysSnapshots(deps: PathwaysSnapshotDeps) {
     return durable;
   };
 
-  const refresh = (slug: string, load: () => Promise<Pathways>): Promise<Pathways> => {
-    const pending = inFlight.get(slug);
+  const forget = (slug: string) => {
+    memory.delete(slug);
+    refreshErrors.delete(slug);
+    failedAt.delete(slug);
+    stale.delete(slug);
+  };
+
+  const matchesSource = (snapshot: PathwaysSnapshot | null, sourceKey: string): PathwaysSnapshot | null =>
+    snapshot && (snapshot.sourceKey ?? "default") === sourceKey ? snapshot : null;
+
+  const refresh = (slug: string, load: () => Promise<Pathways>, sourceKey: string): Promise<Pathways> => {
+    const flightKey = `${slug}::${sourceKey}`;
+    const pending = inFlight.get(flightKey);
     if (pending) return pending;
     const promise: Promise<Pathways> = load().then((value) => {
+      if (latestSource.get(slug) !== sourceKey) return value;
       if (value.error === null && value.map) {
-        const snapshot = { value, fetchedAt: deps.now() };
+        const snapshot: PathwaysSnapshot = sourceKey === "default" ? { value, fetchedAt: deps.now() } : { value, fetchedAt: deps.now(), sourceKey };
         memory.set(slug, snapshot);
         deps.write(slug, snapshot);
         refreshErrors.delete(slug);
@@ -42,9 +55,9 @@ export function createPathwaysSnapshots(deps: PathwaysSnapshotDeps) {
       stale.delete(slug);
       return value;
     }).finally(() => {
-      if (inFlight.get(slug) === promise) inFlight.delete(slug);
+      if (inFlight.get(flightKey) === promise) inFlight.delete(flightKey);
     });
-    inFlight.set(slug, promise);
+    inFlight.set(flightKey, promise);
     return promise;
   };
 
@@ -59,15 +72,18 @@ export function createPathwaysSnapshots(deps: PathwaysSnapshotDeps) {
     !stale.has(slug) && deps.now() - Math.max(snapshot.fetchedAt, failedAt.get(slug) ?? 0) < deps.maxAgeMs;
 
   return {
-    async view(slug: string, forced: boolean, load: () => Promise<Pathways>): Promise<PathwaysView> {
-      const snapshot = current(slug);
+    async view(slug: string, forced: boolean, load: () => Promise<Pathways>, sourceKey = "default"): Promise<PathwaysView> {
+      latestSource.set(slug, sourceKey);
+      const existing = current(slug);
+      const snapshot = matchesSource(existing, sourceKey);
+      if (existing && !snapshot) forget(slug);
       if (!snapshot || forced) {
-        const value = await refresh(slug, load);
-        const after = current(slug);
+        const value = await refresh(slug, load, sourceKey);
+        const after = matchesSource(current(slug), sourceKey);
         return after ? shown(slug, after, false) : { ...value, fetchedAt: null, refreshing: false };
       }
       if (isFresh(slug, snapshot)) return shown(slug, snapshot, false);
-      void refresh(slug, load);
+      void refresh(slug, load, sourceKey);
       return shown(slug, snapshot, true);
     },
     peek(slug: string): PathwaysSnapshot | null {

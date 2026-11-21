@@ -429,15 +429,32 @@ export const scopeSchema = z.object({
 });
 export type Scope = z.infer<typeof scopeSchema>;
 
+export const pathwaysErrorKindSchema = z.enum([
+  "invalid-record",
+  "auth",
+  "rate-limit",
+  "timeout",
+  "server",
+  "graphql",
+  "map-missing",
+  "project-missing",
+  "network",
+]);
+export type PathwaysErrorKind = z.infer<typeof pathwaysErrorKindSchema>;
+
 export const pathwaysSchema = z.object({
   error: z.string().nullable(),
+  errorKind: pathwaysErrorKindSchema.nullable().optional(),
+  notice: z.string().nullable().optional(),
   map: z.object({
     identifier: z.string(), title: z.string(), url: z.string(),
-    tickets: z.array(z.object({ identifier: z.string(), title: z.string(), url: z.string(), state: z.object({ type: z.string(), name: z.string() }), priority: z.number(), estimate: z.number().nullable(), type: z.string(), assignee: z.string().nullable(), unknown: z.array(z.string()), blockers: z.array(z.string()), displayState: z.enum(["done", "needs-you", "blocked", "claimed", "unknown", "ready"]), waitsOnYou: z.boolean(), readiness: z.object({ state: z.enum(["ready", "needs decision", "needs proof plan"]), reasons: z.array(z.string()), source: z.string() }), prLink: z.object({ state: z.enum(["missing", "linked", "ambiguous"]), urls: z.array(z.string()), source: z.enum(["attachment", "description", "both"]).nullable() }), prs: z.array(z.object({ pr: z.object({ url: z.string(), state: z.enum(["unavailable", "blocked", "ready", "merged", "closed"]), number: z.number().nullable(), title: z.string().nullable(), draft: z.boolean().nullable(), head: z.string().nullable(), createdAt: z.number().nullable(), headCommittedAt: z.number().nullable(), checksPendingSince: z.number().nullable(), reviews: z.array(z.object({ login: z.string(), state: z.string(), sha: z.string(), submittedAt: z.number().nullable() })), staleReviewDismissal: z.boolean().nullable(), requiredApprovals: z.number().nullable(), review: z.string(), checks: z.string(), mergeability: z.string(), reason: z.string(), retrievedAt: z.number() }), proof: z.object({ state: z.enum(["unrecorded", "stale", "partial", "blocked", "verified"]), verifiedSha: z.string().nullable(), liveInterface: z.string().nullable(), qaPacketUrl: z.string().nullable(), missing: z.array(z.string()), sourceUrl: z.string().nullable(), sourceLabel: z.string().nullable(), observedAt: z.number().nullable() }), waitLane: z.object({ head: z.string().nullable(), reviewFreshness: z.enum(["current", "stale", "older accepted", "unknown"]), steps: z.array(z.object({ kind: z.enum(["check run", "human review", "QA", "draft decision", "merge go"]), state: z.enum(["done", "pending", "blocked", "unknown"]), since: z.number().nullable(), owner: z.string().nullable(), note: z.string() })) }) })), pr: z.object({ url: z.string(), state: z.enum(["unavailable", "blocked", "ready", "merged", "closed"]), number: z.number().nullable(), title: z.string().nullable(), draft: z.boolean().nullable(), head: z.string().nullable(), createdAt: z.number().nullable(), headCommittedAt: z.number().nullable(), checksPendingSince: z.number().nullable(), reviews: z.array(z.object({ login: z.string(), state: z.string(), sha: z.string(), submittedAt: z.number().nullable() })), staleReviewDismissal: z.boolean().nullable(), requiredApprovals: z.number().nullable(), review: z.string(), checks: z.string(), mergeability: z.string(), reason: z.string(), retrievedAt: z.number() }).nullable(), proof: z.object({ state: z.enum(["unrecorded", "stale", "partial", "blocked", "verified"]), verifiedSha: z.string().nullable(), liveInterface: z.string().nullable(), qaPacketUrl: z.string().nullable(), missing: z.array(z.string()), sourceUrl: z.string().nullable(), sourceLabel: z.string().nullable(), observedAt: z.number().nullable() }).nullable(), waitLane: z.object({ head: z.string().nullable(), reviewFreshness: z.enum(["current", "stale", "older accepted", "unknown"]), steps: z.array(z.object({ kind: z.enum(["check run", "human review", "QA", "draft decision", "merge go"]), state: z.enum(["done", "pending", "blocked", "unknown"]), since: z.number().nullable(), owner: z.string().nullable(), note: z.string() })) }).nullable(), decisionDraft: z.object({ ticketId: z.string(), ticketUrl: z.string(), title: z.string(), question: z.string(), context: z.string(), options: z.array(z.object({ label: z.string(), detail: z.string() })), affected: z.array(z.string()) }).nullable(), decision: z.object({ state: z.enum(["missing", "ambiguous", "linked"]), cardId: z.string().nullable(), cardState: z.string().nullable(), title: z.string().nullable(), waiting: z.boolean(), direct: z.array(z.string()), transitive: z.array(z.string()) }), preflight: z.object({ state: z.enum(["not planned", "needs access", "unknown", "blocked", "declared"]), environment: z.string().nullable(), verifier: z.string().nullable(), ownerAction: z.string().nullable(), accessTicket: z.string().nullable(), gaps: z.array(z.string()), source: z.string() }) })),
+    source: z.enum(["linear", "orchestrator"]).optional(),
+    tickets: z.array(z.object({ identifier: z.string(), title: z.string(), url: z.string(), description: z.string().nullable().optional(), state: z.object({ type: z.string(), name: z.string() }), priority: z.number(), estimate: z.number().nullable(), type: z.string(), assignee: z.string().nullable(), unknown: z.array(z.string()), blockers: z.array(z.string()), displayState: z.enum(["done", "needs-you", "blocked", "claimed", "unknown", "ready"]), waitsOnYou: z.boolean(), readiness: z.object({ state: z.enum(["ready", "needs decision", "needs proof plan"]), reasons: z.array(z.string()), source: z.string() }), prLink: z.object({ state: z.enum(["missing", "linked", "ambiguous"]), urls: z.array(z.string()), source: z.enum(["attachment", "description", "both"]).nullable() }), prs: z.array(z.object({ pr: z.object({ url: z.string(), state: z.enum(["unavailable", "blocked", "ready", "merged", "closed"]), number: z.number().nullable(), title: z.string().nullable(), draft: z.boolean().nullable(), head: z.string().nullable(), createdAt: z.number().nullable(), headCommittedAt: z.number().nullable(), checksPendingSince: z.number().nullable(), reviews: z.array(z.object({ login: z.string(), state: z.string(), sha: z.string(), submittedAt: z.number().nullable() })), staleReviewDismissal: z.boolean().nullable(), requiredApprovals: z.number().nullable(), review: z.string(), checks: z.string(), mergeability: z.string(), reason: z.string(), retrievedAt: z.number() }), proof: z.object({ state: z.enum(["unrecorded", "stale", "partial", "blocked", "verified"]), verifiedSha: z.string().nullable(), liveInterface: z.string().nullable(), qaPacketUrl: z.string().nullable(), missing: z.array(z.string()), sourceUrl: z.string().nullable(), sourceLabel: z.string().nullable(), observedAt: z.number().nullable() }), waitLane: z.object({ head: z.string().nullable(), reviewFreshness: z.enum(["current", "stale", "older accepted", "unknown"]), steps: z.array(z.object({ kind: z.enum(["check run", "human review", "QA", "draft decision", "merge go"]), state: z.enum(["done", "pending", "blocked", "unknown"]), since: z.number().nullable(), owner: z.string().nullable(), note: z.string() })) }) })), pr: z.object({ url: z.string(), state: z.enum(["unavailable", "blocked", "ready", "merged", "closed"]), number: z.number().nullable(), title: z.string().nullable(), draft: z.boolean().nullable(), head: z.string().nullable(), createdAt: z.number().nullable(), headCommittedAt: z.number().nullable(), checksPendingSince: z.number().nullable(), reviews: z.array(z.object({ login: z.string(), state: z.string(), sha: z.string(), submittedAt: z.number().nullable() })), staleReviewDismissal: z.boolean().nullable(), requiredApprovals: z.number().nullable(), review: z.string(), checks: z.string(), mergeability: z.string(), reason: z.string(), retrievedAt: z.number() }).nullable(), proof: z.object({ state: z.enum(["unrecorded", "stale", "partial", "blocked", "verified"]), verifiedSha: z.string().nullable(), liveInterface: z.string().nullable(), qaPacketUrl: z.string().nullable(), missing: z.array(z.string()), sourceUrl: z.string().nullable(), sourceLabel: z.string().nullable(), observedAt: z.number().nullable() }).nullable(), waitLane: z.object({ head: z.string().nullable(), reviewFreshness: z.enum(["current", "stale", "older accepted", "unknown"]), steps: z.array(z.object({ kind: z.enum(["check run", "human review", "QA", "draft decision", "merge go"]), state: z.enum(["done", "pending", "blocked", "unknown"]), since: z.number().nullable(), owner: z.string().nullable(), note: z.string() })) }).nullable(), decisionDraft: z.object({ ticketId: z.string(), ticketUrl: z.string(), title: z.string(), question: z.string(), context: z.string(), options: z.array(z.object({ label: z.string(), detail: z.string() })), affected: z.array(z.string()) }).nullable(), decision: z.object({ state: z.enum(["missing", "ambiguous", "linked"]), cardId: z.string().nullable(), cardState: z.string().nullable(), title: z.string().nullable(), waiting: z.boolean(), direct: z.array(z.string()), transitive: z.array(z.string()) }), preflight: z.object({ state: z.enum(["not planned", "needs access", "unknown", "blocked", "declared"]), environment: z.string().nullable(), verifier: z.string().nullable(), ownerAction: z.string().nullable(), accessTicket: z.string().nullable(), gaps: z.array(z.string()), source: z.string() }) })),
     external: z.array(z.object({ identifier: z.string(), title: z.string().optional(), url: z.string().optional(), state: z.object({ type: z.string() }) })),
     edges: z.array(z.object({ from: z.string(), to: z.string(), type: z.enum(["blocks", "sub-issue", "related"]) })),
     fog: z.array(z.string()), frontier: z.array(z.string()), claimed: z.array(z.string()), blocked: z.array(z.string()), firstPath: z.array(z.string()),
     ownerActions: z.array(z.object({ identifier: z.string(), url: z.string(), action: z.string(), kind: z.enum(["sign-in", "permission", "approval", "other"]), affected: z.array(z.string()), next: z.string().nullable(), neededBefore: z.number().nullable(), onlyOpenBlocker: z.boolean() })),
+    cycles: z.array(z.array(z.string())).optional(),
   }).nullable(),
   retro: z.object({ finished: z.array(z.object({ label: z.string(), url: z.string(), prUrl: z.string().nullable() })), mergedPrs: z.array(z.object({ ticket: z.string(), url: z.string() })), decisions: z.array(z.object({ id: z.string(), title: z.string() })), stalled: z.array(z.object({ label: z.string(), url: z.string(), kind: z.string(), durationMs: z.number() })), doc: z.string().nullable(), hostId: z.string().nullable() }).nullable(),
 });
@@ -451,7 +468,7 @@ export type ProjectOrder = z.infer<typeof projectOrderSchema>;
 
 /** Who the page is for: the ownerName setting ("" = the page says "you") and the CoS's name. */
 // linearWorkspace / linearTeams: where a Linear id in the command center links (app/refs.ts); empty: no link
-export const configSchema = z.object({ ownerName: z.string(), cosTitle: z.string(), linearWorkspace: z.string().optional(), linearTeams: z.array(z.string()).optional(), hiddenTabs: z.array(z.string()).optional(), shown: z.array(z.string()).optional() });
+export const configSchema = z.object({ ownerName: z.string(), cosTitle: z.string(), linearWorkspace: z.string().optional(), linearTeams: z.array(z.string()).optional(), hiddenTabs: z.array(z.string()).optional(), shown: z.array(z.string()).optional(), guideProvider: z.string().optional(), guideModel: z.string().optional() });
 export type Config = z.infer<typeof configSchema>;
 
 // The Feed tab (core/feed.ts). `line`: where a reply goes (lead:<slug> or cos), none for a post that only opens.
@@ -600,10 +617,59 @@ export const watchMoveBody = z.object({ id: z.string().min(1).max(40), to: z.str
 export const watchDropBody = z.object({ id: z.string().min(1).max(40) }).strict();
 
 export const pathwaysDecisionSubmitBody = z.object({ slug: z.string().min(1).max(40), ticketId: z.string().min(1).max(40), question: z.string().min(1).max(600), options: z.array(z.object({ label: z.string().min(1).max(80), detail: z.string().max(300) }).strict()).min(2).max(4) }).strict();
+const guideRouteSchema = z
+  .object({
+    label: z.string().trim().min(1).max(60),
+    approach: z.string().trim().min(1).max(300),
+    tradeoffs: z.string().trim().min(1).max(300),
+    risk: z.enum(["low", "medium", "high"]),
+    reversible: z.enum(["easy", "hard"]),
+    size: z.enum(["S", "M", "L"]),
+    firstStep: z.string().trim().min(1).max(200),
+    proof: z.string().trim().min(1).max(200),
+  })
+  .strict();
+export const guideSchema = z
+  .object({
+    framing: z.string().trim().min(1).max(300),
+    routes: z.array(guideRouteSchema).min(2).max(4),
+    recommended: z.number().int().min(0),
+    why: z.string().trim().min(1).max(300),
+    principles: z.array(z.number().int().min(1).max(10)).min(1).max(4),
+    risks: z.array(z.string().trim().min(1).max(160)).max(3),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.recommended >= value.routes.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "recommended index out of range",
+        path: ["recommended"],
+      });
+    }
+  });
+export type PathwaysGuide = z.infer<typeof guideSchema>;
+export const pathwaysGuideBody = z.object({ slug: z.string().min(1).max(40), ticketId: z.string().min(1).max(40), refresh: z.boolean().optional() }).strict();
+export const pathwaysGuideResultSchema = z
+  .object({
+    guide: guideSchema.nullable(),
+    error: z.string().nullable(),
+    provider: z.string(),
+    model: z.string(),
+    cached: z.boolean(),
+  })
+  .strict();
+export type PathwaysGuideResult = z.infer<typeof pathwaysGuideResultSchema>;
+export function guideDecisionOptions(guide: PathwaysGuide): { label: string; detail: string }[] {
+  return [guide.routes[guide.recommended]!, ...guide.routes.filter((_, index) => index !== guide.recommended)].map(
+    (route) => ({ label: route.label, detail: route.approach }),
+  );
+}
 
 export const WRITES = {
   answer: "/answer",
   pathwaysDecision: "/pathways/decision",
+  pathwaysGuide: "/pathways/guide",
   secret: "/secret",
   defer: "/defer",
   return: "/return",

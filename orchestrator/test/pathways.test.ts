@@ -1,10 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Engine } from "../core/engine.ts";
 import { attachPathwaysPreflight, fogBullets, linkPathwaysDecisions, mapPathwaysLimited, pathwaysMap, projectIssues, selectPathwaysMap, summarizePathwaysRetro, type PathwaysIssue } from "../core/pathways.ts";
 import { createPathwaysSnapshots, type PathwaysSnapshot } from "../core/pathways-snapshot.ts";
-import type { Pathways } from "../contract.ts";
+import { WRITES, pathwaysGuideResultSchema, pathwaysViewSchema, type Pathways } from "../contract.ts";
+import plugin from "../server.ts";
 
 test("Pathways detail reads cap concurrency and preserve order; the last map is served while a refresh runs", async () => {
   let active = 0;
@@ -64,6 +68,326 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
   assert.equal(loads, loadsAfterFailure, "a failed refresh is not retried by polling until the cache age passes");
   assert.equal(polled.refreshing, false);
   assert.match(polled.error ?? "", /HTTP 500/);
+  let releaseStaleLinear!: (v: Pathways) => void;
+  const staleLinear = snapshots.view("race", true, () => new Promise<Pathways>((r) => { releaseStaleLinear = r; }), "linear:p1:");
+  const localWin = await snapshots.view("race", true, async () => fresh("local-win"), "local:direct");
+  assert.equal(localWin.map?.title, "local-win");
+  releaseStaleLinear(failed("Linear request failed (HTTP 500)."));
+  await staleLinear;
+  const afterRace = await snapshots.view("race", false, async () => fresh("unexpected"), "local:direct");
+  assert.equal(afterRace.error, null, "stale source failure must not poison newer source view");
+  assert.equal(afterRace.map?.title, "local-win");
+
+  const root = mkdtempSync(join(tmpdir(), "orch-pathways-local-"));
+  try {
+    mkdirSync(join(root, "projects", "alpha"), { recursive: true });
+    mkdirSync(join(root, "projects", "empty"), { recursive: true });
+    writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha" }));
+    const db = Object.assign(new DatabaseSync(join(root, "data.db")), { name: join(root, "data.db") });
+    const engine = new Engine(db as never, { now: () => 10_000, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} });
+    const cos = engine.register("T-cos", "cos", null);
+    const leadAlpha = engine.register("T-lead-alpha", "lead", "alpha");
+    const leadEmpty = engine.register("T-lead-empty", "lead", "empty");
+    engine.setEnvironment(leadEmpty.threadId, "env-lead-empty");
+    const thr1 = engine.register("T-thr-1", "thread", "alpha", leadAlpha.threadId);
+    engine.setStatus(thr1.threadId, "active");
+    engine.setEnvironment(thr1.threadId, "env-thr-1");
+    const thr2 = engine.register("T-thr-2", "thread", "alpha", leadAlpha.threadId);
+    engine.setStatus(thr2.threadId, "archived");
+    const thr3 = engine.register("T-thr-3", "thread", "alpha", leadAlpha.threadId);
+    engine.setStatus(thr3.threadId, "stopped");
+    engine.setEnvironment(leadAlpha.threadId, "env-lead-alpha");
+    engine.publishStatus(leadAlpha, {
+      goal: "Ship alpha",
+      steps: [
+        { title: "Design API", state: "done" },
+        { title: "Skip old spike", state: "skipped" },
+        { title: "Build worker", state: "current" },
+        { title: "Run QA", state: "next" },
+        { title: "Release", state: "next" },
+      ],
+      blockers: ["Waiting on staging key"],
+    });
+    const openCard = engine.ask(leadAlpha, { title: "Approve staging deploy", question: "May we deploy to staging?", options: [{ label: "Yes" }, { label: "No" }] });
+    engine.triageAskPerson(cos, openCard.id, { title: "Approve staging deploy", question: "May we deploy to staging?", options: [{ label: "Yes" }, { label: "No" }], allowText: true });
+    const answeredCard = engine.ask(leadAlpha, { title: "Pick storage", question: "SQLite or Postgres?", options: [{ label: "SQLite" }, { label: "Postgres" }] });
+    engine.triageAskPerson(cos, answeredCard.id, { title: "Pick storage", question: "SQLite or Postgres?", options: [{ label: "SQLite" }, { label: "Postgres" }], allowText: true });
+    const askedAnswered = engine.decision(answeredCard.id)!;
+    engine.personAnswer(answeredCard.id, askedAnswered.rev, askedAnswered.ask!.options[0]!.id, null, "desktop");
+    engine.prSeen(thr1, "env-thr-1", { outcome: "available", pullRequest: { number: 42, url: "https://github.com/acme/alpha/pull/42", state: "open", review: { state: "review_required" }, checks: { state: "passing" }, mergeability: { state: "ready_to_merge" } } });
+    engine.prSeen(leadAlpha, "env-lead-alpha", { outcome: "available", pullRequest: { number: 43, url: "https://github.com/acme/alpha/pull/43", state: "open", review: { state: "approved" }, checks: { state: "passing" }, mergeability: { state: "ready_to_merge" } } });
+
+    const bootWith = async (linearApiKey: string, extraSettings: Record<string, unknown> = {}, guideOutput?: string) => {
+      const rpc: Record<string, (input: unknown) => Promise<unknown>> = {};
+      const posts = new Map<string, (c: any) => Promise<any>>();
+      let guideSpawns = 0;
+      const noop: any = new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : noop), apply: () => noop });
+      const sdk = (path: string[]): any =>
+        new Proxy(function () {}, {
+          get: (_t, k) => (k === "then" ? undefined : sdk([...path, String(k)])),
+          apply: (_t, _this, args: any[]) => {
+            const key = path.join(".");
+            if (key === "threads.get") {
+              if (args[0]?.threadId === "T-thr-1") return Promise.resolve({ title: "Worker implementation", status: "active" });
+              if (args[0]?.threadId === "T-thr-3") return Promise.resolve({ title: "Stopped worker", status: "stopped" });
+              return Promise.resolve({ title: null, status: "idle" });
+            }
+            if (key === "projects.list") return Promise.resolve([{ id: "bb-proj-1", name: "state", sources: [{ hostId: "h-1", path: join(root, "state"), isDefault: true }] }]);
+            if (key === "providers.models") return Promise.resolve({ modelLoadError: null, providers: [{ id: "claude-code", available: true }], models: [{ id: "claude-opus-5-5", model: "claude-opus-5-5" }] });
+            if (key === "threads.spawn") {
+              guideSpawns++;
+              return Promise.resolve({ id: `g-${guideSpawns}` });
+            }
+            if (key === "threads.wait") return Promise.resolve({ matched: true });
+            if (key === "threads.output") return Promise.resolve({ output: guideOutput ?? "" });
+            return Promise.resolve({});
+          },
+        });
+      const bb: any = new Proxy(
+        {},
+        {
+          get(_t, k) {
+            if (k === "pluginId") return "orchestrator";
+            if (k === "settings")
+              return {
+                define: (schema: Record<string, { default: unknown }>) => {
+                  const v: any = Object.fromEntries(Object.entries(schema).map(([key, d]) => [key, d.default]));
+                  Object.assign(v, { stateDir: join(root, "state"), projectsDir: join(root, "projects"), memoryConfig: "", diskPath: root, linearApiKey, ...extraSettings });
+                  return { get: async () => v, onChange: () => {} };
+                },
+              };
+            if (k === "storage") return { database: () => db, kv: noop };
+            if (k === "sdk") return sdk([]);
+            if (k === "rpc") return { register: (_c: unknown, h: typeof rpc) => Object.assign(rpc, h) };
+            if (k === "http") return { route: (method: string, routePath: string, fn: (c: any) => Promise<any>) => { if (method === "POST") posts.set(routePath, fn); } };
+            if (k === "server") return { experimental_appUrl: null, loopbackBaseUrl: "http://127.0.0.1:39993" };
+            if (k === "log") return { info: () => {}, warn: () => {}, error: () => {} };
+            return noop;
+          },
+        },
+      );
+      await plugin(bb);
+      const post = async (routePath: string, body: unknown) => {
+        const handler = posts.get(routePath)!;
+        let out: { status: number; body: any } = { status: 200, body: null };
+        await handler({
+          req: {
+            url: `http://127.0.0.1:39993/api/v1/plugins/orchestrator/http${routePath}`,
+            header: (name: string) => (name.toLowerCase() === "origin" ? "http://127.0.0.1:39993" : name.toLowerCase() === "sec-fetch-site" ? "same-origin" : undefined),
+            json: async () => body,
+          },
+          json: (payload: any, status = 200) => {
+            out = { status, body: payload };
+            return out;
+          },
+        });
+        return out;
+      };
+      return {
+        pathways: rpc.pathways as (input: { slug: string; refresh?: boolean }) => Promise<ReturnType<typeof pathwaysViewSchema.parse>>,
+        post,
+        guideSpawns: () => guideSpawns,
+      };
+    };
+    const boot = async (linearApiKey: string) => (await bootWith(linearApiKey)).pathways;
+
+    const callNoKey = await boot("");
+    const local = pathwaysViewSchema.parse(await callNoKey({ slug: "alpha" }));
+    assert.equal(local.error, null);
+    assert.ok(local.map);
+    assert.equal(local.map.source, "orchestrator");
+    assert.ok(local.fetchedAt != null);
+    assert.equal(local.refreshing, false);
+    const byId = new Map(local.map.tickets.map((t) => [t.identifier, t]));
+    assert.equal(byId.get("STEP-1")?.displayState, "done");
+    assert.equal(byId.has("STEP-2"), false);
+    assert.equal(byId.get("STEP-3")?.displayState, "claimed");
+    assert.equal(byId.get("STEP-3")?.waitsOnYou, true);
+    assert.equal(byId.get("STEP-4")?.displayState, "blocked");
+    assert.equal(byId.get("STEP-5")?.displayState, "blocked");
+    assert.equal(byId.has("THR-1"), true);
+    assert.match(byId.get("THR-1")!.title, /Worker implementation/);
+    assert.match(byId.get("THR-1")!.title, /active/);
+    assert.equal(byId.has("THR-2"), false);
+    assert.equal(byId.get("THR-3")?.displayState, "unknown");
+    assert.notEqual(byId.get("THR-3")?.state.type, "completed");
+    assert.deepEqual(byId.get("THR-1")?.prLink.urls, ["https://github.com/acme/alpha/pull/42"]);
+    assert.deepEqual(byId.get("STEP-3")?.prLink.urls, ["https://github.com/acme/alpha/pull/43"]);
+    const cardTicket = byId.get(`CARD-${openCard.id.slice(-6)}`);
+    assert.ok(cardTicket);
+    assert.equal(cardTicket.displayState, "needs-you");
+    assert.equal(cardTicket.decision.cardId, openCard.id);
+    assert.deepEqual(cardTicket.decision.direct, ["STEP-3"]);
+    assert.deepEqual(cardTicket.decision.transitive, ["STEP-4", "STEP-5"]);
+    assert.ok(local.map.edges.some((e) => e.from === "STEP-1" && e.to === "STEP-3" && e.type === "blocks"));
+    assert.ok(local.map.edges.some((e) => e.from === "STEP-3" && e.to === "STEP-4" && e.type === "blocks"));
+    assert.ok(local.map.edges.some((e) => e.from === "STEP-4" && e.to === "STEP-5" && e.type === "blocks"));
+    assert.ok(local.map.edges.some((e) => e.from === cardTicket.identifier && e.to === "STEP-3" && e.type === "blocks"));
+    assert.ok(local.map.edges.some((e) => e.from === "STEP-3" && e.to === "THR-1" && e.type === "related"));
+    assert.deepEqual(local.map.firstPath, ["STEP-3", "STEP-4", "STEP-5"]);
+    assert.equal(local.map.ownerActions.length, 1);
+    assert.equal(local.map.ownerActions[0]?.identifier, cardTicket.identifier);
+    assert.equal(local.map.ownerActions[0]?.next, "STEP-3");
+    assert.equal(local.map.ownerActions[0]?.neededBefore, 1);
+    assert.deepEqual(local.map.fog, ["Waiting on staging key"]);
+    assert.ok(local.map.tickets.every((t) => t.decisionDraft === null));
+    assert.ok(local.retro);
+    assert.deepEqual(local.retro.finished.map((item) => item.label), ["STEP-1"]);
+    assert.deepEqual(local.retro.decisions.map((item) => item.id), [answeredCard.id]);
+
+    const emptyView = pathwaysViewSchema.parse(await callNoKey({ slug: "empty" }));
+    assert.equal(emptyView.error, null);
+    assert.ok(emptyView.map);
+    assert.equal(emptyView.map.source, "orchestrator");
+    assert.deepEqual(emptyView.map.tickets, []);
+    assert.deepEqual(emptyView.map.edges, []);
+    assert.deepEqual(emptyView.map.firstPath, []);
+    assert.equal(emptyView.retro, null);
+    engine.prSeen(leadEmpty, "env-lead-empty", { outcome: "available", pullRequest: { number: 77, url: "https://github.com/acme/empty/pull/77", state: "open", review: { state: "approved" }, checks: { state: "passing" }, mergeability: { state: "ready_to_merge" } } });
+    const prOnly = pathwaysViewSchema.parse(await callNoKey({ slug: "empty", refresh: true }));
+    assert.equal(prOnly.map?.tickets.some((t) => t.identifier === "PR-77"), true);
+    engine.prSeen(leadEmpty, "env-lead-empty-2", { outcome: "available", pullRequest: { number: 77, url: "https://github.com/acme/other/pull/77", state: "open", review: { state: "approved" }, checks: { state: "passing" }, mergeability: { state: "ready_to_merge" } } });
+    const prCollide = pathwaysViewSchema.parse(await callNoKey({ slug: "empty", refresh: true }));
+    assert.equal(new Set(prCollide.map?.tickets.map((t) => t.identifier)).size, 2);
+
+    writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha", linearProjectId: "proj-alpha" }));
+    const linkedNoKey = pathwaysViewSchema.parse(await callNoKey({ slug: "alpha", refresh: true }));
+    assert.equal(linkedNoKey.map?.source, "orchestrator");
+    assert.match(linkedNoKey.notice ?? "", /linearApiKey/);
+    writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha" }));
+
+    const callWithKeyNoLink = await boot("lin_api_test");
+    const noLink = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+    assert.equal(noLink.error, null);
+    assert.equal(noLink.map?.source, "orchestrator");
+    assert.deepEqual(noLink.map?.firstPath, ["STEP-3", "STEP-4", "STEP-5"]);
+
+    writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha", linearProjectId: "proj-alpha" }));
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({ errors: [{ message: "Unauthorized" }] }), { status: 401 })) as typeof fetch;
+    try {
+      const unauth = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+      assert.match(unauth.error ?? "", /linearApiKey/);
+      assert.match(unauth.error ?? "", /401/);
+      assert.equal(unauth.errorKind, "auth");
+      globalThis.fetch = (async () => new Response(JSON.stringify({ errors: [{ message: "Rate limit" }] }), { status: 429, headers: { "retry-after": "60" } })) as typeof fetch;
+      const rateLimited = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+      assert.match(rateLimited.error ?? "", /rate limit/i);
+      assert.match(rateLimited.error ?? "", /60s/);
+      assert.equal(rateLimited.errorKind, "rate-limit");
+      let sawSignal = false;
+      globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+        sawSignal = !!init?.signal;
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      }) as typeof fetch;
+      const timedOut = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+      assert.equal(sawSignal, true);
+      assert.match(timedOut.error ?? "", /timed out/i);
+      assert.equal(timedOut.errorKind, "timeout");
+      globalThis.fetch = (async () => new Response("Internal Server Error", { status: 500 })) as typeof fetch;
+      const serverErr = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+      assert.match(serverErr.error ?? "", /server error/i);
+      assert.match(serverErr.error ?? "", /500/);
+      assert.equal(serverErr.errorKind, "server");
+      globalThis.fetch = (async () => new Response(JSON.stringify({ errors: [{ message: "Entity not found" }] }), { status: 200 })) as typeof fetch;
+      const gqlErr = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+      assert.match(gqlErr.error ?? "", /Entity not found/);
+      assert.match(gqlErr.error ?? "", /proj-alpha/);
+      assert.equal(gqlErr.errorKind, "graphql");
+      globalThis.fetch = (async () => new Response(JSON.stringify({ data: { project: null } }), { status: 200 })) as typeof fetch;
+      const notFoundErr = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+      assert.match(notFoundErr.error ?? "", /proj-alpha/);
+      assert.match(notFoundErr.error ?? "", /projects\/alpha\/project\.json/);
+      assert.equal(notFoundErr.errorKind, "project-missing");
+      globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { query?: string; variables?: { id?: string } };
+        if (body.query?.includes("project(id:")) {
+          return new Response(JSON.stringify({ data: { project: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+            { identifier: "LIN-1", parent: null, labels: { nodes: [{ name: "wayfinder:map" }] } },
+            { identifier: "LIN-2", parent: { identifier: "LIN-1" }, labels: { nodes: [{ name: "wayfinder:task" }] } },
+          ] } } } }), { status: 200 });
+        }
+        const id = body.variables?.id ?? "LIN-1";
+        return new Response(JSON.stringify({ data: { issue: {
+          identifier: id, title: id === "LIN-1" ? "Linear Map" : "Linear Ticket", url: `https://linear.app/test/issue/${id}`,
+          description: "## Acceptance criteria\nDone.", updatedAt: "2026-11-19T20:00:00.000Z",
+          state: { type: "unstarted", name: "Todo" }, priority: 2, estimate: 1, assignee: null,
+          labels: { nodes: [{ name: id === "LIN-1" ? "wayfinder:map" : "wayfinder:task" }] },
+          parent: id === "LIN-1" ? null : { identifier: "LIN-1" },
+          attachments: { nodes: [] }, relations: { nodes: [] }, inverseRelations: { nodes: [] },
+        } } }), { status: 200 });
+      }) as typeof fetch;
+      const linearLive = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
+      assert.equal(linearLive.map?.identifier, "LIN-1");
+      const guidePayload = JSON.stringify({
+        framing: "Choose how to structure LIN-2 before coding.",
+        routes: [
+          { label: "Thin slice", approach: "Wire one vertical slice.", tradeoffs: "Fast feedback; limited scope.", risk: "low", reversible: "easy", size: "S", firstStep: "Add contract and test.", proof: "Unit test passes." },
+          { label: "Full rewrite", approach: "Replace the module wholesale.", tradeoffs: "Clean slate; higher blast radius.", risk: "high", reversible: "hard", size: "L", firstStep: "Design migration.", proof: "Staging soak." },
+        ],
+        recommended: 0,
+        why: "Smallest end-to-end slice and reversible.",
+        principles: [2, 3],
+        risks: ["Watch contract edge cases."],
+      });
+      globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { query?: string; variables?: { id?: string } };
+        if (body.query?.includes("project(id:")) {
+          return new Response(JSON.stringify({ data: { project: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+            { identifier: "LIN-1", parent: null, labels: { nodes: [{ name: "wayfinder:map" }] } },
+            { identifier: "LIN-2", parent: { identifier: "LIN-1" }, labels: { nodes: [{ name: "wayfinder:research" }] } },
+          ] } } } }), { status: 200 });
+        }
+        const id = body.variables?.id ?? "LIN-1";
+        return new Response(JSON.stringify({ data: { issue: {
+          identifier: id, title: id === "LIN-1" ? "Linear Map" : "Research choice", url: `https://linear.app/test/issue/${id}`,
+          description: "## Question\nWhich route?", updatedAt: "2026-11-19T20:00:00.000Z",
+          state: { type: "unstarted", name: "Todo" }, priority: 2, estimate: null, assignee: null,
+          labels: { nodes: [{ name: id === "LIN-1" ? "wayfinder:map" : "wayfinder:research" }] },
+          parent: id === "LIN-1" ? null : { identifier: "LIN-1" },
+          attachments: { nodes: [] }, relations: { nodes: [] }, inverseRelations: { nodes: [] },
+        } } }), { status: 200 });
+      }) as typeof fetch;
+      const guidedServer = await bootWith("lin_api_test", {}, guidePayload);
+      await guidedServer.pathways({ slug: "alpha", refresh: true });
+      const firstGuide = await guidedServer.post(WRITES.pathwaysGuide, { slug: "alpha", ticketId: "LIN-2" });
+      assert.equal(firstGuide.status, 200);
+      const parsedFirst = pathwaysGuideResultSchema.parse(firstGuide.body.result);
+      assert.equal(parsedFirst.cached, false);
+      assert.equal(parsedFirst.model, "claude-opus-5-5");
+      assert.equal(parsedFirst.guide?.recommended, 0);
+      assert.equal(guidedServer.guideSpawns(), 1);
+      const cachedGuide = await guidedServer.post(WRITES.pathwaysGuide, { slug: "alpha", ticketId: "LIN-2" });
+      assert.equal(pathwaysGuideResultSchema.parse(cachedGuide.body.result).cached, true);
+      assert.equal(guidedServer.guideSpawns(), 1);
+      const refreshedGuide = await guidedServer.post(WRITES.pathwaysGuide, { slug: "alpha", ticketId: "LIN-2", refresh: true });
+      assert.equal(pathwaysGuideResultSchema.parse(refreshedGuide.body.result).cached, false);
+      assert.equal(guidedServer.guideSpawns(), 2);
+      const missingModelServer = await bootWith("lin_api_test", { guideModel: "" }, guidePayload);
+      await missingModelServer.pathways({ slug: "alpha", refresh: true });
+      const missingRes = await missingModelServer.post(WRITES.pathwaysGuide, { slug: "alpha", ticketId: "LIN-2" });
+      assert.equal(missingRes.status, 200);
+      assert.match(pathwaysGuideResultSchema.parse(missingRes.body.result).error ?? "", /guideProvider and guideModel/);
+      assert.equal(missingModelServer.guideSpawns(), 0);
+      writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha" }));
+      const switchedToLocal = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: false }));
+      assert.equal(switchedToLocal.map?.source, "orchestrator");
+    } finally {
+      globalThis.fetch = realFetch;
+      writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha" }));
+    }
+
+    writeFileSync(join(root, "projects", "empty", "project.json"), "{bad-json");
+    const badRecord = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "empty", refresh: true }));
+    assert.equal(badRecord.map, null);
+    assert.match(badRecord.error ?? "", /Invalid JSON/);
+    assert.match(badRecord.error ?? "", /projects\/empty\/project\.json/);
+    assert.equal(badRecord.errorKind, "invalid-record");
+
+    db.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("a withdrawn Pathways card does not satisfy a later submit with the same key", () => {
@@ -240,6 +564,15 @@ test("frontier, claims, blockers, unknowns, fog, priority, and pagination", asyn
   assert.equal(selectPathwaysMap(mapCandidates, "MAP-1")?.identifier, "MAP-1");
   assert.equal(selectPathwaysMap(mapCandidates)?.identifier, "MAP-2");
   assert.equal(selectPathwaysMap(mapCandidates, "MISSING"), undefined);
+  const cyclic = pathwaysMap(map, [
+    issue("C-1", { inverseRelations: { nodes: [blockedBy("C-3")] } }),
+    issue("C-2", { inverseRelations: { nodes: [blockedBy("C-1")] } }),
+    issue("C-3", { inverseRelations: { nodes: [blockedBy("C-2")] } }),
+  ]);
+  assert.deepEqual(cyclic.cycles, [["C-1", "C-2", "C-3"]]);
+  const layer = (depth: number) => Array.from({ length: 6 }, (_, index) => `L${String(depth).padStart(2, "0")}-${index}`);
+  const dense = pathwaysMap(map, Array.from({ length: 16 }, (_, depth) => layer(depth).map((id) => issue(id, depth ? { inverseRelations: { nodes: layer(depth - 1).map((from) => blockedBy(from)) } } : {}))).flat());
+  assert.deepEqual(dense.firstPath, Array.from({ length: 16 }, (_, depth) => layer(depth)[0]));
 });
 
 test("an explicit linked PR block links the same card in decision preview and timeline", () => {
@@ -273,6 +606,26 @@ test("decision preview is read-only and submit is idempotent for the ticket ques
   assert.equal(submitPathwaysDecision(draft, deps), "d-one");
   assert.equal(created, 1);
   assert(draft.context.includes(child.url));
+  const { applyGuideToDraft, parseGuide } = await import("../core/pathways-guide.ts");
+  const parsed = parseGuide(JSON.stringify({
+    framing: "Decide where initial status data comes from.",
+    routes: [
+      { label: "Direct API", approach: "Call the upstream API directly.", tradeoffs: "Fresh data; coupled to upstream uptime.", risk: "medium", reversible: "easy", size: "M", firstStep: "Read one endpoint in a spike.", proof: "Curl returns live records." },
+      { label: "Cached mirror", approach: "Read from the existing local mirror.", tradeoffs: "Fast and resilient; slightly stale.", risk: "low", reversible: "easy", size: "S", firstStep: "Wire a read adapter with tests.", proof: "Unit test returns fixture rows." },
+    ],
+    recommended: 1,
+    why: "Smallest slice reusing the existing mirror.",
+    principles: [2, 9],
+    risks: ["Stale window must be shown."],
+  }));
+  assert.ok(parsed);
+  const guided = applyGuideToDraft(draft, parsed);
+  assert.deepEqual(guided.options, [
+    { label: "Cached mirror", detail: "Read from the existing local mirror." },
+    { label: "Direct API", detail: "Call the upstream API directly." },
+  ]);
+  assert.equal(submitPathwaysDecision(guided, deps), "d-one");
+  assert.equal(created, 1);
 });
 
 test("linked decision replaces the missing-decision reason", () => {

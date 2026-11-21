@@ -193,6 +193,136 @@ try {
       await shot(`${name}-after`);
       break;
     }
+    case "pathways-guide": {
+      const [slug, ticketId, name = "guide"] = args;
+      if (!slug || !ticketId) throw new Error("pathways-guide <slug> <ticketId> [name]");
+      const fixtureGuide = {
+        framing: "Decide how to validate session tokens locally and in CI without manual secret rotation.",
+        routes: [
+          {
+            label: "Static env key",
+            approach: "Read a long-lived API key from an environment variable.",
+            tradeoffs: "Trivial to wire; static credential rotation burden.",
+            risk: "medium",
+            reversible: "easy",
+            size: "S",
+            firstStep: "Add env lookup behind token adapter.",
+            proof: "Unit test passes with fixture key.",
+          },
+          {
+            label: "Scoped local key file",
+            approach: "Read a 0600 local key file behind a minimal provider interface.",
+            tradeoffs: "Fast vertical slice with clear file boundary; needs per-host setup.",
+            risk: "low",
+            reversible: "easy",
+            size: "S",
+            firstStep: "Implement 0600 file reader with permission check.",
+            proof: "Unit test rejects world-readable files and loads valid key.",
+          },
+          {
+            label: "Ephemeral OIDC broker",
+            approach: "Exchange workload identity for short-lived session tokens.",
+            tradeoffs: "No static secrets; requires broker infra before first user test.",
+            risk: "high",
+            reversible: "hard",
+            size: "L",
+            firstStep: "Spike token exchange against staging OIDC.",
+            proof: "Staging endpoint accepts minted token.",
+          },
+        ],
+        recommended: 1,
+        why: "Smallest verifiable slice with strong local boundary and easy upgrade path to OIDC.",
+        principles: [2, 3, 6, 8],
+        risks: ["Reject key files with permissions looser than 0600.", "Keep key contents out of logs and prompts."],
+      };
+      report.guideRequests = [];
+      const attachFakeGuide = async (targetPage) => {
+        await targetPage.route("**/api/v1/plugins/orchestrator/http/pathways/guide", async (route) => {
+          const req = route.request();
+          const body = JSON.parse(req.postData() || "{}");
+          report.guideRequests.push({ method: req.method(), body });
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({
+              ok: true,
+              result: {
+                guide: fixtureGuide,
+                error: null,
+                provider: "claude-code",
+                model: "claude-opus-5-5",
+                cached: false,
+              },
+            }),
+          });
+        });
+      };
+      const openTicketDetail = async (targetPage) => {
+        const url = `${base}/plugins/orchestrator/home/projects/${encodeURIComponent(slug)}?pathways=1`;
+        await targetPage.goto(url, { waitUntil: "load", timeout: 60_000 });
+        const toggle = targetPage.locator(`[data-pathways-toggle="${slug}"]`).first();
+        await toggle.waitFor({ timeout: 30_000 });
+        if ((await toggle.getAttribute("data-state")) !== "open" && (await toggle.getAttribute("aria-expanded")) !== "true") {
+          await toggle.click();
+        }
+        const ticketButton = targetPage.locator(`[data-pathways-row="${ticketId}"], [data-pathways-node="${ticketId}"]`).first();
+        await ticketButton.waitFor({ timeout: 30_000 });
+        await ticketButton.click();
+        await targetPage.locator(`[data-pathways-detail="${ticketId}"]`).waitFor({ timeout: 15_000 });
+      };
+
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await attachFakeGuide(page);
+      await openTicketDetail(page);
+      const detail = page.locator(`[data-pathways-detail="${ticketId}"]`);
+      await detail.locator("[data-pathways-guide-run]").waitFor({ timeout: 10_000 });
+      if ((await detail.locator("[data-pathways-guide-card]").count()) !== 0) {
+        throw new Error("guide auto-ran before clicking Guide me");
+      }
+      await detail.locator("[data-pathways-guide-run]").click();
+      await detail.locator("[data-pathways-guide-card]").waitFor({ timeout: 15_000 });
+      const routeCount = await detail.locator("[data-pathways-guide-route]").count();
+      if (routeCount !== 3) throw new Error(`expected 3 guide routes, got ${routeCount}`);
+      const notice = await detail.locator("[data-pathways-guide-notice]").textContent();
+      if (!notice?.includes("claude-opus-5-5")) throw new Error(`missing model notice: ${notice}`);
+      await page.waitForTimeout(250);
+      await page.screenshot({ path: join(out, `${name}-1280.png`) });
+      report.notes.push(`screenshot ${name}-1280.png`);
+      await detail.locator("[data-pathways-guide-apply]").click();
+      const opt0 = await detail.locator(`#${ticketId}-option-0`).inputValue();
+      const opt1 = await detail.locator(`#${ticketId}-option-1`).inputValue();
+      if (opt0 !== "Scoped local key file" || opt1 !== "Static env key") {
+        throw new Error(`unexpected applied draft options: ${JSON.stringify([opt0, opt1])}`);
+      }
+      await detail.locator(`#${ticketId}-option-0`).scrollIntoViewIfNeeded();
+      await page.waitForTimeout(200);
+      await page.screenshot({ path: join(out, `${name}-draft-1280.png`) });
+      report.notes.push(`screenshot ${name}-draft-1280.png`);
+
+      const mobilePage = await browser.newPage({ viewport: { width: 390, height: 844 } });
+      mobilePage.on("console", (m) => { if (m.type() === "error") report.console.push(m.text()); });
+      mobilePage.on("pageerror", (e) => report.console.push(String(e)));
+      try {
+        await attachFakeGuide(mobilePage);
+        await openTicketDetail(mobilePage);
+        const mobileDetail = mobilePage.locator(`[data-pathways-detail="${ticketId}"]`);
+        await mobileDetail.locator("[data-pathways-guide-run]").click();
+        await mobileDetail.locator("[data-pathways-guide-card]").waitFor({ timeout: 15_000 });
+        const overflow = await mobileDetail.evaluate((el) => el.scrollWidth > el.clientWidth + 1);
+        if (overflow) throw new Error("mobile guide detail overflows horizontally at 390px");
+        await mobilePage.waitForTimeout(250);
+        await mobilePage.screenshot({ path: join(out, `${name}-390.png`) });
+        report.notes.push(`screenshot ${name}-390.png`);
+        await mobileDetail.locator("[data-pathways-guide-apply]").click();
+        const mobileOpt0 = await mobileDetail.locator(`#${ticketId}-option-0`).inputValue();
+        if (mobileOpt0 !== "Scoped local key file") {
+          throw new Error(`unexpected mobile draft option: ${mobileOpt0}`);
+        }
+      } finally {
+        await mobilePage.close();
+      }
+      break;
+    }
     default:
       throw new Error(`unknown step ${step}`);
   }
