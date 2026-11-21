@@ -250,7 +250,7 @@ try {
                 guide: fixtureGuide,
                 error: null,
                 provider: "claude-code",
-                model: "claude-haiku-5-5",
+                model: "claude-opus-5-5",
                 cached: false,
               },
             }),
@@ -284,7 +284,7 @@ try {
       const routeCount = await detail.locator("[data-pathways-guide-route]").count();
       if (routeCount !== 3) throw new Error(`expected 3 guide routes, got ${routeCount}`);
       const notice = await detail.locator("[data-pathways-guide-notice]").textContent();
-      if (!notice?.includes("claude-haiku-5-5")) throw new Error(`missing model notice: ${notice}`);
+      if (!notice?.includes("claude-opus-5-5")) throw new Error(`missing model notice: ${notice}`);
       await page.waitForTimeout(250);
       await page.screenshot({ path: join(out, `${name}-1280.png`) });
       report.notes.push(`screenshot ${name}-1280.png`);

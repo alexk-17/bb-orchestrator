@@ -7,10 +7,10 @@ export { guideSchema, type PathwaysGuide };
 
 export const GUIDE_DEFAULTS = {
   provider: DEFAULT_PROVIDER,
-  model: "claude-haiku-5-5",
+  model: "claude-opus-5-5",
 } as const;
 
-export const GUIDE_MS = 60_000;
+export const GUIDE_MS = 120_000;
 export const GUIDE_DESC_MAX = 2000;
 const GUIDE_TITLE = "Pathways Guide";
 export const GUIDE_PARSE_ERROR = "The guide's answer didn't parse";

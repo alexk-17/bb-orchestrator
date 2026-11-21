@@ -79,7 +79,7 @@ Press **?** on the page for the full list.
 | `hiddenTabs` | empty | Tabs to hide, by id or label, comma-separated. |
 | `showGameBoy`, `showCloud` | off | Turn on Game Boy or Cloud (Tools). |
 | `linearApiKey`, `linearWorkspace` | empty | Optional Linear maps in Pathways, and Linear ids that link. |
-| `guideProvider`, `guideModel` | `claude-code`, `claude-haiku-5-5` | Provider and model for the on-demand Pathways Guide advisor. |
+| `guideProvider`, `guideModel` | `claude-code`, `claude-opus-5-5` | Provider and model for the on-demand Pathways Guide advisor. |
 | `githubLogin`, `reviewChannel` | empty | Open PRs and its review ask. |
 | `reviewQueueDryRun` | on | CodeRabbit's queue shows what it would post, and posts nothing. |
 | `pokemon` | off | A Pokémon per agent that evolves as it levels. |

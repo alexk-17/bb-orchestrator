@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { chooseWithProvider, parseChoice, pickerPrompt, PICKER_MS } from "../review-queue/picker.ts";
 import { initialState, QUEUE_MAX, type Entry, type Facts } from "../core/review-queue.ts";
 import { pathwaysMap } from "../core/pathways.ts";
-import { GUIDE_MS, GUIDE_PARSE_ERROR, parseGuide, runGuide } from "../core/pathways-guide.ts";
+import { GUIDE_DEFAULTS, GUIDE_MS, GUIDE_PARSE_ERROR, parseGuide, runGuide } from "../core/pathways-guide.ts";
 
 const facts = (n: number): Facts => ({
   url: `https://github.com/acme/secret-repo/pull/${n}`,
@@ -62,7 +62,7 @@ const guideMap = pathwaysMap(
   ],
 );
 const guideTicket = guideMap.tickets[0]!;
-const guideOpts = { provider: "claude-code", model: "claude-haiku-5-5", hostId: "m1", projectId: "proj" };
+const guideOpts = { provider: GUIDE_DEFAULTS.provider, model: GUIDE_DEFAULTS.model, hostId: "m1", projectId: "proj" };
 const validGuideJson = JSON.stringify({
   framing: "Pick an auth token source that works locally and in CI without manual rotation.",
   routes: [
@@ -136,7 +136,7 @@ function fakeSdk(opts: { wait?: () => Promise<unknown>; output?: string; models?
       models: async () => {
         log.push("models");
         if (opts.models === "fail") return { modelLoadError: { code: "offline" }, providers: [], models: [] };
-        return { modelLoadError: null, providers: [{ id: "claude-code", available: true }], models: [{ id: "claude-haiku-5-5", model: "claude-haiku-5-5" }] };
+        return { modelLoadError: null, providers: [{ id: "claude-code", available: true }], models: [{ id: "claude-haiku-5-5", model: "claude-haiku-5-5" }, { id: "claude-opus-5-5", model: "claude-opus-5-5" }] };
       },
     },
     threads: {
@@ -182,7 +182,10 @@ test("the picker thread runs in a personal folder, not a worktree, at the lowest
   assert.equal(ga.parentNotifications, "off");
   assert.deepEqual(ga.pluginMetadata, { pathwaysGuide: true });
   assert.ok(!("parentThreadId" in ga));
-  assert.deepEqual(gt.log, ["models", "spawn", `wait ${GUIDE_MS}`, "output", "stop", "archive"]);
+  assert.deepEqual(GUIDE_DEFAULTS, { provider: "claude-code", model: "claude-opus-5-5" });
+  assert.equal(GUIDE_MS, 120_000);
+  assert.equal(ga.model, "claude-opus-5-5");
+  assert.deepEqual(gt.log, ["models", "spawn", "wait 120000", "output", "stop", "archive"]);
 });
 
 test("a timeout or a failure still stops and archives the thread; a failed provider check spawns nothing", async () => {

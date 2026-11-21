@@ -133,7 +133,7 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
               return Promise.resolve({ title: null, status: "idle" });
             }
             if (key === "projects.list") return Promise.resolve([{ id: "bb-proj-1", name: "state", sources: [{ hostId: "h-1", path: join(root, "state"), isDefault: true }] }]);
-            if (key === "providers.models") return Promise.resolve({ modelLoadError: null, providers: [{ id: "claude-code", available: true }], models: [{ id: "claude-haiku-5-5", model: "claude-haiku-5-5" }] });
+            if (key === "providers.models") return Promise.resolve({ modelLoadError: null, providers: [{ id: "claude-code", available: true }], models: [{ id: "claude-opus-5-5", model: "claude-opus-5-5" }] });
             if (key === "threads.spawn") {
               guideSpawns++;
               return Promise.resolve({ id: `g-${guideSpawns}` });
@@ -354,6 +354,7 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
       assert.equal(firstGuide.status, 200);
       const parsedFirst = pathwaysGuideResultSchema.parse(firstGuide.body.result);
       assert.equal(parsedFirst.cached, false);
+      assert.equal(parsedFirst.model, "claude-opus-5-5");
       assert.equal(parsedFirst.guide?.recommended, 0);
       assert.equal(guidedServer.guideSpawns(), 1);
       const cachedGuide = await guidedServer.post(WRITES.pathwaysGuide, { slug: "alpha", ticketId: "LIN-2" });

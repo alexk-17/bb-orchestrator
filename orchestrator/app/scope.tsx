@@ -1008,7 +1008,7 @@ function PathwaysGuideView({
       const outcome = await stage(
         WRITES.pathwaysGuide,
         { slug, ticketId: ticket.identifier, ...(refresh ? { refresh: true } : {}) },
-        75_000,
+        135_000,
       );
       const fail = (error: string): PathwaysGuideResult => ({
         guide: null,
