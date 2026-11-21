@@ -102,6 +102,7 @@ import { OPEN_PRS_COPIED, OPEN_PRS_POST, openPrsCopiedBody, openPrsPostBody } fr
 import { registerReviewQueue } from "./review-queue/server.ts";
 import { queueSetUp } from "./core/review-queue.ts";
 import { shownUntilUsed } from "./app/hidden-tabs.ts";
+import { registerSlackWatch } from "./slack-watch/server.ts";
 import { registerMultiplayer } from "./multiplayer/server.ts";
 import { MULTIPLAYER_WRITES } from "./multiplayer/contract.ts";
 import { boardAddBody, boardRemoveBody } from "./multiplayer/core/boards.ts";
@@ -326,10 +327,15 @@ export default async function plugin(bb: BbPluginApi) {
     return { delivery: "sent" };
   }
 
+  let slackWatch: ReturnType<typeof registerSlackWatch> | undefined;
+  const effectiveRoutes = () => {
+    const legacy = integrationRoutes(cfg.integrationRoutes), watched = slackWatch?.routes() ?? {};
+    return { ...legacy, ...Object.fromEntries(Object.entries(watched).map(([source, to]) => [source, Object.hasOwn(legacy, source) ? [] : to])) };
+  };
   const engine = new Engine(
     db,
     { now: () => Date.now(), externalEnabled: (source, to) => {
-      try { allowImport(integrationRoutes(cfg.integrationRoutes), source, to); return true; }
+      try { allowImport(effectiveRoutes(), source, to); return true; }
       catch { return false; }
     }, deliver, mirror, changed, log: (m) => bb.log.warn(m), cardUp: (d) => void pushCard(d), delivered: (d) => void pushDelivered(d), files: () => ({ dir: join(stateDir(), "deliverables"), kept: join(stateDir(), "threads") }) },
     { escalateMs: cfg.escalateMinutes * 60_000, resendMs: cfg.resendMinutes * 60_000, owner: cfg.ownerName, pokemon: cfg.pokemon, batchInbox: cfg.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, cfg.inboxDebounceMs || 2000)), personas: loadPack(cfg.personaPack) },
@@ -337,7 +343,15 @@ export default async function plugin(bb: BbPluginApi) {
   const openPrs = registerOpenPrs(bb, engine, () => cfg);
   // after the engine, whose migrations made its tables; dry-run unless the setting is exactly false
   const reviewQueue = registerReviewQueue(bb, { db, dryRun: () => cfg.reviewQueueDryRun !== false });
-  const multiplayer = registerMultiplayer(bb, { db, engine, dir: join(dataDir, "multiplayer"), settings: () => cfg });
+  const multiplayer = registerMultiplayer(bb, { db, engine, dir: join(dataDir, "multiplayer"), settings: () => cfg, routes: effectiveRoutes });
+  slackWatch = registerSlackWatch(bb, {
+    db, dir: join(dataDir, "slack-watch"), legacyRoutes: () => integrationRoutes(cfg.integrationRoutes),
+    routeEnabled: (source, to) => { try { return effectiveRoutes()[source]?.includes(to) ?? false; } catch { return false; } },
+    recipient: address => { const a = engine.agentByAddress(address); return !!a && a.status !== "stopped"; },
+    importMail: mail => { const item = engine.importMail(mail); void flush(); return item; },
+    heartbeat: (source, everyMs) => multiplayer.heartbeat(source, everyMs),
+    audit: action => { engine.boardAdd("notice", "orchestrator", null, `CLI: ${action}`, "Operator changed a Slack watcher. Credentials and arguments are omitted.", null); },
+  });
   // ---------------------------------------------------------------- notifyOnlyOrchestrator (core/notify-only.ts)
   const PN = "push-notifications";
   const notifyOnly = serialReconcile(
@@ -2928,8 +2942,9 @@ export default async function plugin(bb: BbPluginApi) {
   bb.cli.register({
     name: "orchestrator",
     summary: "Roles, decisions and mail of the bb orchestrator",
-    commands: usage.map((u) => ({ name: u.split(" ")[2]!, summary: u, usage: u })),
+    commands: [...usage.map((u) => ({ name: u.split(" ")[2]!, summary: u, usage: u })), ...slackWatch.cli.commands!],
     async run(argv, ctx) {
+      if (argv[0] === "slack-watch") return slackWatch!.cli.run(argv, ctx);
       const out = (s: string, code = 0) => ({ exitCode: code, stdout: s.endsWith("\n") ? s : `${s}\n` });
       try {
         const [cmd, ...rest] = argv;
@@ -2961,6 +2976,7 @@ export default async function plugin(bb: BbPluginApi) {
               const { readFileSync, statSync } = await import("node:fs");
               if (statSync(rest[1]!).size > 65536) throw new EngineError("invalid", "external mail file exceeds 64 KiB");
               const mail = externalMailSchema.parse(JSON.parse(readFileSync(rest[1]!, "utf8")));
+              if (Object.hasOwn(slackWatch!.routes(), mail.source)) throw new EngineError("forbidden", "watcher sources are reserved for slack-watch");
               allowImport(integrationRoutes(cfg.integrationRoutes), mail.source, mail.to);
               const item = engine.importMail(mail);
               void flush();
@@ -2970,6 +2986,8 @@ export default async function plugin(bb: BbPluginApi) {
               return out(JSON.stringify(engine.externalReceipts(rest[1], Number(rest[2] ?? 0), Number(rest[3] ?? 100))));
             }
             if (rest[0] === "heartbeat" && rest[1] && !rest[1].startsWith("--")) {
+              if (Object.hasOwn(slackWatch!.routes(), rest[1]!)) throw new EngineError("forbidden", "watcher heartbeats require a completed scan");
+              allowImport(integrationRoutes(cfg.integrationRoutes), rest[1]!);
               const b = guard(() => multiplayer.heartbeat(rest[1]!, everyArg(rest)));
               return out(JSON.stringify({ source: b.source, lastAt: b.lastAt, everyMs: b.everyMs, reads: b.reads }));
             }

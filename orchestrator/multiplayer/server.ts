@@ -25,7 +25,7 @@ const RETRY_MS = 5 * 60_000;
 
 export function registerMultiplayer(
   bb: BbPluginApi,
-  deps: { db: Db; engine: Engine; dir: string; settings: () => MultiplayerSettings; fetch?: SlackFetch; now?: () => number },
+  deps: { db: Db; engine: Engine; dir: string; settings: () => MultiplayerSettings; routes?: () => Record<string, string[]>; fetch?: SlackFetch; now?: () => number },
 ) {
   const now = deps.now ?? Date.now;
   const store = new MultiplayerStore(deps.db, now);
@@ -43,7 +43,7 @@ export function registerMultiplayer(
   const slack = boardSlack(deps.fetch ?? (fetch as unknown as SlackFetch), changed, now);
   const routes = (): Record<string, string[]> => {
     try {
-      return integrationRoutes(deps.settings().integrationRoutes);
+      return deps.routes ? deps.routes() : integrationRoutes(deps.settings().integrationRoutes);
     } catch {
       return {};
     }

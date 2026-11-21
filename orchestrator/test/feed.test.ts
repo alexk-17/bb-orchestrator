@@ -351,7 +351,9 @@ test("the migration keys older direct messages to posts of their own", async () 
   const { MIGRATIONS } = await import("../core/db.ts");
   const db = new DatabaseSync(":memory:");
   db.exec(`CREATE TABLE _migrations (id INTEGER PRIMARY KEY)`);
-  MIGRATIONS.slice(0, -1).forEach((sql, i) => {
+  const feedMigration = MIGRATIONS.findIndex(sql => sql.startsWith("ALTER TABLE items ADD COLUMN about"));
+  assert.ok(feedMigration >= 0);
+  MIGRATIONS.slice(0, feedMigration).forEach((sql, i) => {
     db.exec(sql);
     db.prepare(`INSERT INTO _migrations (id) VALUES (?)`).run(i);
   });

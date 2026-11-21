@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import plugin from "../../server.ts";
+import { WatchStore } from "../../slack-watch/store.ts";
 import { Engine } from "../../core/engine.ts";
 import { WRITES, deliverablesSchema, outputsSchema, type Deliverables, type Outputs } from "../../contract.ts";
 import { inReview, onDeliverablesTab } from "../../app/kit.ts";
@@ -47,6 +48,7 @@ async function host(opts: { slackToken?: string; reviews?: Record<string, Review
   const tools = new Map<string, Tool>();
   const routes = new Map<string, Route>();
   let cli: Cli | null = null;
+  let settingsValues: any;
   const ghCalls: string[] = [];
   const noop: any = new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : noop), apply: () => noop });
   const sdk = {
@@ -72,6 +74,7 @@ async function host(opts: { slackToken?: string; reviews?: Record<string, Review
             define: (schema: Record<string, { default: unknown }>) => {
               const v: any = Object.fromEntries(Object.entries(schema).map(([key, d]) => [key, d.default]));
               Object.assign(v, { stateDir: join(root, "state"), projectsDir: join(root, "projects"), memoryConfig: "", prPollMinutes: 0, dreamsEnabled: false, cloudConfigPath: join(root, "no-cloud.json"), integrationRoutes: JSON.stringify({ [SOURCE]: ["lead:otter"] }), slackToken: opts.slackToken });
+              if ("integrationRoutes" in schema) settingsValues = v;
               return { get: async () => v, onChange: () => {} };
             },
           };
@@ -116,7 +119,7 @@ async function host(opts: { slackToken?: string; reviews?: Record<string, Review
   };
   const needs = async () => (await rpc.needsYou!({ zone: "UTC" })) as { cards: { id: string; rev: number }[] };
   const settle = () => new Promise((r) => setTimeout(r, 20));
-  return { raw, rpc, tools, post, tool, view, deliverables, needs, cli: () => cli!, ghCalls, settle, root };
+  return { raw, rpc, tools, post, tool, view, deliverables, needs, cli: () => cli!, ghCalls, settle, root, setRoutes: (value: string) => { settingsValues.integrationRoutes = value; } };
 }
 
 const idOf = (text: string, prefix: string) => new RegExp(`\\b(${prefix}-[a-f0-9]+)\\b`).exec(text)?.[1] ?? assert.fail(`no ${prefix} id in ${JSON.stringify(text)}`);
@@ -345,6 +348,14 @@ test("the heartbeat is the operator's: an agent can't fake a read, and an unknow
   assert.equal((await h.view()).boards[0]!.watch!.health.everyMs, 300_000);
   const board = h.raw.prepare(`SELECT COUNT(*) AS n FROM board WHERE title LIKE '%heartbeat%'`).get() as { n: number };
   assert.equal(board.n, 0, "a read every few minutes leaves no Board row");
+  const watchers = new WatchStore(h.raw);
+  watchers.add({ version: 1, profile: "test", paused: true, pollSeconds: 60, startFrom: "now", channels: [{ id: CH, source: "watcher-only", to: "cos" }] }, { team: "T1", bot: "B1", user: "U1" }, "100.000000");
+  assert.notEqual((await cli(["integration", "heartbeat", "watcher-only"], {})).exitCode, 0, "legacy CLI cannot fabricate watcher health");
+  h.setRoutes(JSON.stringify({ [SOURCE]: ["lead:otter"], "watcher-only": ["cos"] }));
+  const file = join(h.root, "import.json");
+  writeFileSync(file, JSON.stringify({ source: "watcher-only", id: "fake", to: "cos", sender: "fake", task: "t", severity: "INFO", summary: "fake", createdAt: 1 }));
+  assert.notEqual((await cli(["integration", "import", file], {})).exitCode, 0, "a later settings collision cannot impersonate the watcher's source");
+  assert.equal((h.raw.prepare("SELECT count(*) AS n FROM external_mail WHERE source='watcher-only'").get() as { n: number }).n, 0);
   h.raw.close();
 });
 
@@ -395,6 +406,10 @@ test("through the whole plugin, with a token, the tab calls Slack for nothing bu
     assert.deepEqual([v.boards[0]!.name, v.boards[0]!.from, v.boards[0]!.private, v.boards[0]!.setup], ["reviews", "slack", true, ASK]);
     assert.equal(v.records[0]!.asker?.name, "Robin", "askers by their Slack name");
     assert.deepEqual([...new Set(s.methods)].sort(), [...SLACK_READS].sort());
+    h.setRoutes("{invalid json");
+    const malformed = await h.view();
+    assert.equal(malformed.slack, true, "malformed routes cannot break independent token access");
+    assert.deepEqual(malformed.sources, []);
     h.raw.close();
   } finally {
     globalThis.fetch = real;

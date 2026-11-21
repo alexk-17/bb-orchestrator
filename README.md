@@ -258,3 +258,9 @@ bb plugin install path:$PWD/orchestrator   # run your checkout in bb; bb plugin 
 Pokémon and the Pokémon character names are trademarks of Nintendo, Creatures Inc. and GAME FREAK inc. Game Boy and
 Game Boy Advance are trademarks of Nintendo. Other names belong to their owners. This project is not affiliated with,
 sponsored by or endorsed by any of them; the names are used only to identify the things they refer to.
+
+### Inbound Slack bot watchers
+
+Onboard a personal bot with `bb orchestrator slack-watch setup`, route allowed channels to local inboxes, and track
+full-scan heartbeats in Multiplayer. Setup starts paused and the watcher never posts. See the
+[setup and troubleshooting guide](orchestrator/slack-watch/README.md).
