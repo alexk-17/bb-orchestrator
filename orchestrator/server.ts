@@ -2602,14 +2602,9 @@ export default async function plugin(bb: BbPluginApi) {
   write(WRITES.pathwaysGuide, pathwaysGuideBody, async (b): Promise<PathwaysGuideResult> => {
     const provider = (cfg.guideProvider ?? "").trim();
     const model = (cfg.guideModel ?? "").trim();
+    const fail = (error: string): PathwaysGuideResult => ({ guide: null, error, provider, model, cached: false });
     if (!provider || !model) {
-      return {
-        guide: null,
-        error: "Set both guideProvider and guideModel in Orchestrator plugin settings to use Pathways Guide.",
-        provider,
-        model,
-        cached: false,
-      };
+      return fail("Set both guideProvider and guideModel in Orchestrator plugin settings to use Pathways Guide.");
     }
     const snapshotMap = pathwaysSnapshots.peek(b.slug)?.value.map;
     const ticket = snapshotMap?.tickets.find((item) => item.identifier === b.ticketId);
@@ -2622,9 +2617,7 @@ export default async function plugin(bb: BbPluginApi) {
       const hit = pathwaysGuideCache.get(cacheKey);
       if (hit) return { guide: hit, error: null, provider, model, cached: true };
     }
-    if (pathwaysGuideRunning) {
-      return { guide: null, error: "A guide run is already in progress. Wait for it to finish.", provider, model, cached: false };
-    }
+    if (pathwaysGuideRunning) return fail("A guide run is already in progress. Wait for it to finish.");
     pathwaysGuideRunning = true;
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(new DOMException("Pathways Guide timed out", "TimeoutError")), GUIDE_MS + 5_000);
@@ -2633,7 +2626,7 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         target = await homeProject();
       } catch {
-        return { guide: null, error: "Pathways Guide needs a connected bb host and project.", provider, model, cached: false };
+        return fail("Pathways Guide needs a connected bb host and project.");
       }
       const res = await runGuide(
         bb.sdk as unknown as GuideSdk,
@@ -2642,30 +2635,24 @@ export default async function plugin(bb: BbPluginApi) {
         { provider, model, hostId: target.hostId, projectId: target.projectId, timeoutMs: GUIDE_MS },
         ctl.signal,
       );
-      if (res.guide) {
-        if (pathwaysGuideCache.size >= 64) {
-          const oldest = pathwaysGuideCache.keys().next().value;
-          if (oldest) pathwaysGuideCache.delete(oldest);
-        }
-        pathwaysGuideCache.set(cacheKey, res.guide);
-        return { guide: res.guide, error: null, provider, model, cached: false };
+      if (!res.guide) return fail(res.error);
+      if (pathwaysGuideCache.size >= 64) {
+        const oldest = pathwaysGuideCache.keys().next().value;
+        if (oldest) pathwaysGuideCache.delete(oldest);
       }
-      return { guide: null, error: res.error, provider, model, cached: false };
+      pathwaysGuideCache.set(cacheKey, res.guide);
+      return { guide: res.guide, error: null, provider, model, cached: false };
     } catch (e) {
       const message = errText(e);
       const timedOut = (e instanceof DOMException && e.name === "TimeoutError") || /timed out/i.test(message);
       const safeProviderErr = /^(provider |model |could not list |Pathways Guide needs )/i.test(message);
-      return {
-        guide: null,
-        error: timedOut
+      return fail(
+        timedOut
           ? "The guide timed out. Try Ask again."
           : safeProviderErr
             ? message
             : "The guide couldn't run right now. Check provider settings and try again.",
-        provider,
-        model,
-        cached: false,
-      };
+      );
     } finally {
       clearTimeout(timer);
       pathwaysGuideRunning = false;

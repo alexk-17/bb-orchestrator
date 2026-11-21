@@ -1010,27 +1010,19 @@ function PathwaysGuideView({
         { slug, ticketId: ticket.identifier, ...(refresh ? { refresh: true } : {}) },
         75_000,
       );
-      let next: PathwaysGuideResult;
-      if (!outcome.ok) {
-        next = {
-          guide: null,
-          error: outcome.message,
-          provider: guideConfig?.provider ?? "",
-          model: guideConfig?.model ?? "",
-          cached: false,
-        };
-      } else {
-        const parsed = pathwaysGuideResultSchema.safeParse(outcome.result);
-        next = parsed.success
+      const fail = (error: string): PathwaysGuideResult => ({
+        guide: null,
+        error,
+        provider: guideConfig?.provider ?? "",
+        model: guideConfig?.model ?? "",
+        cached: false,
+      });
+      const parsed = outcome.ok ? pathwaysGuideResultSchema.safeParse(outcome.result) : null;
+      const next = !outcome.ok
+        ? fail(outcome.message)
+        : parsed?.success
           ? parsed.data
-          : {
-              guide: null,
-              error: "The guide's answer didn't parse",
-              provider: guideConfig?.provider ?? "",
-              model: guideConfig?.model ?? "",
-              cached: false,
-            };
-      }
+          : fail("The guide's answer didn't parse");
       if (next.guide) {
         if (guideCache.size >= 32) {
           const oldest = guideCache.keys().next().value;
@@ -1046,7 +1038,6 @@ function PathwaysGuideView({
   };
 
   const guide = result?.guide ?? null;
-  const recommendedRoute = guide ? guide.routes[guide.recommended] : null;
 
   return (
     <div className="mt-2 grid min-w-0 gap-2 text-xs" data-pathways-guide={ticket.identifier}>
@@ -1132,15 +1123,15 @@ function PathwaysGuideView({
               </div>
             ))}
           </div>
-          {recommendedRoute && (
-            <div className="grid gap-1" data-pathways-guide-recommendation="">
-              <div className="font-medium text-muted-foreground">Recommended · {recommendedRoute.label}</div>
-              <p className="m-0 [overflow-wrap:anywhere]">{guide.why}</p>
-              <div className="text-muted-foreground">
-                Principles: {guide.principles.map((n) => `#${n}`).join(", ")}
-              </div>
+          <div className="grid gap-1" data-pathways-guide-recommendation="">
+            <div className="font-medium text-muted-foreground">
+              Recommended · {guide.routes[guide.recommended]!.label}
             </div>
-          )}
+            <p className="m-0 [overflow-wrap:anywhere]">{guide.why}</p>
+            <div className="text-muted-foreground">
+              Principles: {guide.principles.map((n) => `#${n}`).join(", ")}
+            </div>
+          </div>
           {guide.risks.length > 0 && (
             <div className="grid gap-1" data-pathways-guide-risks="">
               <div className="font-medium text-muted-foreground">Watch out</div>
@@ -1350,7 +1341,7 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
   const refreshSeen = useRef(false);
   const [retroOpen, setRetroOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [appliedDraftOptions, setAppliedDraftOptions] = useState<{ ticketId: string; options: { label: string; detail: string }[]; seq: number } | null>(null);
+  const [appliedDraftOptions, setAppliedDraftOptions] = useState<{ options: { label: string; detail: string }[]; seq: number } | null>(null);
   const configQuery = experimental_useRpcQuery({
     contract: rpcContract,
     method: "config",
@@ -1368,6 +1359,10 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
     if (selectedId === null) lastFocusedRef.current = document.activeElement;
     setAppliedDraftOptions(null);
     setSelectedId(id);
+  };
+  const closeDetail = () => {
+    setAppliedDraftOptions(null);
+    setSelectedId(null);
   };
   const [narrowWindow, setNarrowGraph] = useState(
     () => window.innerWidth < 1100,
@@ -2654,7 +2649,7 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
           <Dialog
             open={!!selected}
             onOpenChange={(open) => {
-              if (!open) setSelectedId(null);
+              if (!open) closeDetail();
             }}
           >
             <DialogContent
@@ -2694,7 +2689,7 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => { setAppliedDraftOptions(null); setSelectedId(null); }}
+                      onClick={closeDetail}
                     >
                       Close
                     </Button>
@@ -2794,7 +2789,6 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                       guideConfig={guideConfig}
                       onUseOptions={(options) =>
                         setAppliedDraftOptions((prev) => ({
-                          ticketId: selected.identifier,
                           options,
                           seq: (prev?.seq ?? 0) + 1,
                         }))
@@ -2804,11 +2798,7 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                       key={`draft-${selected.identifier}`}
                       ticket={selected}
                       slug={slug}
-                      appliedOptions={
-                        appliedDraftOptions?.ticketId === selected.identifier
-                          ? appliedDraftOptions
-                          : null
-                      }
+                      appliedOptions={appliedDraftOptions}
                       onSubmitted={() => {
                         setRefresh(true);
                         void q.refetch();

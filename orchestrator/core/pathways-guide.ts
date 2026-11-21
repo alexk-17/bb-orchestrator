@@ -1,15 +1,9 @@
 import { createHash } from "node:crypto";
-import {
-  guideDecisionOptions,
-  guideRouteSchema,
-  guideSchema,
-  type PathwaysGuide,
-  type PathwaysGuideRoute,
-} from "../contract.ts";
+import { guideDecisionOptions, guideSchema, type PathwaysGuide } from "../contract.ts";
 import type { PathwaysDecisionDraft, PathwaysMap, PathwaysTicket } from "./pathways.ts";
 import { DEFAULT_PROVIDER, spawnSelection } from "./provider.ts";
 
-export { guideDecisionOptions, guideRouteSchema, guideSchema, type PathwaysGuide, type PathwaysGuideRoute };
+export { guideSchema, type PathwaysGuide };
 
 export const GUIDE_DEFAULTS = {
   provider: DEFAULT_PROVIDER,
@@ -18,7 +12,7 @@ export const GUIDE_DEFAULTS = {
 
 export const GUIDE_MS = 60_000;
 export const GUIDE_DESC_MAX = 2000;
-export const GUIDE_TITLE = "Pathways Guide";
+const GUIDE_TITLE = "Pathways Guide";
 export const GUIDE_PARSE_ERROR = "The guide's answer didn't parse";
 export const TICKET_DATA_START = "<<<BEGIN TICKET DATA (UNTRUSTED)>>>";
 export const TICKET_DATA_END = "<<<END TICKET DATA>>>";
@@ -85,7 +79,7 @@ export type GuideSdk = {
   };
 };
 
-export type GuideRunOptions = {
+type GuideRunOptions = {
   provider: string;
   model: string;
   hostId: string;
@@ -93,13 +87,12 @@ export type GuideRunOptions = {
   timeoutMs?: number;
 };
 
-export type GuideRunResult =
+type GuideRunResult =
   | { guide: PathwaysGuide; error: null }
   | { guide: null; error: string };
 
 function sanitizeUntrusted(text: string): string {
   return text
-    .replace(/\r\n/g, "\n")
     .replace(/<<<\s*(?:BEGIN|END)\s+TICKET\s+DATA[^>]*>>>/gi, "[TICKET DATA MARKER]")
     .replace(/\b(?:BEGIN|END)\s+TICKET\s+DATA\b/gi, "[TICKET DATA MARKER]");
 }
@@ -110,7 +103,7 @@ function decisionQuestionOf(ticket: PathwaysTicket): string | null {
   return reason ? reason.slice("Question: ".length).trim() || null : null;
 }
 
-export function guideContext(ticket: PathwaysTicket, map: PathwaysMap) {
+function guideContext(ticket: PathwaysTicket, map: PathwaysMap) {
   const byId = new Map(map.tickets.map((item) => [item.identifier, item]));
   const externalById = new Map(map.external.map((item) => [item.identifier, item]));
   const labelOf = (id: string) => ({
@@ -192,7 +185,7 @@ export async function runGuide(
     throw new Error("Pathways Guide needs a connected bb host and project");
   }
   const abortError = () =>
-    signal.reason instanceof Error || signal.reason instanceof DOMException
+    signal.reason instanceof Error
       ? signal.reason
       : new DOMException("Aborted", "AbortError");
   const bounded = <T>(promise: Promise<T>): Promise<T> => {
@@ -217,16 +210,10 @@ export async function runGuide(
   const settleWithin = (promise: Promise<unknown>, ms: number) =>
     new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, ms);
-      promise.then(
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-      );
+      promise.catch(() => {}).finally(() => {
+        clearTimeout(timer);
+        resolve();
+      });
     });
   const close = async (threadId: string) => {
     await settleWithin(sdk.threads.stop({ threadId }), 5_000);

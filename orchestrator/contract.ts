@@ -617,7 +617,7 @@ export const watchMoveBody = z.object({ id: z.string().min(1).max(40), to: z.str
 export const watchDropBody = z.object({ id: z.string().min(1).max(40) }).strict();
 
 export const pathwaysDecisionSubmitBody = z.object({ slug: z.string().min(1).max(40), ticketId: z.string().min(1).max(40), question: z.string().min(1).max(600), options: z.array(z.object({ label: z.string().min(1).max(80), detail: z.string().max(300) }).strict()).min(2).max(4) }).strict();
-export const guideRouteSchema = z
+const guideRouteSchema = z
   .object({
     label: z.string().trim().min(1).max(60),
     approach: z.string().trim().min(1).max(300),
@@ -648,7 +648,6 @@ export const guideSchema = z
       });
     }
   });
-export type PathwaysGuideRoute = z.infer<typeof guideRouteSchema>;
 export type PathwaysGuide = z.infer<typeof guideSchema>;
 export const pathwaysGuideBody = z.object({ slug: z.string().min(1).max(40), ticketId: z.string().min(1).max(40), refresh: z.boolean().optional() }).strict();
 export const pathwaysGuideResultSchema = z
@@ -662,14 +661,9 @@ export const pathwaysGuideResultSchema = z
   .strict();
 export type PathwaysGuideResult = z.infer<typeof pathwaysGuideResultSchema>;
 export function guideDecisionOptions(guide: PathwaysGuide): { label: string; detail: string }[] {
-  const recommended = guide.routes[guide.recommended];
-  const ordered = recommended
-    ? [recommended, ...guide.routes.filter((_, index) => index !== guide.recommended)]
-    : guide.routes;
-  return ordered.map((route) => ({
-    label: route.label.slice(0, 80),
-    detail: route.approach.slice(0, 300),
-  }));
+  return [guide.routes[guide.recommended]!, ...guide.routes.filter((_, index) => index !== guide.recommended)].map(
+    (route) => ({ label: route.label, detail: route.approach }),
+  );
 }
 
 export const WRITES = {
