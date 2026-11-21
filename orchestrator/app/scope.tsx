@@ -16,13 +16,13 @@
 // 2026-11-17: while nothing in the entry waits on the owner, one status card stands where the cards would (who is
 // scoping, what they are on now, what is done so far, what comes next), in a slim column beside the chat when the pane
 // is wide, so no column stands blank. With anything waiting the entry is as before.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { select } from "d3-selection";
 import { zoom, zoomIdentity, type ZoomBehavior } from "d3-zoom";
 import type { z } from "zod";
 import { experimental_useRpcQuery, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { Check, ChevronRight, Hourglass, Minus, Plus, UserRound } from "lucide-react";
-import { WRITES, rpcContract, type Card, type Deliverables, type Projects, type Scope, type Pathways, type PathwaysErrorKind, type answerBody, type secretBody } from "../contract.ts";
+import { WRITES, guideDecisionOptions, pathwaysGuideResultSchema, rpcContract, type Card, type Deliverables, type Projects, type Scope, type Pathways, type PathwaysErrorKind, type PathwaysGuideResult, type answerBody, type secretBody } from "../contract.ts";
 import { layout } from "./diagram-layout.ts";
 import { openInBb } from "./open-proof.ts";
 import { ccCss } from "./cc-lines.tsx";
@@ -59,7 +59,7 @@ import { useElementWidth, usePaneFits } from "./panes.tsx";
 import { useMinute } from "./status-bar.tsx";
 import { useIdentity } from "./identity.ts";
 import { ownerOnScreen } from "../core/owner.ts";
-import { gate, gone, useGate, write, type Hide, type WriteKind } from "./store.ts";
+import { gate, gone, stage, useGate, write, type Hide, type WriteKind } from "./store.ts";
 import { Btn, EmptyState, ReadState } from "./ui.tsx";
 import { styleHref } from "./style-href.ts";
 
@@ -957,13 +957,235 @@ function PathwaysPrBadge({ ticket }: { ticket: PathwaysTicketView }) {
   return active.length ? <div>{active.map((entry) => <PathwaysPrItem key={entry.pr.url} ticket={ticket} entry={entry} />)}</div> : <span className="mt-1 block text-xs text-muted-foreground">No open linked PRs</span>;
 }
 
+let guideActiveKey: string | null = null;
+const guideListeners = new Set<() => void>();
+const guideCache = new Map<string, PathwaysGuideResult>();
+function emitGuide() {
+  for (const listener of guideListeners) listener();
+}
+const subscribeGuide = (listener: () => void) => {
+  guideListeners.add(listener);
+  return () => {
+    guideListeners.delete(listener);
+  };
+};
+function useGuideActive(): string | null {
+  return useSyncExternalStore(subscribeGuide, () => guideActiveKey);
+}
+
+function PathwaysGuideView({
+  ticket,
+  slug,
+  guideConfig,
+  onUseOptions,
+}: {
+  ticket: PathwaysTicketView;
+  slug: string;
+  guideConfig: { provider: string; model: string } | null;
+  onUseOptions: (options: { label: string; detail: string }[]) => void;
+}) {
+  const eligible = ticket.readiness.state === "needs decision" || !!ticket.decisionDraft;
+  const key = `${slug}:${ticket.identifier}`;
+  const cacheKey = `${key}:${ticket.title}:${ticket.description ?? ""}:${ticket.blockers.join(",")}`;
+  const activeKey = useGuideActive();
+  const runningHere = activeKey === key;
+  const busy = activeKey !== null;
+  const [result, setResult] = useState<PathwaysGuideResult | null>(() => guideCache.get(cacheKey) ?? null);
+  useEffect(() => {
+    setResult(guideCache.get(cacheKey) ?? null);
+  }, [cacheKey]);
+  if (!eligible) return null;
+  const missingConfig = guideConfig !== null && (!guideConfig.provider || !guideConfig.model);
+  const canUseOptions =
+    !!ticket.decisionDraft &&
+    !(ticket.decision.state === "linked" && ticket.decision.waiting && ticket.decision.cardId);
+
+  const ask = async (refresh: boolean) => {
+    if (guideActiveKey !== null || missingConfig) return;
+    guideActiveKey = key;
+    emitGuide();
+    try {
+      const outcome = await stage(
+        WRITES.pathwaysGuide,
+        { slug, ticketId: ticket.identifier, ...(refresh ? { refresh: true } : {}) },
+        75_000,
+      );
+      let next: PathwaysGuideResult;
+      if (!outcome.ok) {
+        next = {
+          guide: null,
+          error: outcome.message,
+          provider: guideConfig?.provider ?? "",
+          model: guideConfig?.model ?? "",
+          cached: false,
+        };
+      } else {
+        const parsed = pathwaysGuideResultSchema.safeParse(outcome.result);
+        next = parsed.success
+          ? parsed.data
+          : {
+              guide: null,
+              error: "The guide's answer didn't parse",
+              provider: guideConfig?.provider ?? "",
+              model: guideConfig?.model ?? "",
+              cached: false,
+            };
+      }
+      if (next.guide) {
+        if (guideCache.size >= 32) {
+          const oldest = guideCache.keys().next().value;
+          if (oldest) guideCache.delete(oldest);
+        }
+        guideCache.set(cacheKey, next);
+      }
+      setResult(next);
+    } finally {
+      guideActiveKey = null;
+      emitGuide();
+    }
+  };
+
+  const guide = result?.guide ?? null;
+  const recommendedRoute = guide ? guide.routes[guide.recommended] : null;
+
+  return (
+    <div className="mt-2 grid min-w-0 gap-2 text-xs" data-pathways-guide={ticket.identifier}>
+      {!guide && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            className="border"
+            data-pathways-guide-run=""
+            disabled={busy || missingConfig}
+            onClick={() => void ask(false)}
+          >
+            {runningHere ? "Thinking…" : "Guide me"}
+          </Button>
+          {result?.error && !runningHere && !missingConfig && (
+            <Button
+              variant="outline"
+              size="sm"
+              data-pathways-guide-refresh=""
+              disabled={busy}
+              onClick={() => void ask(true)}
+            >
+              Ask again
+            </Button>
+          )}
+        </div>
+      )}
+      {missingConfig && (
+        <p className="m-0 text-muted-foreground [overflow-wrap:anywhere]" data-pathways-guide-disabled="">
+          Set guideProvider and guideModel in Orchestrator plugin settings to use Pathways Guide.
+        </p>
+      )}
+      {runningHere && (
+        <div className="grid gap-1.5" data-pathways-guide-loading="">
+          <span className="text-muted-foreground">Asking the guide…</span>
+          <Skeleton className="h-4 w-3/4" />
+          <Skeleton className="h-4 w-1/2" />
+        </div>
+      )}
+      {busy && !runningHere && (
+        <p className="m-0 text-muted-foreground">Another guide run is already in progress on this page.</p>
+      )}
+      {result?.error && !runningHere && (
+        <Alert variant="destructive" data-pathways-guide-error="">
+          <AlertDescription className="text-xs [overflow-wrap:anywhere]">{result.error}</AlertDescription>
+        </Alert>
+      )}
+      {result && guide && !runningHere && (
+        <UiCard className="min-w-0 gap-2.5 px-3 py-3" data-pathways-guide-card="">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle className="text-sm">Pathways Guide</CardTitle>
+            <span className="text-muted-foreground [overflow-wrap:anywhere]" data-pathways-guide-notice="">
+              Advice from {result.provider} / {result.model} — you still decide{result.cached ? " · cached" : ""}
+            </span>
+          </div>
+          <div className="grid gap-1">
+            <div className="font-medium text-muted-foreground">Framing</div>
+            <p className="m-0 [overflow-wrap:anywhere]" data-pathways-guide-framing="">{guide.framing}</p>
+          </div>
+          <div className="grid gap-2">
+            <div className="font-medium text-muted-foreground">Routes</div>
+            {guide.routes.map((route, index) => (
+              <div
+                key={`${route.label}-${index}`}
+                className="grid min-w-0 gap-1.5 rounded-md border p-2.5"
+                data-pathways-guide-route={index}
+                data-recommended={index === guide.recommended ? "true" : "false"}
+              >
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="font-medium [overflow-wrap:anywhere]">{route.label}</span>
+                  {index === guide.recommended && <Badge variant="secondary">Recommended</Badge>}
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  <Badge variant="outline">Risk: {route.risk}</Badge>
+                  <Badge variant="outline">Reversible: {route.reversible}</Badge>
+                  <Badge variant="outline">Size: {route.size}</Badge>
+                </div>
+                <p className="m-0 [overflow-wrap:anywhere]">{route.approach}</p>
+                <p className="m-0 text-muted-foreground [overflow-wrap:anywhere]">Tradeoffs: {route.tradeoffs}</p>
+                <p className="m-0 [overflow-wrap:anywhere]">First step: {route.firstStep}</p>
+                <p className="m-0 text-muted-foreground [overflow-wrap:anywhere]">Proof: {route.proof}</p>
+              </div>
+            ))}
+          </div>
+          {recommendedRoute && (
+            <div className="grid gap-1" data-pathways-guide-recommendation="">
+              <div className="font-medium text-muted-foreground">Recommended · {recommendedRoute.label}</div>
+              <p className="m-0 [overflow-wrap:anywhere]">{guide.why}</p>
+              <div className="text-muted-foreground">
+                Principles: {guide.principles.map((n) => `#${n}`).join(", ")}
+              </div>
+            </div>
+          )}
+          {guide.risks.length > 0 && (
+            <div className="grid gap-1" data-pathways-guide-risks="">
+              <div className="font-medium text-muted-foreground">Watch out</div>
+              <ul className="m-0 grid gap-1 pl-4">
+                {guide.risks.map((risk, index) => (
+                  <li key={index} className="[overflow-wrap:anywhere]">{risk}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div className="flex flex-wrap gap-2 pt-1">
+            {canUseOptions && (
+              <Button
+                size="sm"
+                data-pathways-guide-apply=""
+                onClick={() => onUseOptions(guideDecisionOptions(guide))}
+              >
+                Use these as the decision options
+              </Button>
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              data-pathways-guide-refresh=""
+              disabled={busy || missingConfig}
+              onClick={() => void ask(true)}
+            >
+              Ask again
+            </Button>
+          </div>
+        </UiCard>
+      )}
+    </div>
+  );
+}
+
 function PathwaysDecisionDraftView({
   ticket,
   slug,
+  appliedOptions,
   onSubmitted,
 }: {
   ticket: PathwaysTicketView;
   slug: string;
+  appliedOptions?: { options: { label: string; detail: string }[]; seq: number } | null;
   onSubmitted: () => void;
 }) {
   const draft = ticket.decisionDraft;
@@ -972,6 +1194,11 @@ function PathwaysDecisionDraftView({
     draft?.options ?? [],
   );
   const [submitted, setSubmitted] = useState<string | null>(null);
+  useEffect(() => {
+    if (!appliedOptions) return;
+    setOptions(appliedOptions.options);
+    setOpen(true);
+  }, [appliedOptions?.seq]);
   if (
     ticket.decision.state === "linked" &&
     ticket.decision.waiting &&
@@ -1123,9 +1350,23 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
   const refreshSeen = useRef(false);
   const [retroOpen, setRetroOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [appliedDraftOptions, setAppliedDraftOptions] = useState<{ ticketId: string; options: { label: string; detail: string }[]; seq: number } | null>(null);
+  const configQuery = experimental_useRpcQuery({
+    contract: rpcContract,
+    method: "config",
+    input: null,
+  });
+  const guideConfig =
+    configQuery.data && ("guideProvider" in configQuery.data || "guideModel" in configQuery.data)
+      ? {
+          provider: (configQuery.data.guideProvider ?? "").trim(),
+          model: (configQuery.data.guideModel ?? "").trim(),
+        }
+      : null;
   const lastFocusedRef = useRef<Element | null>(null);
   const openDetail = (id: string) => {
     if (selectedId === null) lastFocusedRef.current = document.activeElement;
+    setAppliedDraftOptions(null);
     setSelectedId(id);
   };
   const [narrowWindow, setNarrowGraph] = useState(
@@ -2453,7 +2694,7 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setSelectedId(null)}
+                      onClick={() => { setAppliedDraftOptions(null); setSelectedId(null); }}
                     >
                       Close
                     </Button>
@@ -2546,9 +2787,28 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                       ticket={selected}
                       tickets={tickets}
                     />
-                    <PathwaysDecisionDraftView
+                    <PathwaysGuideView
+                      key={`guide-${selected.identifier}`}
                       ticket={selected}
                       slug={slug}
+                      guideConfig={guideConfig}
+                      onUseOptions={(options) =>
+                        setAppliedDraftOptions((prev) => ({
+                          ticketId: selected.identifier,
+                          options,
+                          seq: (prev?.seq ?? 0) + 1,
+                        }))
+                      }
+                    />
+                    <PathwaysDecisionDraftView
+                      key={`draft-${selected.identifier}`}
+                      ticket={selected}
+                      slug={slug}
+                      appliedOptions={
+                        appliedDraftOptions?.ticketId === selected.identifier
+                          ? appliedDraftOptions
+                          : null
+                      }
                       onSubmitted={() => {
                         setRefresh(true);
                         void q.refetch();

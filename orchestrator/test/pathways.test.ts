@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { Engine } from "../core/engine.ts";
 import { attachPathwaysPreflight, fogBullets, linkPathwaysDecisions, mapPathwaysLimited, pathwaysMap, projectIssues, selectPathwaysMap, summarizePathwaysRetro, type PathwaysIssue } from "../core/pathways.ts";
 import { createPathwaysSnapshots, type PathwaysSnapshot } from "../core/pathways-snapshot.ts";
-import { pathwaysViewSchema, type Pathways } from "../contract.ts";
+import { WRITES, pathwaysGuideResultSchema, pathwaysViewSchema, type Pathways } from "../contract.ts";
 import plugin from "../server.ts";
 
 test("Pathways detail reads cap concurrency and preserve order; the last map is served while a refresh runs", async () => {
@@ -117,18 +117,29 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
     engine.prSeen(thr1, "env-thr-1", { outcome: "available", pullRequest: { number: 42, url: "https://github.com/acme/alpha/pull/42", state: "open", review: { state: "review_required" }, checks: { state: "passing" }, mergeability: { state: "ready_to_merge" } } });
     engine.prSeen(leadAlpha, "env-lead-alpha", { outcome: "available", pullRequest: { number: 43, url: "https://github.com/acme/alpha/pull/43", state: "open", review: { state: "approved" }, checks: { state: "passing" }, mergeability: { state: "ready_to_merge" } } });
 
-    const boot = async (linearApiKey: string) => {
+    const bootWith = async (linearApiKey: string, extraSettings: Record<string, unknown> = {}, guideOutput?: string) => {
       const rpc: Record<string, (input: unknown) => Promise<unknown>> = {};
+      const posts = new Map<string, (c: any) => Promise<any>>();
+      let guideSpawns = 0;
       const noop: any = new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : noop), apply: () => noop });
       const sdk = (path: string[]): any =>
         new Proxy(function () {}, {
           get: (_t, k) => (k === "then" ? undefined : sdk([...path, String(k)])),
           apply: (_t, _this, args: any[]) => {
-            if (path.join(".") === "threads.get") {
+            const key = path.join(".");
+            if (key === "threads.get") {
               if (args[0]?.threadId === "T-thr-1") return Promise.resolve({ title: "Worker implementation", status: "active" });
               if (args[0]?.threadId === "T-thr-3") return Promise.resolve({ title: "Stopped worker", status: "stopped" });
               return Promise.resolve({ title: null, status: "idle" });
             }
+            if (key === "projects.list") return Promise.resolve([{ id: "bb-proj-1", name: "state", sources: [{ hostId: "h-1", path: join(root, "state"), isDefault: true }] }]);
+            if (key === "providers.models") return Promise.resolve({ modelLoadError: null, providers: [{ id: "claude-code", available: true }], models: [{ id: "claude-haiku-5-5", model: "claude-haiku-5-5" }] });
+            if (key === "threads.spawn") {
+              guideSpawns++;
+              return Promise.resolve({ id: `g-${guideSpawns}` });
+            }
+            if (key === "threads.wait") return Promise.resolve({ matched: true });
+            if (key === "threads.output") return Promise.resolve({ output: guideOutput ?? "" });
             return Promise.resolve({});
           },
         });
@@ -141,21 +152,44 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
               return {
                 define: (schema: Record<string, { default: unknown }>) => {
                   const v: any = Object.fromEntries(Object.entries(schema).map(([key, d]) => [key, d.default]));
-                  Object.assign(v, { stateDir: join(root, "state"), projectsDir: join(root, "projects"), memoryConfig: "", diskPath: root, linearApiKey });
+                  Object.assign(v, { stateDir: join(root, "state"), projectsDir: join(root, "projects"), memoryConfig: "", diskPath: root, linearApiKey, ...extraSettings });
                   return { get: async () => v, onChange: () => {} };
                 },
               };
             if (k === "storage") return { database: () => db, kv: noop };
             if (k === "sdk") return sdk([]);
             if (k === "rpc") return { register: (_c: unknown, h: typeof rpc) => Object.assign(rpc, h) };
+            if (k === "http") return { route: (method: string, routePath: string, fn: (c: any) => Promise<any>) => { if (method === "POST") posts.set(routePath, fn); } };
+            if (k === "server") return { experimental_appUrl: null, loopbackBaseUrl: "http://127.0.0.1:39993" };
             if (k === "log") return { info: () => {}, warn: () => {}, error: () => {} };
             return noop;
           },
         },
       );
       await plugin(bb);
-      return rpc.pathways as (input: { slug: string; refresh?: boolean }) => Promise<ReturnType<typeof pathwaysViewSchema.parse>>;
+      const post = async (routePath: string, body: unknown) => {
+        const handler = posts.get(routePath)!;
+        let out: { status: number; body: any } = { status: 200, body: null };
+        await handler({
+          req: {
+            url: `http://127.0.0.1:39993/api/v1/plugins/orchestrator/http${routePath}`,
+            header: (name: string) => (name.toLowerCase() === "origin" ? "http://127.0.0.1:39993" : name.toLowerCase() === "sec-fetch-site" ? "same-origin" : undefined),
+            json: async () => body,
+          },
+          json: (payload: any, status = 200) => {
+            out = { status, body: payload };
+            return out;
+          },
+        });
+        return out;
+      };
+      return {
+        pathways: rpc.pathways as (input: { slug: string; refresh?: boolean }) => Promise<ReturnType<typeof pathwaysViewSchema.parse>>,
+        post,
+        guideSpawns: () => guideSpawns,
+      };
     };
+    const boot = async (linearApiKey: string) => (await bootWith(linearApiKey)).pathways;
 
     const callNoKey = await boot("");
     const local = pathwaysViewSchema.parse(await callNoKey({ slug: "alpha" }));
@@ -285,6 +319,55 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
       }) as typeof fetch;
       const linearLive = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: true }));
       assert.equal(linearLive.map?.identifier, "LIN-1");
+      const guidePayload = JSON.stringify({
+        framing: "Choose how to structure LIN-2 before coding.",
+        routes: [
+          { label: "Thin slice", approach: "Wire one vertical slice.", tradeoffs: "Fast feedback; limited scope.", risk: "low", reversible: "easy", size: "S", firstStep: "Add contract and test.", proof: "Unit test passes." },
+          { label: "Full rewrite", approach: "Replace the module wholesale.", tradeoffs: "Clean slate; higher blast radius.", risk: "high", reversible: "hard", size: "L", firstStep: "Design migration.", proof: "Staging soak." },
+        ],
+        recommended: 0,
+        why: "Smallest end-to-end slice and reversible.",
+        principles: [2, 3],
+        risks: ["Watch contract edge cases."],
+      });
+      globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { query?: string; variables?: { id?: string } };
+        if (body.query?.includes("project(id:")) {
+          return new Response(JSON.stringify({ data: { project: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
+            { identifier: "LIN-1", parent: null, labels: { nodes: [{ name: "wayfinder:map" }] } },
+            { identifier: "LIN-2", parent: { identifier: "LIN-1" }, labels: { nodes: [{ name: "wayfinder:research" }] } },
+          ] } } } }), { status: 200 });
+        }
+        const id = body.variables?.id ?? "LIN-1";
+        return new Response(JSON.stringify({ data: { issue: {
+          identifier: id, title: id === "LIN-1" ? "Linear Map" : "Research choice", url: `https://linear.app/test/issue/${id}`,
+          description: "## Question\nWhich route?", updatedAt: "2026-11-19T20:00:00.000Z",
+          state: { type: "unstarted", name: "Todo" }, priority: 2, estimate: null, assignee: null,
+          labels: { nodes: [{ name: id === "LIN-1" ? "wayfinder:map" : "wayfinder:research" }] },
+          parent: id === "LIN-1" ? null : { identifier: "LIN-1" },
+          attachments: { nodes: [] }, relations: { nodes: [] }, inverseRelations: { nodes: [] },
+        } } }), { status: 200 });
+      }) as typeof fetch;
+      const guidedServer = await bootWith("lin_api_test", {}, guidePayload);
+      await guidedServer.pathways({ slug: "alpha", refresh: true });
+      const firstGuide = await guidedServer.post(WRITES.pathwaysGuide, { slug: "alpha", ticketId: "LIN-2" });
+      assert.equal(firstGuide.status, 200);
+      const parsedFirst = pathwaysGuideResultSchema.parse(firstGuide.body.result);
+      assert.equal(parsedFirst.cached, false);
+      assert.equal(parsedFirst.guide?.recommended, 0);
+      assert.equal(guidedServer.guideSpawns(), 1);
+      const cachedGuide = await guidedServer.post(WRITES.pathwaysGuide, { slug: "alpha", ticketId: "LIN-2" });
+      assert.equal(pathwaysGuideResultSchema.parse(cachedGuide.body.result).cached, true);
+      assert.equal(guidedServer.guideSpawns(), 1);
+      const refreshedGuide = await guidedServer.post(WRITES.pathwaysGuide, { slug: "alpha", ticketId: "LIN-2", refresh: true });
+      assert.equal(pathwaysGuideResultSchema.parse(refreshedGuide.body.result).cached, false);
+      assert.equal(guidedServer.guideSpawns(), 2);
+      const missingModelServer = await bootWith("lin_api_test", { guideModel: "" }, guidePayload);
+      await missingModelServer.pathways({ slug: "alpha", refresh: true });
+      const missingRes = await missingModelServer.post(WRITES.pathwaysGuide, { slug: "alpha", ticketId: "LIN-2" });
+      assert.equal(missingRes.status, 200);
+      assert.match(pathwaysGuideResultSchema.parse(missingRes.body.result).error ?? "", /guideProvider and guideModel/);
+      assert.equal(missingModelServer.guideSpawns(), 0);
       writeFileSync(join(root, "projects", "alpha", "project.json"), JSON.stringify({ slug: "alpha" }));
       const switchedToLocal = pathwaysViewSchema.parse(await callWithKeyNoLink({ slug: "alpha", refresh: false }));
       assert.equal(switchedToLocal.map?.source, "orchestrator");
@@ -522,6 +605,26 @@ test("decision preview is read-only and submit is idempotent for the ticket ques
   assert.equal(submitPathwaysDecision(draft, deps), "d-one");
   assert.equal(created, 1);
   assert(draft.context.includes(child.url));
+  const { applyGuideToDraft, parseGuide } = await import("../core/pathways-guide.ts");
+  const parsed = parseGuide(JSON.stringify({
+    framing: "Decide where initial status data comes from.",
+    routes: [
+      { label: "Direct API", approach: "Call the upstream API directly.", tradeoffs: "Fresh data; coupled to upstream uptime.", risk: "medium", reversible: "easy", size: "M", firstStep: "Read one endpoint in a spike.", proof: "Curl returns live records." },
+      { label: "Cached mirror", approach: "Read from the existing local mirror.", tradeoffs: "Fast and resilient; slightly stale.", risk: "low", reversible: "easy", size: "S", firstStep: "Wire a read adapter with tests.", proof: "Unit test returns fixture rows." },
+    ],
+    recommended: 1,
+    why: "Smallest slice reusing the existing mirror.",
+    principles: [2, 9],
+    risks: ["Stale window must be shown."],
+  }));
+  assert.ok(parsed);
+  const guided = applyGuideToDraft(draft, parsed);
+  assert.deepEqual(guided.options, [
+    { label: "Cached mirror", detail: "Read from the existing local mirror." },
+    { label: "Direct API", detail: "Call the upstream API directly." },
+  ]);
+  assert.equal(submitPathwaysDecision(guided, deps), "d-one");
+  assert.equal(created, 1);
 });
 
 test("linked decision replaces the missing-decision reason", () => {

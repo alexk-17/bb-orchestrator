@@ -16,6 +16,7 @@ import { projectIssues, pathwaysMap, linkPathwaysDecisions, attachPathwaysPrefli
 import { collectPathwaysProofRecords, reducePathwaysPr, reducePathwaysProof, reducePathwaysWaitLane } from "./core/pathways-pr.ts";
 import { createPathwaysSnapshots, type PathwaysSnapshot, type PathwaysView } from "./core/pathways-snapshot.ts";
 import { localPathwaysMap } from "./core/pathways-local.ts";
+import { GUIDE_DEFAULTS, GUIDE_MS, guideCacheKey, runGuide, type GuideSdk } from "./core/pathways-guide.ts";
 import type { FeedPrompt } from "./core/feed.ts";
 import { type DeliverPlace, type OutputPlace, type ProofInput, SCOPING_SUMMARY_MAX, SCOPING_TASK_NAME_MAX, SECRET_TTL_MS } from "./core/engine.ts";
 import { deliverBlocks, deliverPoints, fromJson, inputBlocksSchema, lessTextRefusal, looksLikeCode } from "./blocks.ts";
@@ -68,6 +69,9 @@ import {
   watchMoveBody,
   watchRetargetBody,
   pathwaysDecisionSubmitBody,
+  pathwaysGuideBody,
+  type PathwaysGuide,
+  type PathwaysGuideResult,
   WRITES,
   type Card,
   type Watchers,
@@ -227,6 +231,8 @@ export default async function plugin(bb: BbPluginApi) {
     aiPlayerSessionCalls: { type: "number", label: "Game Boy AI player: calls per session (one toggle-on)", default: 100 },
     aiPlayerDayCalls: { type: "number", label: "Game Boy AI player: calls per day (UTC)", default: 500 },
     linearApiKey: { type: "string", secret: true, label: "Pathways: Linear personal API key" },
+    guideProvider: { type: "string", label: "Pathways Guide: provider", default: GUIDE_DEFAULTS.provider },
+    guideModel: { type: "string", label: "Pathways Guide: model", default: GUIDE_DEFAULTS.model },
   });
   // The retired name of cosCompactTokens: never carried over, only unset (retireClearSetting).
   const retired = bb.settings.define({
@@ -2108,6 +2114,8 @@ export default async function plugin(bb: BbPluginApi) {
         linearTeams: cfg.linearTeams.split(",").map((t) => t.trim()).filter(Boolean),
         hiddenTabs: cfg.hiddenTabs.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean),
         shown: shownUntilUsed({ boards: multiplayer.store.boards().length, queueSetUp: queueSetUp(reviewQueue.store.get(), cfg.reviewQueueDryRun !== false), gameboy: cfg.showGameBoy === true, cloud: cfg.showCloud === true }),
+        guideProvider: (cfg.guideProvider ?? "").trim(),
+        guideModel: (cfg.guideModel ?? "").trim(),
       };
     },
     async needsYou({ zone }) {
@@ -2588,6 +2596,80 @@ export default async function plugin(bb: BbPluginApi) {
     const id = submitPathwaysDecision(draft, { existing: (key) => engine.decisionByRequestKey(lead.address, key)?.id ?? null, create: (key, value) => engine.ask(lead, { title: value.title, question: value.question, context: value.context, options: value.options, key }).id });
     pathwaysSnapshots.markStale(b.slug);
     return id;
+  });
+  const pathwaysGuideCache = new Map<string, PathwaysGuide>();
+  let pathwaysGuideRunning = false;
+  write(WRITES.pathwaysGuide, pathwaysGuideBody, async (b): Promise<PathwaysGuideResult> => {
+    const provider = (cfg.guideProvider ?? "").trim();
+    const model = (cfg.guideModel ?? "").trim();
+    if (!provider || !model) {
+      return {
+        guide: null,
+        error: "Set both guideProvider and guideModel in Orchestrator plugin settings to use Pathways Guide.",
+        provider,
+        model,
+        cached: false,
+      };
+    }
+    const snapshotMap = pathwaysSnapshots.peek(b.slug)?.value.map;
+    const ticket = snapshotMap?.tickets.find((item) => item.identifier === b.ticketId);
+    if (!snapshotMap || !ticket) throw new EngineError("not_found", "Project or ticket not found; refresh Pathways");
+    if (ticket.readiness.state !== "needs decision" && !ticket.decisionDraft) {
+      throw new EngineError("bad_state", "Pathways Guide is only available for tickets that need a decision");
+    }
+    const cacheKey = guideCacheKey(ticket, snapshotMap, provider, model);
+    if (!b.refresh) {
+      const hit = pathwaysGuideCache.get(cacheKey);
+      if (hit) return { guide: hit, error: null, provider, model, cached: true };
+    }
+    if (pathwaysGuideRunning) {
+      return { guide: null, error: "A guide run is already in progress. Wait for it to finish.", provider, model, cached: false };
+    }
+    pathwaysGuideRunning = true;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(new DOMException("Pathways Guide timed out", "TimeoutError")), GUIDE_MS + 5_000);
+    try {
+      let target: { projectId: string; hostId: string };
+      try {
+        target = await homeProject();
+      } catch {
+        return { guide: null, error: "Pathways Guide needs a connected bb host and project.", provider, model, cached: false };
+      }
+      const res = await runGuide(
+        bb.sdk as unknown as GuideSdk,
+        ticket,
+        snapshotMap,
+        { provider, model, hostId: target.hostId, projectId: target.projectId, timeoutMs: GUIDE_MS },
+        ctl.signal,
+      );
+      if (res.guide) {
+        if (pathwaysGuideCache.size >= 64) {
+          const oldest = pathwaysGuideCache.keys().next().value;
+          if (oldest) pathwaysGuideCache.delete(oldest);
+        }
+        pathwaysGuideCache.set(cacheKey, res.guide);
+        return { guide: res.guide, error: null, provider, model, cached: false };
+      }
+      return { guide: null, error: res.error, provider, model, cached: false };
+    } catch (e) {
+      const message = errText(e);
+      const timedOut = (e instanceof DOMException && e.name === "TimeoutError") || /timed out/i.test(message);
+      const safeProviderErr = /^(provider |model |could not list |Pathways Guide needs )/i.test(message);
+      return {
+        guide: null,
+        error: timedOut
+          ? "The guide timed out. Try Ask again."
+          : safeProviderErr
+            ? message
+            : "The guide couldn't run right now. Check provider settings and try again.",
+        provider,
+        model,
+        cached: false,
+      };
+    } finally {
+      clearTimeout(timer);
+      pathwaysGuideRunning = false;
+    }
   });
   write(WRITES.answer, answerBody, (b) =>
     b.option === null && looksLikeCode(b.text) ? keepSecret(b.id, b.rev, b.text!, b.via, true) : engine.personAnswer(b.id, b.rev, b.option, b.text, b.via).rev,

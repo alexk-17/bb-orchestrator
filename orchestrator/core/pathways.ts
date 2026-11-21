@@ -29,6 +29,7 @@ export type PathwaysDecision = { state: "missing" | "ambiguous" | "linked"; card
 export type PathwaysPreflight = { state: "not planned" | "needs access" | "unknown" | "blocked" | "declared"; environment: string | null; verifier: string | null; ownerAction: string | null; accessTicket: string | null; gaps: string[]; source: string };
 export type PathwaysCard = { id: string; state: string; title: string; context: string; project: string | null; prUrls?: string[] };
 export type PathwaysTicket = Pick<PathwaysIssue, "identifier" | "title" | "url" | "state" | "priority" | "estimate"> & {
+  description?: string | null;
   type: string;
   assignee: string | null;
   unknown: string[];
@@ -196,7 +197,7 @@ export function pathwaysMap(map: PathwaysIssue, children: PathwaysIssue[]): Path
     if (labels.some((label) => ["spike", "question", "open-question", "wayfinder:research"].includes(label))) unknown.push("Research question");
     if (blockers.some((id) => !ids.has(id))) unknown.push("External blocker");
     const displayState: PathwaysState = closed(issue.state.type) ? "done" : labels.includes("wayfinder:needs-you") ? "needs-you" : blockers.length ? "blocked" : issue.assignee ? "claimed" : unknown.length ? "unknown" : "ready";
-    return { identifier: issue.identifier, title: issue.title, url: issue.url, state: issue.state, priority: issue.priority, estimate: issue.estimate, type: labels.find((label) => /^wayfinder:(research|prototype|grilling|task)$/.test(label))?.slice(10) ?? "untyped", assignee: issue.assignee?.name ?? null, unknown, blockers, displayState, waitsOnYou: false, readiness: readiness(issue, labels), prLink: extractPrLinks(issue.description, issue.attachments?.nodes ?? []), prs: [], pr: null, proof: null, waitLane: null, decisionDraft: null, decision: { state: "missing", cardId: null, cardState: null, title: null, waiting: false, direct: [], transitive: [] }, preflight: { state: "not planned", environment: null, verifier: null, ownerAction: null, accessTicket: null, gaps: ["Verification plan not recorded"], source: issue.url } };
+    return { identifier: issue.identifier, title: issue.title, url: issue.url, description: issue.description ? issue.description.slice(0, 2000) : null, state: issue.state, priority: issue.priority, estimate: issue.estimate, type: labels.find((label) => /^wayfinder:(research|prototype|grilling|task)$/.test(label))?.slice(10) ?? "untyped", assignee: issue.assignee?.name ?? null, unknown, blockers, displayState, waitsOnYou: false, readiness: readiness(issue, labels), prLink: extractPrLinks(issue.description, issue.attachments?.nodes ?? []), prs: [], pr: null, proof: null, waitLane: null, decisionDraft: null, decision: { state: "missing", cardId: null, cardState: null, title: null, waiting: false, direct: [], transitive: [] }, preflight: { state: "not planned", environment: null, verifier: null, ownerAction: null, accessTicket: null, gaps: ["Verification plan not recorded"], source: issue.url } };
   });
   const { byId, outgoing, ownerActions, cycles } = pathwaysGraph(tickets, edges);
   const byPathOrder = (a: string[], b: string[]) => {
