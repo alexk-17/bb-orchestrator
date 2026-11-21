@@ -21,6 +21,8 @@ interface Entry {
   sender: string;
   kind: string;
   ref: string | null;
+  /** 1 when only orch_ack(id, outcome) or a ref'd reply closes it (needs_ack, or imported) */
+  outcome: number;
 }
 interface Wake {
   recipient: string;
@@ -34,6 +36,8 @@ interface Wake {
   note: string | null;
 }
 const token = () => randomBytes(16).toString("hex");
+/** Characters of digest a wake carries before it says "more: read orch_inbox" (live digests ran 1-5k, median 2.8k). */
+export const WAKE_DIGEST_CAP = 16_000;
 
 /** acked_at of a dead letter's entry: out of the unread, but never read. */
 const DROPPED = -1;
@@ -104,29 +108,41 @@ export class BatchInbox {
   private unread(address: string): Entry[] {
     return this.db
       .prepare(
-        `SELECT e.*,i.created_at,i.body,i.sender,i.kind,i.ref FROM inbox_entries e JOIN items i ON i.id=e.item_id
+        `SELECT e.*,i.created_at,i.body,i.sender,i.kind,i.ref,(i.needs_ack=1 OR EXISTS (SELECT 1 FROM external_mail x WHERE x.item_id=i.id)) AS outcome FROM inbox_entries e JOIN items i ON i.id=e.item_id
       WHERE e.recipient=? AND e.acked_at IS NULL ORDER BY e.seq`,
       )
       .all(address) as Entry[];
   }
 
-  read(a: Agent): { text: string; cursor: string | null; count: number } {
+  /**
+   * Every unread item, oldest first, with a cursor that covers exactly what it shows. With a cap (a wake's digest), it
+   * stops before the item that would pass it (always showing one) and says how many more are unread: never a silent cut.
+   */
+  read(a: Agent, cap = Infinity): { text: string; cursor: string | null; count: number; more: number } {
     this.sync();
     return tx(this.db, () => {
-      const rows = this.unread(a.address);
+      const all = this.unread(a.address);
+      const parts: string[] = [];
+      let size = 0;
+      for (const r of all) {
+        const part = `\n[${r.item_id}] ${r.kind} from ${r.sender}${r.ref ? `; ref=${r.ref}` : ""}; ${r.severity}${r.outcome ? "; outcome" : ""}${r.needs_reply ? "; needsReply" : ""}${r.due_at != null ? `; dueAt=${r.due_at}` : ""}\n${this.render(r.item_id) ?? r.body}`;
+        if (parts.length && size + part.length > cap) break;
+        parts.push(part);
+        size += part.length;
+      }
+      const rows = all.slice(0, parts.length);
+      const more = all.length - rows.length;
       const cursor = rows.length ? token() : null;
       if (cursor) this.db.prepare(`INSERT INTO inbox_reads VALUES(?,?,?,?)`).run(cursor, a.address, a.threadId, rows.at(-1)!.seq);
       return {
         cursor,
         count: rows.length,
+        more,
+        // The rules are said once here, not on every item (2026-11-19, tokens): each item carries only its own flags.
         text: rows.length
-          ? `${rows.length} unread items, oldest first. Ack only after handling this digest: orch_ack(through=${JSON.stringify(cursor)}). That marks them read; it closes only what needs no outcome. A message that asks for one stays open until orch_ack(id, outcome) or a reply with ref=<its id>; decisions still use orch_ack(id, outcome).\n` +
-            rows
-              .map(
-                (r) =>
-                  `\n[${r.item_id}] ${r.kind} from ${r.sender}; ref=${JSON.stringify(r.ref)}; severity=${r.severity}; needsReply=${!!r.needs_reply}; dueAt=${r.due_at ?? "none"}\n${this.render(r.item_id) ?? r.body}`,
-              )
-              .join("\n")
+          ? `${more ? `${rows.length} of ${all.length}` : rows.length} unread, oldest first. After handling, orch_ack(through=${JSON.stringify(cursor)}) marks them read and closes what needs no outcome. Items marked "outcome" stay open until orch_ack(id, outcome) or a reply with ref=<its id>; decisions still use orch_ack(id, outcome).${rows.some((r) => r.kind === "copy") ? " Copies are read-only: no ack or reply." : ""}\n` +
+            parts.join("\n") +
+            (more ? `\n\n${more} more unread, not shown here and not covered by this cursor: read them with orch_inbox.` : "")
           : "No unread mail.",
       };
     });
@@ -189,6 +205,16 @@ export class BatchInbox {
   wakes(): Wake[] {
     return this.db.prepare(`SELECT * FROM inbox_wakes ORDER BY due_at`).all() as Wake[];
   }
+  /** One item read without a digest (the CoS answered it with its reply tool). */
+  readOne(id: string): void {
+    this.db.prepare(`UPDATE inbox_entries SET acked_at=? WHERE item_id=? AND acked_at IS NULL`).run(this.now(), id);
+  }
+  /** The owner's Resend: a wake that went out, is unsure or died starts again now, so the recipient is woken for its unread. */
+  rewake(address: string): void {
+    this.db
+      .prepare(`UPDATE inbox_wakes SET state='pending',attempts=0,due_at=?,queued_id=NULL,note=NULL WHERE recipient=? AND state IN ('dead','sent','uncertain')`)
+      .run(this.now(), address);
+  }
   retry(address: string): void {
     this.db
       .prepare(`UPDATE inbox_wakes SET state='pending',attempts=0,due_at=?,queued_id=NULL,note=NULL WHERE recipient=? AND state='dead'`)
@@ -226,7 +252,8 @@ export class BatchInbox {
     retryMs: number;
     agent(address: string): Agent | null;
     held(a: Agent): boolean;
-    deliver(a: Agent, text: string, token: string): Promise<DeliverResult>;
+    /** bare: the wake without its digest, for a recipient bb will queue it behind (a turn under way) */
+    deliver(a: Agent, text: string, token: string, bare: string): Promise<DeliverResult>;
     log(text: string): void;
     /** An item that must not wake anyone now (an imported item whose route is off): it stays unread. */
     paused?(itemId: string): boolean;
@@ -278,11 +305,14 @@ export class BatchInbox {
         continue;
       }
       try {
-        const result = await o.deliver(
-          a,
-          `[orchestrator] Inbox wake ${w.token}. Actionable unread mail is waiting. Read ALL unread with orch_inbox, handle the digest, then orch_ack(through=<returned cursor>). This wake is not the mail; unread persists until acknowledged.`,
-          w.token,
-        );
+        // The wake carries the digest (2026-11-19, tokens: the orch_inbox call every wake began with was 4.6% of a
+        // host's spend). Its cursor covers only what it shows; later mail stays unread and gets its own wake.
+        const bare = `[orchestrator] Inbox wake ${w.token}. Actionable unread mail is waiting. Read ALL unread with orch_inbox, handle the digest, then orch_ack(through=<returned cursor>). This wake is not the mail; unread persists until acknowledged.`;
+        const d = this.read(a, WAKE_DIGEST_CAP);
+        const text = d.cursor
+          ? `[orchestrator] Inbox wake ${w.token}. This is your digest: handle it, then orch_ack with its cursor; no orch_inbox call needed. ${d.text}`
+          : bare;
+        const result = await o.deliver(a, text, w.token, bare);
         if (result.delivery === "held")
           this.db
             .prepare(`UPDATE inbox_wakes SET state='pending',attempts=attempts-1,due_at=? WHERE recipient=? AND token=?`)

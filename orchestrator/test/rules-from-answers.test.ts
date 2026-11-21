@@ -28,7 +28,7 @@ function setup() {
     changed: () => {},
     cardUp: (d) => up.push(d.id),
     log: () => {},
-  });
+  }, { batchInbox: false });
   const cos = e.register("T-cos", "cos", null);
   const files = e.register("T-lf", "lead", "files");
   const qa = e.register("T-lq", "lead", "qa");
@@ -285,7 +285,7 @@ test("a card whose pick can't be told is no evidence, and a rule that would matc
 
 test("the owner's yes works however many answers the rule comes from (a first offer can carry two weeks of them)", () => {
   let clock = Date.parse("2026-11-01T07:00:00Z");
-  const e = new Engine(new DatabaseSync(":memory:") as never, { now: () => clock, deliver: async (): Promise<DeliverResult> => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} });
+  const e = new Engine(new DatabaseSync(":memory:") as never, { now: () => clock, deliver: async (): Promise<DeliverResult> => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} }, { batchInbox: false });
   const night = (n: number) => ({ title: "Publish 5 memory pages?", question: `The nightly memory batch (2026-11-${String(n).padStart(2, "0")}) has 5 memory pages ready for the vault. Publish them?`, options: [{ label: "Publish the 5 ready pages" }, { label: "Publish none" }], key: `memory:dream-2026-11-${String(n).padStart(2, "0")}`, allowText: false });
   for (let n = 1; n <= 7; n++) {
     const d = e.orchestratorAsk(night(n));

@@ -7,7 +7,7 @@ export const VOICE_SETTINGS = {
   voiceEnabled: {
     type: "boolean",
     label: "Voice mode (off by default)",
-    description: "A mic button beside the Chief of Staff box: talk to your board through Gemini Live, with your own Gemini API key or your own Google Cloud project. Turning it on or off takes a plugin reload. See voice/README.md.",
+    description: "A mic button in Home's header: talk to your board through Gemini Live, with your own Gemini API key or your own Google Cloud project. Turning it on or off takes a plugin reload. See voice/README.md.",
     default: false,
   },
   voiceApiKey: {

@@ -1,7 +1,7 @@
 // One project as a source of truth (2026-11-16, layout B; the detail layout of 2026-11-17, proposal 5). Under the message
 // box: the Pinned strip, then the goal with its step meter, then what needs the owner and what blocks, side by side, so
 // the answer is in the first row; then Now (thread cards) and what else it waits on, beside the PRs in flight and the
-// record (Done | Decided). Each section is one card (BookCard, shadcn's Card); empty ones collapse to their head. A PR
+// record (Done and Decided in one list, each row tagged). Each section is one card (BookCard, shadcn's Card); empty ones collapse to their head. A PR
 // shows once: a wait on it folds into its row (kit.ts prRows). Every line keeps its age and its source.
 // Decided, Done, the merges, the blockers' start and the pins are read for this project only (core/book.ts, pins.ts),
 // refreshed on the same change signal as the list, so the two sides never disagree.
@@ -17,14 +17,13 @@ import { panel } from "./refs.ts";
 import { age, type Lane } from "./lanes.ts";
 import { write } from "./store.ts";
 import { blockerLines, dayStart, mergedTodayCount, needLines, type NeedLine } from "./source.ts";
-import { DETAIL_LAYOUT, ROWS_SHOWN, THREADS_SHOWN, ageSpec, prRows, type DetailSection, type IconName } from "./kit.ts";
+import { DETAIL_LAYOUT, ROWS_SHOWN, THREADS_SHOWN, ageSpec, prRows, recordRows, type DetailSection, type IconName } from "./kit.ts";
 import { Age, Chip, Icon, Steps } from "./kit-ui.tsx";
 import { ChevronRight } from "lucide-react";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card.tsx";
 import { Item } from "./ui/item.tsx";
-import { Tabs, TabsList, TabsTrigger } from "./ui/tabs.tsx";
 import { cn } from "./ui/utils.ts";
 import { Btn } from "./ui.tsx";
 import { ThreadCards } from "./thread-card.tsx";
@@ -58,7 +57,8 @@ export const bookCss = /* css */ `
 }
 @container orchcc (max-width: 640px) {
   [data-orch] .orch-cc .k-row { flex-wrap: wrap; }
-  [data-orch] .orch-cc .k-row .k-t { flex-basis: 100%; white-space: normal; }
+  /* the text wraps in its own column, so its icon and age stay on its first line (2026-11-20: the icon sat alone above it) */
+  [data-orch] .orch-cc .k-row .k-t { flex: 1 1 0; min-width: 0; white-space: normal; }
 }
 `;
 
@@ -354,7 +354,6 @@ export function ProjectBook({
   const [allThreads, setAllThreads] = useState(false);
   const [allPrs, setAllPrs] = useState(false);
   const [allRecord, setAllRecord] = useState(false);
-  const [record, setRecord] = useState<"done" | "decided">("done");
   const book: Book | undefined = q.data;
   const pins = book?.pins ?? [];
   const needs = needLines(p, lanes, cards);
@@ -471,36 +470,41 @@ export function ProjectBook({
       ))}
     </BookCard>
   ) : null;
-  const doneRows = book?.done ?? [];
-  const decidedRows = book?.decided ?? [];
-  const recordRows = record === "done" ? doneRows : decidedRows;
-  const recordShown = allRecord ? recordRows : recordRows.slice(0, ROWS_SHOWN);
+  const recordAll = recordRows(book?.done ?? [], book?.decided ?? []);
+  const recordShown = allRecord ? recordAll : recordAll.slice(0, ROWS_SHOWN);
   const recordCard = (
-    <BookCard
-      name="record"
-      title={
-        <Tabs value={record} onValueChange={(v) => setRecord(v as "done" | "decided")}>
-          <TabsList aria-label="Record" className="h-8">
-            <TabsTrigger value="done" data-record-tab="done" className="text-xs">
-              Done {doneRows.length}
-            </TabsTrigger>
-            <TabsTrigger value="decided" data-record-tab="decided" className="text-xs">
-              Decided {decidedRows.length}
-            </TabsTrigger>
-          </TabsList>
-        </Tabs>
-      }
-      right={recordRows.length > ROWS_SHOWN ? <AllButton n={recordRows.length} open={allRecord} onClick={() => setAllRecord((x) => !x)} /> : null}
-    >
+    <BookCard name="record" title="Record" count={book ? recordAll.length : null} right={recordAll.length > ROWS_SHOWN ? <AllButton n={recordAll.length} open={allRecord} onClick={() => setAllRecord((x) => !x)} /> : null}>
       {loading ??
-        (record === "done" ? (
-          doneRows.length ? (
-            recordShown.map((d, i) => {
-              const row = d as (typeof doneRows)[number];
+        (recordShown.length
+          ? recordShown.map((x, i) => {
+              if (x.t === "decided") {
+                const row = x.row;
+                return (
+                  <Item size="sm" key={`decided|${row.id}`} className="k-row flex-nowrap" data-decided={row.id} data-record-row="decided">
+                    <span className="k-lead">
+                      <Icon name="you" label="Decided" />
+                    </span>
+                    <span className="k-t" title={`${row.title} → ${row.answer}`}>
+                      {shared?.cards.has(row.id) ? (
+                        <OpenRef open={panel("board", `[data-decision="${row.id}"]`)} title="Open the answered card in Activity" data="card">
+                          {row.title}
+                        </OpenRef>
+                      ) : (
+                        row.title
+                      )}
+                    </span>
+                    <Chip spec={{ tone: "quiet", icon: "you", word: row.answer }} />
+                    <span className="k-when" title={stamp(row.at)}>
+                      {shortDay(row.at)}
+                    </span>
+                  </Item>
+                );
+              }
+              const row = x.row;
               return (
-                <Item size="sm" key={`${row.kind}|${row.ref ?? i}`} className="k-row flex-nowrap" data-done-line={row.kind}>
+                <Item size="sm" key={`${row.kind}|${row.ref ?? i}`} className="k-row flex-nowrap" data-done-line={row.kind} data-record-row="done">
                   <span className="k-lead">
-                    <Icon name={row.kind === "merged" ? "merged" : row.kind === "deliverable" ? "box" : "report"} />
+                    <Icon name={row.kind === "merged" ? "merged" : row.kind === "deliverable" ? "box" : "report"} label="Done" />
                   </span>
                   <span className="k-t" title={row.text}>
                     {row.kind === "deliverable" && row.ref && shared?.deliverables.has(row.ref) ? (
@@ -526,33 +530,7 @@ export function ProjectBook({
                 </Item>
               );
             })
-          ) : (
-            <div className="px-2 py-1 text-sm text-muted-foreground">Nothing finished yet</div>
-          )
-        ) : decidedRows.length ? (
-          recordShown.map((d) => {
-            const row = d as (typeof decidedRows)[number];
-            return (
-              <Item size="sm" key={row.id} className="k-row flex-nowrap" data-decided={row.id}>
-                <span className="k-t" title={`${row.title} → ${row.answer}`}>
-                  {shared?.cards.has(row.id) ? (
-                    <OpenRef open={panel("board", `[data-decision="${row.id}"]`)} title="Open the answered card in Activity" data="card">
-                      {row.title}
-                    </OpenRef>
-                  ) : (
-                    row.title
-                  )}
-                </span>
-                <Chip spec={{ tone: "quiet", icon: "you", word: row.answer }} />
-                <span className="k-when" title={stamp(row.at)}>
-                  {shortDay(row.at)}
-                </span>
-              </Item>
-            );
-          })
-        ) : (
-          <div className="px-2 py-1 text-sm text-muted-foreground">No answers on this project yet</div>
-        ))}
+          : <div className="px-2 py-1 text-sm text-muted-foreground">Nothing done or decided yet</div>)}
     </BookCard>
   );
 

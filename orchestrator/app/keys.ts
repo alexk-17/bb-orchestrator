@@ -15,6 +15,8 @@ export type Action =
   | { t: "approve" }
   | { t: "cos" }
   | { t: "tab"; view: string }
+  | { t: "pane"; dir: 1 | -1 }
+  | { t: "split"; dir: "row" | "col" }
   | { t: "help" }
   | { t: "close" }
   | { t: "blur" };
@@ -75,6 +77,15 @@ export function decide(e: KeyLike, target: TargetLike, helpOpen = false): Action
       return { t: "approve" };
     case "c":
       return { t: "cos" };
+    // the panes (split panes, 2026-11-20): bare keys like J/K; bb's own pane commands take a modifier
+    case "[":
+      return { t: "pane", dir: -1 };
+    case "]":
+      return { t: "pane", dir: 1 };
+    case "\\":
+      return { t: "split", dir: "row" };
+    case "-":
+      return { t: "split", dir: "col" };
     default:
       return null;
   }
@@ -110,13 +121,15 @@ export function pressApprove(arm: Arm, id: string, now: number): { fire: boolean
 
 /** The cheat sheet, also the source for KEYMAP.md. `view`: where it works. */
 export const KEYMAP: { keys: string; does: string; where: string }[] = [
-  { keys: "J / K", does: "Next / previous card", where: "Needs you, Deliverables" },
-  { keys: "1 – 4", does: "Pick answer N on the selected card (Enter sends it)", where: "Needs you" },
-  { keys: "Enter", does: "Send the picked answer", where: "Needs you" },
-  { keys: "O", does: "Open the selected card's asker thread", where: "Needs you" },
-  { keys: "A  A", does: "Done, nothing more: press twice within 2 s", where: "Deliverables" },
+  { keys: "J / K", does: "Next / previous card", where: "Home: Needs you, Delivered" },
+  { keys: "1 – 4", does: "Pick answer N on the selected card (Enter sends it)", where: "Home: Needs you" },
+  { keys: "Enter", does: "Send the picked answer", where: "Home: Needs you" },
+  { keys: "O", does: "Open the selected card's asker thread", where: "Home: Needs you" },
+  { keys: "A  A", does: "Done, nothing more: press twice within 2 s", where: "Home: Delivered" },
   { keys: "C", does: "Focus the Chief of Staff box", where: "anywhere" },
-  { keys: "Shift+N / P / D / H", does: "Needs you / Projects / Deliverables / Chat tab", where: "anywhere" },
+  { keys: "Shift+N / P / D / H", does: "Needs you / Projects / Delivered / Chat", where: "anywhere" },
+  { keys: "[ / ]", does: "Previous / next pane", where: "two panes or more" },
+  { keys: "\\ / -", does: "Split the pane right / down, then pick its view", where: "web" },
   { keys: "?", does: "This cheat sheet", where: "anywhere" },
   { keys: "Esc", does: "Close the cheat sheet; in a text box, leave it (text kept)", where: "cheat sheet, text boxes" },
 ];

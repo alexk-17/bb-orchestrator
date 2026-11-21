@@ -8,12 +8,14 @@ description: How agents with an orchestrator role (CoS, Steward, lead, thread) a
 Every agent with a role gets `orch_*` tools and a live inbox in its instructions. Messages from the orchestrator
 start with `[orchestrator] <kind> <id> from <sender>:`.
 
-## Batched inbox (opt-in: `batchInbox=true`)
+## Batched inbox (the default: `batchInbox=true`)
 
-Off by default: each message is delivered into a turn as described below. When on, sending accumulates unread mail; it does not send each item into a turn. A burst gets
-one debounced wake per recipient. On wake, call `orch_inbox` to read **all unread**
-items oldest first, including full bodies, ids and refs. Handle the digest, then
-`orch_ack(through=<returned cursor>)`. Reads do not ack. A cursor covers only that
+On by default; with `batchInbox=false` each message is delivered into a turn as described below. When on, sending accumulates unread mail; it does not send each item into a turn. A burst gets
+one debounced wake per recipient. The wake **is the digest**: all unread items oldest
+first, including full bodies, ids and refs, with its cursor (past a size cap it says
+how many more are unread; read those with `orch_inbox`). Handle the digest, then
+`orch_ack(through=<its cursor>)`. A wake that bb queued behind your turn comes bare:
+then call `orch_inbox` to read all unread. Reads do not ack. A cursor covers only that
 snapshot and is bound to your current thread/address; later arrivals stay unread.
 Cursor ack records mail as read, not an outcome: it closes only what needs no
 answer (copies, notices). A message that asks for an outcome stays open until you
@@ -34,7 +36,7 @@ Only wakes retry (one retry after `resendMinutes`, then dead), not message bodie
 CoS inspects `orch_inbox(wakes=true)` and retries a dead recipient wake with
 `orch_inbox(retry_wake="lead:project")`. These calls do not acknowledge any mail.
 
-With `batchInbox=false` (the default) the per-item retry/reply-ack descriptions
+With `batchInbox=false` the per-item retry/reply-ack descriptions
 below apply. Before changing modes, reconcile queued wakes/messages: changing settings
 cannot recall a queued or in-flight dispatch. Batch unread/cursors remain stored;
 read and acknowledge them before opting into legacy mode. See
@@ -115,7 +117,7 @@ bb orchestrator host
 bb orchestrator decision <id>
 ```
 
-Settings (`bb plugin config orchestrator set <key> <value>`): `batchInbox` (false), `inboxDebounceMs` (2000, capped at 60000), `escalateMinutes` (5), `resendMinutes` (10),
+Settings (`bb plugin config orchestrator set <key> <value>`): `batchInbox` (true), `inboxDebounceMs` (2000, capped at 60000), `escalateMinutes` (5), `resendMinutes` (10),
 `diskPct` (85), `swapPct` (50), `memPct` (90), `cpuPct` (95), `sustainSeconds` (300), `sampleSeconds` (60),
 `diskPath` (/), `cosCompactTokens` (0 = off, the default: Claude Code compacts on its own; a token count opts in), `stateDir` (empty: state/ in the plugin's data folder),
 `ownerName` (empty: agents say "the owner"), `cosTitle` (Chief of Staff), `projectsDir`, `projectRecord` (project.json),
@@ -124,7 +126,7 @@ Settings (`bb plugin config orchestrator set <key> <value>`): `batchInbox` (fals
 
 ## CodeRabbit review queue (read-only for agents)
 
-The owner's queue posts `@coderabbitai review` on one PR at a time (review-queue/, docs in USAGE.md). Agents may read it
+The owner's queue posts `@coderabbitai review` on one PR at a time (review-queue/). Agents may read it
 (the `reviewQueue` RPC: entries, facts, Schedule, Auto, dry-run, last outcome). Every change (add, pin, reorder,
 Schedule, Auto, the model picker's settings, Run now) is a page-only write the owner makes, in the CodeRabbit tab; there is no
 agent tool for it. A thread titled "CodeRabbit queue picker" is the queue's own optional picker (off by default): leave it
@@ -134,7 +136,7 @@ decision, on a card. Keep it on while another CodeRabbit scheduler runs.
 
 ## Pathways (read-only for agents)
 
-The Pathways tab maps a project's linked Linear project (`linearProjectId` in its record; docs in USAGE.md). Agents may
+The Pathways tab maps a project's linked Linear project (`linearProjectId` in its record). Agents may
 read the same facts through the `pathways` RPC: the map, first path, owner actions, linked PR state and the retro
 summary. Draft decision on the page is the owner's own action; there is no agent tool for it. To build or change a map
 in Linear, follow the `pathways-linear` skill, and only with a Linear key the owner gave you for it.

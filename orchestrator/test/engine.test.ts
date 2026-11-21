@@ -20,7 +20,7 @@ function setup(opts: { hold?: Set<string> } = {}) {
     mirror: (d) => mirrored.set(d.id, structuredClone(d)),
     changed: () => {},
     log: () => {},
-  });
+  }, { batchInbox: false });
   const cos = e.register("T-cos", "cos", null);
   const steward = e.register("T-st", "steward", null);
   const leadA = e.register("T-la", "lead", "alpha");

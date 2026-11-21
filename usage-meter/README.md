@@ -10,17 +10,21 @@ Claude subscription limits, as two rings around a sidebar footer button — and 
   thinner stroke, a visible gap between the two.
 
 Both fill clockwise from twelve o'clock and colour independently by their own
-value: muted below 60%, amber from 60%, red above 85%. The popup names those
-thresholds in words — the neighbouring footer button uses different ones.
+value: muted below 60%, amber from 60%, red from 85%, read off the rounded
+figure shown. The popup's bars use the same rule (`toneOf` in `lib/limits.ts`),
+so ring and bar always agree.
 
 The per-model limit (`Fable`) gets no third ring: on a 32×32 button it stops
-being readable, so it lives as a row in the popup. Staying silent about it is
+being readable, so it lives as a bar in the popup. Staying silent about it is
 not an option either — the moment it passes 60%, a dot lights up in the top
-right corner of the button in the same colour the rings take at that value, and
-the popup row is marked with the same dot.
+right corner of the button in the same colour the rings take at that value.
 
-- **Hover** — a popup with every limit window: percentage and reset time in
-  local time, plus the subscription plan and the account email.
+- **Hover** — a popup with one bar per limit window: label, % used (number and
+  fill) and the reset time in local time ("resets 21:20" today, "resets Tue
+  02:00" within the week, a date further out), plus the plan and the account
+  email. With two or more Account Pooler accounts, every account follows with
+  its own bars, in the pool's routing order (priority, lower first; disabled
+  accounts muted at the end). An account the pool reports exhausted says so.
 - **Click** — the same popup, pinned: it survives the cursor leaving. Closes on
   a second click, on Escape, or on a click outside.
 
@@ -136,7 +140,9 @@ the tab comes back into view.
 | `not_installed` / `unauthenticated` / `expired` | The snapshot is cleared: the old numbers are no longer about this account |
 | The same complaint every minute | Only a change of reason reaches the log |
 
-`app.tsx` holds the rings and the popup. The host renders the
+`app.tsx` holds the rings and the popup panel; the panel's body is React
+(`components/UsagePopover.tsx`, on shadcn Progress, Separator and Badge in
+`components/ui/`) mounted with the host's shared `react-dom/client`. The host renders the
 `sidebarFooterAction` slot as an icon only, so the rings come from a content
 script: its own `<svg>` goes inside the host button, absolutely positioned over
 the icon and transparent to pointer events. Nodes the plugin does not own are

@@ -27,10 +27,18 @@ test("bb's composer on the Chat tab is capped at the transcript's 760px column a
   assert.doesNotMatch("{ width: 760px; margin-inline: auto; }", DECLS);
 });
 
-test("the Chat pane is where the Chief of Staff's ThreadChat is drawn, with its composer", () => {
+// The owner (2026-11-20) on the "You and the CoS" sub-view: it showed their messages but not the CoS's answers, because it
+// drew only replies made with the reply tool and the CoS mostly answers in its chat. A conversation with one side is a bug,
+// and a nested tab was its own complaint. So the Chat tab is bb's own chat with the CoS (both sides, its own input) and
+// nothing else: no sub-tabs, no filtered log.
+test("the Chat tab is bb's own chat with the CoS, both sides, with no filtered sub-view", () => {
   const app = src("app.tsx");
-  assert.match(app, /case "chat":\s*return <CosChat /);
-  assert.match(app, /<ThreadChat threadId=\{cos\.threadId\} variant=\{width >= 720 \? "full" : "compact"\}/);
+  assert.match(app, /case "chat":\s*return <CosChat [^>]*width=\{width\}/);
+  const chat = src("app/cos-chat.tsx");
+  assert.match(chat, /<ThreadChat threadId=\{cos\.threadId\} variant=\{width >= 720 \? "full" : "compact"\}/, "bb's chat with its composer");
+  assert.doesNotMatch(chat, /role="tablist"|data-chat-tab/, "no sub-tabs");
+  assert.doesNotMatch(chat, /method: "cosLine"/, "no tracked-only log: it drops the CoS's chat answers");
+  assert.doesNotMatch(chat, /<CosComposer /, "one input: bb's own");
   // no other source reaches into bb's composer
-  for (const f of ["app.tsx", "app/direct-line.tsx", "app/scope.tsx", "app/projects.tsx"]) assert.deepEqual(composerRules(src(f)), [], f);
+  for (const f of ["app.tsx", "app/direct-line.tsx", "app/scope.tsx", "app/projects.tsx", "app/cos-chat.tsx"]) assert.deepEqual(composerRules(src(f)), [], f);
 });

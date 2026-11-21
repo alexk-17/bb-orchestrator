@@ -1,4 +1,4 @@
-// The mic beside the Chief of Staff box (voice/README.md). Drawn only while the voice read exists, which is only while
+// The mic in Home's header (voice/README.md). Drawn only while the voice read exists, which is only while
 // voiceEnabled is on. The mic is live only after a click (until hang-up) or while Space is held; Esc or a click hangs
 // up. Writes are the page's own: when the server says "send", this posts to the owner route the proposal names.
 // It is the same plain icon button as the attach button beside it: a spinner while connecting, a small pulsing dot and

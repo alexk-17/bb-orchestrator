@@ -15,6 +15,7 @@ import {
   type ScanStatus,
   type UsageSummary,
 } from "./usage-scan";
+import { routingOrder } from "./lib/limits";
 
 // The provider rate-limits the call itself: after an hour of polling once a
 // minute it answered "Claude usage is rate limited right now". Limits move
@@ -108,6 +109,12 @@ const usageState = z.object({
         planLabel: z.string().nullable(),
         status: z.string(),
         current: z.boolean(),
+        /** From the pooler's status: a disabled account is never routed to. */
+        enabled: z.boolean().default(true),
+        /** Failover position, lower runs first; null when the pooler did not say. */
+        priority: z.number().nullable().default(null),
+        /** The pooler's own account state: ready, held, exhausted, error or disabled. */
+        poolStatus: z.string().nullable().default(null),
         windows: z.array(usageWindow),
       }),
     )
@@ -194,6 +201,18 @@ const poolUsage = z.object({
   accountKey: z.string().nullable().default(null),
   usage: z.looseObject({ status: z.string(), planLabel: z.string().nullable().optional(), windows: z.array(z.looseObject({ label: z.string(), usedPercent: z.number(), resetsAt: z.string().nullable() })).optional() }),
 });
+/** Only the routing fields of the pooler's status (read-only `status.get`, what `bb pool account list` shows). */
+const poolStatus = z.object({ accounts: z.array(z.looseObject({ id: z.string(), enabled: z.boolean(), priority: z.number(), status: z.string() })) });
+
+/** The pooler's routing fields by account id; empty when the call fails, and the list order stands. */
+async function poolRouting(bb: BbPluginApi): Promise<Map<string, { enabled: boolean; priority: number; status: string }>> {
+  try {
+    const s = poolStatus.parse(await bb.sdk.plugins.callRpc({ pluginId: POOL_ID, method: "status.get", input: null, outputSchema: z.any() }));
+    return new Map(s.accounts.map((a) => [a.id, { enabled: a.enabled, priority: a.priority, status: a.status }]));
+  } catch {
+    return new Map();
+  }
+}
 
 /**
  * The pooler's accounts with their cached usage (refresh false: it never asks the provider, so polling it costs
@@ -202,8 +221,11 @@ const poolUsage = z.object({
 async function poolAccounts(bb: BbPluginApi, current: { accountKey: string | null; planLabel: string | null }): Promise<UsageState["accounts"]> {
   const list = poolList.parse(await bb.sdk.plugins.callRpc({ pluginId: POOL_ID, method: "provider-usage.v1.listResources", input: {}, outputSchema: z.any() }));
   const rows = list.resources.filter((r) => r.providerId === CLAUDE_PROVIDER_ID);
-  return Promise.all(
+  const routing = await poolRouting(bb);
+  const accounts = await Promise.all(
     rows.map(async (r) => {
+      const route = routing.get(r.id);
+      const pool = { enabled: route?.enabled ?? true, priority: route?.priority ?? null, poolStatus: route?.status ?? null };
       try {
         const u = poolUsage.parse(await bb.sdk.plugins.callRpc({ pluginId: POOL_ID, method: "provider-usage.v1.getResource", input: { resourceId: r.id, refresh: false }, outputSchema: z.any() }));
         const planLabel = u.usage.planLabel ?? null;
@@ -214,13 +236,15 @@ async function poolAccounts(bb: BbPluginApi, current: { accountKey: string | nul
           status: u.usage.status,
           // two logins can share one Claude account (one per plan), so the plan tells them apart
           current: !!current.accountKey && (u.accountKey ?? r.accountKey) === current.accountKey && planLabel === current.planLabel,
+          ...pool,
           windows: (u.usage.windows ?? []).map((w) => ({ label: w.label, usedPercent: w.usedPercent, resetsAt: w.resetsAt })),
         };
       } catch {
-        return { id: r.id, label: r.label, planLabel: null, status: "error", current: false, windows: [] };
+        return { id: r.id, label: r.label, planLabel: null, status: "error", current: false, ...pool, windows: [] };
       }
     }),
   );
+  return routingOrder(accounts);
 }
 
 export default async function plugin(bb: BbPluginApi) {

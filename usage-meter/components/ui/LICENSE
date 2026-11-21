@@ -1,0 +1,30 @@
+The components in this folder are shadcn/ui (https://ui.shadcn.com), from
+https://github.com/shadcn-ui/ui apps/v4/registry/new-york-v4/ui at c257f688cf4de7ec10cc1be84cad29cd4631182c
+(the commit orchestrator/app/ui is on). 2026-11-20 changes, each marked in the source:
+- progress.tsx and separator.tsx: bb shares no Radix Progress or Separator runtime with plugins and usage-meter
+  bundles none, so the Radix Root and Indicator are plain divs carrying the attributes Radix sets (role, aria-*,
+  data-state, data-orientation). The classes are upstream's. Progress takes an indicatorClassName for the tone colour.
+- badge.tsx: no asChild (that needs Radix Slot); `dark:` is written `[&:is(.dark_*)]:` (bb's .dark class).
+- utils.ts: cn() as upstream, plus the plugin marks a node outside the plugin root needs for its Tailwind.
+
+MIT License
+
+Copyright (c) 2023 shadcn
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

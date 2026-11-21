@@ -21,7 +21,7 @@ function setup() {
     changed: () => {},
     log: () => {},
   };
-  const e = new Engine(db as never, ports);
+  const e = new Engine(db as never, ports, { batchInbox: false });
   e.register("T-cos", "cos", null);
   const lead = e.register("T-la", "lead", "alpha");
   const worker = e.register("T-w1", "thread", "alpha", "T-la");
@@ -118,7 +118,7 @@ test("start-up repair: cards relayed before relays settled them are answered fro
   const upBefore = JSON.stringify(s.e.decision(upstairs.id));
   const itemsBefore = (s.db.prepare(`SELECT COUNT(*) AS n FROM items`).get() as { n: number }).n;
 
-  const e2 = new Engine(s.db as never, s.ports);
+  const e2 = new Engine(s.db as never, s.ports, { batchInbox: false });
   const c = e2.decision(closed.id)!;
   assert.equal(c.state, "acked", "the thread had closed its relay: nobody is left to ack the card");
   assert.equal(c.answer!.text, "Lead call: option 1.", "the first relay is the call");
@@ -131,7 +131,7 @@ test("start-up repair: cards relayed before relays settled them are answered fro
   assert.equal(JSON.stringify(e2.decision(upstairs.id)), upBefore, "a card above the lead is never touched");
   assert.equal((s.db.prepare(`SELECT COUNT(*) AS n FROM items`).get() as { n: number }).n, itemsBefore, "the repair sends no mail");
   const rev = e2.decision(closed.id)!.rev;
-  new Engine(s.db as never, s.ports);
+  new Engine(s.db as never, s.ports, { batchInbox: false });
   assert.equal(e2.decision(closed.id)!.rev, rev, "idempotent: a second start changes nothing");
 });
 

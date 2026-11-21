@@ -100,9 +100,10 @@ test("a project clicked in the hits is reached even when the filter hides it: on
   assert.equal(filterHides("kite", blockedOnly), false, "a project the filter keeps: the filter stays");
 });
 
-test("the list sits beside the detail only on a wide tab", () => {
+test("a pane 720 px or wider shows the list beside the item (the owner, 2026-11-20); one pane at 1440 (864 px) does", () => {
+  assert.equal(WIDE_MIN, 720);
   assert.equal(isWide(WIDE_MIN), true);
   assert.equal(isWide(WIDE_MIN - 1), false);
-  assert.equal(isWide(1000), false);
-  assert.equal(isWide(1680), true);
+  assert.equal(isWide(864), true, "a single pane at 1440 beside the open Sidebar");
+  assert.equal(isWide(432), false, "half of it, in a split: the item opens as its own page");
 });

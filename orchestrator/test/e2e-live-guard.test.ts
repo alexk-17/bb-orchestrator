@@ -27,7 +27,7 @@ test("a harness URL passes, on any other port or host", () => {
 });
 
 test("every e2e script runs the guard before Playwright loads, and keeps no live default", () => {
-  for (const f of ["proof.mjs", "less-text.mjs", "compose.mjs", "open-prs-post.mjs"]) {
+  for (const f of ["proof.mjs", "less-text.mjs", "compose.mjs", "open-prs-post.mjs", "panes.mjs", "split-tree.mjs", "dock.mjs", "dividers.mjs", "picker.mjs"]) {
     const src = readFileSync(new URL(`./e2e/${f}`, import.meta.url), "utf8");
     assert.doesNotMatch(src, /default:\s*["']http/, `${f} has a default base`);
     assert.doesNotMatch(src, /^import .*playwright/m, `${f} loads Playwright before the guard`);

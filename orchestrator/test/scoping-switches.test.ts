@@ -49,7 +49,7 @@ async function host() {
   const root = mkdtempSync(join(scratch, "h-"));
   const file = join(root, "data.db");
   const raw = new DatabaseSync(file);
-  const pre = new Engine(raw as never, { now: Date.now, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} });
+  const pre = new Engine(raw as never, { now: Date.now, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} }, { batchInbox: false });
   const cos = pre.register("T-cos", "cos", null);
   const lead = pre.register("T-lo", "lead", "otter");
   pre.register("T-lk", "lead", "kite");
@@ -81,7 +81,7 @@ async function host() {
           return {
             define: (schema: Record<string, { default: unknown }>) => {
               const v: any = Object.fromEntries(Object.entries(schema).map(([key, d]) => [key, d.default]));
-              Object.assign(v, { stateDir: join(root, "state"), projectsDir: join(root, "projects"), memoryConfig: "", prPollMinutes: 0, dreamsEnabled: false, cloudConfigPath: join(root, "no-cloud.json") });
+              Object.assign(v, { batchInbox: false, stateDir: join(root, "state"), projectsDir: join(root, "projects"), memoryConfig: "", prPollMinutes: 0, dreamsEnabled: false, cloudConfigPath: join(root, "no-cloud.json") });
               return { get: async () => v, onChange: () => {} };
             },
           };
@@ -264,7 +264,7 @@ test("the owner's switches refuse what the engine can't do, with the reason, and
 function setup() {
   let clock = Date.parse("2026-11-17T10:00:00Z");
   const db = new DatabaseSync(":memory:");
-  const e = new Engine(db as never, { now: () => clock, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} });
+  const e = new Engine(db as never, { now: () => clock, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} }, { batchInbox: false });
   const cos = e.register("T-cos", "cos", null);
   const lead = e.register("T-lo", "lead", "otter");
   const notices = (address: string) => (db.prepare(`SELECT body FROM items WHERE recipient = ? AND kind = 'notice' ORDER BY created_at, rowid`).all(address) as { body: string }[]).map((r) => r.body);

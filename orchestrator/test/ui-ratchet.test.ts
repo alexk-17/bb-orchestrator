@@ -3,7 +3,7 @@
 // <button>, a colour literal (hex, rgb or oklch) or an import from the vendored affectUI (./affect/). Each file's
 // count today is in ui-ratchet.allow.json, and the list only goes down: a file above its count fails (use app/ui), and
 // a file below it fails too until the list is lowered to match, so a count won back can't be spent again.
-// It reads the UI sources only (app.tsx, app/, cloud/, gameboy/), never core/ or the tests.
+// It reads the UI sources only (app.tsx, app/, cloud/, gameboy/, multiplayer/), never core/ or the tests.
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -29,7 +29,7 @@ export function counts(src: string): Record<Kind, number> {
   return { button: n(BUTTON), colour: n(COLOUR), affect: n(AFFECT) };
 }
 
-/** The UI sources: app.tsx and every .ts/.tsx/.mjs under app/, cloud/ and gameboy/, except app/ui, tests and dot-dirs */
+/** The UI sources: app.tsx and every .ts/.tsx/.mjs under app/, cloud/, gameboy/ and multiplayer/, except app/ui, tests and dot-dirs */
 function sources(): string[] {
   const out = [join(ROOT, "app.tsx")];
   const walk = (d: string) => {
@@ -40,7 +40,7 @@ function sources(): string[] {
       else if (/\.(tsx?|mjs)$/.test(e)) out.push(p);
     }
   };
-  for (const d of ["app", "cloud", "gameboy"]) walk(join(ROOT, d));
+  for (const d of ["app", "cloud", "gameboy", "multiplayer"]) walk(join(ROOT, d));
   return out.map((p) => relative(ROOT, p)).filter((f) => !f.startsWith("app/ui/")).sort();
 }
 

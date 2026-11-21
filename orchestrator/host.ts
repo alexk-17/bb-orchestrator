@@ -6,5 +6,6 @@ import cloud from "./cloud/host.ts";
 import { orchHostContract } from "./host-contract.ts";
 import { prHandlers } from "./open-prs/host.ts";
 import { queueHandlers } from "./review-queue/host.ts";
+import { mpHandlers } from "./multiplayer/host.ts";
 
-export default experimental_defineHostEntry({ contract: orchHostContract, handlers: { ...cloud.handlers, ...prHandlers, ...queueHandlers } });
+export default experimental_defineHostEntry({ contract: orchHostContract, handlers: { ...cloud.handlers, ...prHandlers, ...queueHandlers, ...mpHandlers } });

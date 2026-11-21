@@ -434,6 +434,41 @@ export const MIGRATIONS: string[] = [
    DROP TABLE prs;
    ALTER TABLE prs_v2 RENAME TO prs;
    CREATE INDEX prs_url ON prs (url)`,
+  // The Multiplayer tab (multiplayer/): the owner's boards, the leads' review records, and each watcher's last read.
+  `CREATE TABLE multiplayer_boards (
+     id TEXT PRIMARY KEY,
+     channel TEXT NOT NULL UNIQUE,
+     link TEXT,
+     watcher TEXT,
+     name TEXT NOT NULL DEFAULT '',
+     purpose TEXT NOT NULL DEFAULT '',
+     setup TEXT,
+     created_at INTEGER NOT NULL,
+     removed_at INTEGER
+   );
+   CREATE TABLE multiplayer_records (
+     id TEXT PRIMARY KEY,
+     board TEXT NOT NULL,
+     lead TEXT NOT NULL,
+     wake TEXT,
+     state TEXT NOT NULL,
+     json TEXT NOT NULL,
+     created_at INTEGER NOT NULL,
+     updated_at INTEGER NOT NULL
+   );
+   CREATE INDEX multiplayer_records_board ON multiplayer_records (board, created_at);
+   CREATE UNIQUE INDEX multiplayer_records_wake ON multiplayer_records (board, wake) WHERE wake IS NOT NULL;
+   CREATE TABLE multiplayer_beats (
+     source TEXT PRIMARY KEY,
+     last_at INTEGER NOT NULL,
+     prev_at INTEGER,
+     every_ms INTEGER,
+     reads INTEGER NOT NULL DEFAULT 0
+   )`,
+  // The feed: the post an owner's message belongs to (core/feed.ts keys); an older message is a post of its own.
+  `ALTER TABLE items ADD COLUMN about TEXT;
+   UPDATE items SET about = 'msg:' || id WHERE kind = 'owner.message';
+   CREATE INDEX items_about ON items (about, created_at)`,
 ];
 
 export function migrate(db: Db): void {

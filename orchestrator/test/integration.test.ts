@@ -10,10 +10,10 @@ function setup(queued = false) {
   const db = new DatabaseSync(":memory:");
   const sent: string[] = [];
   const ports = { now: () => now, externalEnabled: () => enabled, deliver: async (_to: string, _text: string, it: { id: string }): Promise<DeliverResult> => { sent.push(it.id); return queued ? { delivery: "queued", queuedMessageId: `q-${it.id}` } : { delivery: "sent" }; }, mirror: () => {}, changed: () => {}, log: () => {} };
-  const engine = new Engine(db as never, ports);
+  const engine = new Engine(db as never, ports, { batchInbox: false });
   const cos = engine.register("cos", "cos", null);
   const mail: ExternalMail = { source: "fleet", id: "one", originalId: "legacy-one", to: "cos", sender: "worker", task: "task", severity: "NEEDS-COS", summary: "Review", body: "", refs: [], re: null, createdAt: now, dueAt: null, needsReply: true };
-  return { engine, cos, mail, sent, disable: () => { enabled = false; }, advance: (ms: number) => { now += ms; }, reload: () => new Engine(db as never, ports) };
+  return { engine, cos, mail, sent, disable: () => { enabled = false; }, advance: (ms: number) => { now += ms; }, reload: () => new Engine(db as never, ports, { batchInbox: false }) };
 }
 
 test("imports are idempotent across reload, with conflicting payloads rejected and source IDs retained", async () => {

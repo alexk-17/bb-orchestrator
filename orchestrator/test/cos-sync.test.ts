@@ -20,7 +20,7 @@ function setup() {
     mirror: () => {},
     changed: () => {},
     log: () => {},
-  }, { owner: "Robin" });
+  }, { batchInbox: false, owner: "Robin" });
   const cos = e.register("T-cos", "cos", null);
   const steward = e.register("T-st", "steward", null);
   const leadA = e.register("T-la", "lead", "alpha");
@@ -493,7 +493,7 @@ test("dead letters already on the owner's board when this ships stay there", () 
   });
   db.prepare(`INSERT INTO items (id, recipient, sender, kind, body, needs_ack, state, attempts, created_at, note) VALUES ('i-old', 'lead:x', 'cos', 'message', 'old', 1, 'dead', 2, 1, 'unacked after 2 deliveries')`).run();
   db.prepare(`INSERT INTO items (id, recipient, sender, kind, body, needs_ack, state, attempts, created_at) VALUES ('i-live', 'lead:x', 'cos', 'message', 'live', 1, 'delivered', 1, 1)`).run();
-  const e = new Engine(db as never, { now: () => 2, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} });
+  const e = new Engine(db as never, { now: () => 2, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} }, { batchInbox: false });
   assert.deepEqual(e.deadLetters({ board: true }).map((i) => i.id), ["i-old"], "the old one stays on the board");
   assert.equal(e.items().find((i) => i.id === "i-live")!.onBoard, false);
 });

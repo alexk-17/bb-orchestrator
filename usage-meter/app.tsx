@@ -7,8 +7,9 @@
 //   click      — the same popup, pinned (for touch devices)
 //
 // Each ring colours by its own value: muted below 60%, amber from 60%, red
-// above 85%. The per-model limit (Fable) gets no ring — a third ring stops
-// being readable on a 32×32 button, so it lives as a row in the popup and
+// from 85% (lib/limits.ts toneOf, shared with the popup's bars). The
+// per-model limit (Fable) gets no ring — a third ring stops being readable
+// on a 32×32 button, so it lives as a bar in the popup and
 // takes a dot in the top right corner of the button as soon as it passes the
 // amber threshold: otherwise an exhausted window gives away nothing.
 //
@@ -18,36 +19,35 @@
 //
 // The host renders sidebarFooterAction as an icon only, so the rings come from
 // a content script: its own <svg> goes inside the host button over the icon,
-// and the popup is plain DOM above the application. The host icon stays where
+// and the popup is a panel above the application (its body is React,
+// components/UsagePopover.tsx). The host icon stays where
 // it is: the added node is absolutely positioned and takes no pointer events.
 //
 // The outer ring repeats the geometry of the neighbouring server-status plugin:
 // the same path along the button edge, the same thickness, the same animation.
 // These buttons sit side by side in the footer and must read as one system.
 import { definePluginApp } from "@get-bb/plugin-sdk/app";
+import type { MouseEvent as ReactMouseEvent } from "react";
+import { flushSync } from "react-dom";
+import { createRoot, type Root } from "react-dom/client";
 import type { UsageState } from "./server";
 import {
-  DANGER,
   PANEL_PATH,
   PLUGIN_ID,
   SESSION_LABEL,
-  SHORT_LABEL,
-  WARN,
   WEEKLY_LABEL,
   extraMax,
   findWindow,
   hasFigures,
-  labelKey,
   percentOf,
-  resetText,
-  ringOf,
-  staleLine,
-  statusLine,
-  type Line,
+  toneOf,
+  type Tone,
 } from "./lib/limits";
 import { openUsagePanel, usagePanelHref } from "./lib/panel-link";
 import { UsageAccessory } from "./components/UsageAccessory";
 import { UsagePage } from "./components/UsagePage";
+import { UsagePopover } from "./components/UsagePopover";
+import { PLUGIN_MARKS } from "./components/ui/utils";
 
 const ACTION_ID = "usage";
 const BUTTON_SELECTOR = `[data-testid="plugin-sidebar-footer-action-${PLUGIN_ID}-${ACTION_ID}"]`;
@@ -98,16 +98,20 @@ async function fetchState(signal: AbortSignal): Promise<UsageState> {
   return envelope.result as UsageState;
 }
 
+const RING_TONE: Record<Tone, string> = {
+  normal: "var(--muted-foreground, #8a8a8a)",
+  warn: "var(--warning, #e3a008)",
+  danger: "var(--destructive, #e5484d)",
+};
+
 /**
- * Ring colour from its own value; null means there is no value. Lives here and
+ * Ring colour from its own value (the one tone rule, lib/limits.ts toneOf); null means there is no value. Lives here and
  * not in lib/limits.ts because it speaks in CSS variables with fallbacks: this
  * is an SVG attribute in a content script, not a Tailwind class.
  */
 function ringColor(percent: number | null): string {
   if (percent === null) return "var(--muted-foreground, #8a8a8a)";
-  if (percent > DANGER) return "var(--destructive, #e5484d)";
-  if (percent >= WARN) return "var(--warning, #e3a008)";
-  return "var(--muted-foreground, #8a8a8a)";
+  return RING_TONE[toneOf(percent)];
 }
 
 // --- rings ------------------------------------------------------------------
@@ -292,7 +296,7 @@ class Gauge {
     this.inner.draw(weekly, weekly !== null || !known);
     // The marker lights at exactly the threshold where the rings turn amber:
     // below it a ringless window bothers nobody, above it silence is not an option.
-    const show = this.badgeReady && extra !== null && extra >= WARN;
+    const show = this.badgeReady && toneOf(extra) !== "normal";
     this.badge.style.display = show ? "" : "none";
     if (show) this.badge.setAttribute("fill", ringColor(extra));
   }
@@ -303,8 +307,9 @@ class Gauge {
 const PANEL_STYLE = [
   "position:fixed",
   "z-index:2147483000",
-  "min-width:14rem",
-  "max-width:22rem",
+  // A fixed width keeps every bar the same length; under 360 px, as a popover should be.
+  "width:21.5rem",
+  "max-width:calc(100vw - 16px)",
   "padding:0.5rem 0.625rem",
   "border:1px solid var(--border, rgba(128,128,128,0.3))",
   "border-radius:var(--radius, 0.5rem)",
@@ -315,122 +320,6 @@ const PANEL_STYLE = [
   "font-family:inherit",
   "line-height:1.35",
 ].join(";");
-
-const TITLE_STYLE = [
-  "color:var(--muted-foreground, #9a9a9a)",
-  "font-size:0.6875rem",
-  "letter-spacing:0.04em",
-  "text-transform:uppercase",
-].join(";");
-
-const MUTED_STYLE = "color:var(--muted-foreground, #9a9a9a)";
-
-/**
- * Every Account Pooler account with each of its windows.
- * Nothing when the pool has one account or none: the rows above already are that account.
- */
-function accountsSection(state: UsageState): HTMLElement[] {
-  const accounts = state.accounts ?? [];
-  if (accounts.length < 2) return [];
-  const head = element("div", `${TITLE_STYLE};margin-top:0.625rem;padding-top:0.5rem;border-top:1px solid var(--border, rgba(128,128,128,0.3))`, `All accounts · ${accounts.length}`);
-  const list = element("div", "margin-top:0.25rem;display:flex;flex-direction:column;gap:0.5rem;max-height:55vh;overflow-y:auto");
-  for (const a of accounts) {
-    const box = element("div", "display:flex;flex-direction:column;gap:0.125rem;min-width:0");
-    const top = element("div", "display:flex;gap:0.375rem;align-items:baseline;min-width:0");
-    const name = element("span", `min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${a.current ? "font-weight:600" : ""}`, a.label);
-    name.title = a.label;
-    top.append(name);
-    if (a.planLabel) top.append(element("span", `${MUTED_STYLE};font-size:0.6875rem;flex:none`, a.planLabel));
-    if (a.current) top.append(element("span", "font-size:0.6875rem;flex:none;color:var(--primary, #6ea8fe)", "· this login"));
-    box.append(top);
-    if (a.status !== "ok" || a.windows.length === 0) {
-      box.append(element("div", `${MUTED_STYLE};font-size:0.75rem`, a.status === "ok" ? "No limit windows" : a.status.replace(/_/g, " ")));
-    }
-    for (const w of a.windows) {
-      const percent = Math.round(w.usedPercent);
-      const row = element("div", "display:flex;gap:0.375rem;align-items:center;min-width:0;font-size:0.75rem");
-      row.append(percent >= WARN ? dotGlyph(percent) : element("span", `width:${GLYPH_SIZE}px;flex:none`));
-      const key = labelKey(w.label);
-      const label = element("span", "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap", SHORT_LABEL[key] ?? w.label);
-      label.title = w.label;
-      row.append(label);
-      row.append(element("span", `flex:none;white-space:nowrap;font-weight:500${percent > DANGER ? ";color:var(--destructive-text, #f87171)" : ""}`, `${percent}%`));
-      const reset = resetText(w.resetsAt);
-      if (reset) row.append(element("span", `${MUTED_STYLE};flex:none;white-space:nowrap`, `· ${reset}`));
-      box.append(row);
-    }
-    list.append(box);
-  }
-  return [head, list];
-}
-
-/**
- * A ring badge in a popup row. Button proportions do not read at that size —
- * the badge has its own radii, as long as the outer one stays thicker and
- * wider than the inner and the gap between them stays visible.
- */
-const GLYPH_SIZE = 15;
-const GLYPH_RINGS = [
-  { key: "outer" as const, r: 6.4, stroke: 2 },
-  { key: "inner" as const, r: 3.6, stroke: 1.3 },
-];
-
-function element(tag: string, style: string, text?: string): HTMLElement {
-  const node = document.createElement(tag);
-  node.setAttribute("style", style);
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-/**
- * Row badge: the same pair of rings in miniature, with its own ring picked out
- * in colour while the neighbour stays a track. It shows which row is which ring.
- */
-function ringGlyph(which: "outer" | "inner", percent: number | null): SVGSVGElement {
-  const svg = document.createElementNS(SVG_NS, "svg");
-  svg.setAttribute("width", String(GLYPH_SIZE));
-  svg.setAttribute("height", String(GLYPH_SIZE));
-  svg.setAttribute("viewBox", `0 0 ${GLYPH_SIZE} ${GLYPH_SIZE}`);
-  svg.setAttribute("fill", "none");
-  svg.setAttribute("aria-hidden", "true");
-  svg.style.flex = "none";
-  const center = GLYPH_SIZE / 2;
-  for (const { key, r, stroke } of GLYPH_RINGS) {
-    const circle = document.createElementNS(SVG_NS, "circle");
-    circle.setAttribute("cx", String(center));
-    circle.setAttribute("cy", String(center));
-    circle.setAttribute("r", String(r));
-    circle.setAttribute("stroke-width", String(stroke));
-    const own = key === which;
-    circle.setAttribute(
-      "stroke",
-      own ? ringColor(percent) : "var(--muted-foreground, #8a8a8a)",
-    );
-    circle.setAttribute("stroke-opacity", own ? "1" : TRACK_OPACITY);
-    svg.append(circle);
-  }
-  return svg;
-}
-
-/**
- * Row badge for a window without a ring: the same dot that lit up on the
- * button. It shows which window lit it.
- */
-function dotGlyph(percent: number | null): SVGSVGElement {
-  const svg = document.createElementNS(SVG_NS, "svg");
-  svg.setAttribute("width", String(GLYPH_SIZE));
-  svg.setAttribute("height", String(GLYPH_SIZE));
-  svg.setAttribute("viewBox", `0 0 ${GLYPH_SIZE} ${GLYPH_SIZE}`);
-  svg.setAttribute("aria-hidden", "true");
-  svg.style.flex = "none";
-  const dot = document.createElementNS(SVG_NS, "circle");
-  dot.setAttribute("cx", String(GLYPH_SIZE / 2));
-  dot.setAttribute("cy", String(GLYPH_SIZE / 2));
-  dot.setAttribute("r", String(BADGE_RADIUS));
-  dot.setAttribute("fill", ringColor(percent));
-  svg.append(dot);
-  return svg;
-}
 
 /** The host portals tooltips straight into body — this is their wrapper. */
 const HOST_TOOLTIP = "[data-radix-popper-content-wrapper]";
@@ -461,6 +350,8 @@ function tooltipOver(box: {
 /** Panel with every limit window, the plan and the email. */
 class Popup {
   private panel: HTMLDivElement | null = null;
+  /** The React root drawing the panel body (components/UsagePopover.tsx). */
+  private root: Root | null = null;
   private anchor: HTMLElement | null = null;
   private cleanup: Array<() => void> = [];
   private closeTimer: number | null = null;
@@ -499,6 +390,10 @@ class Popup {
       this.placeFrame = 0;
     }
     for (const off of this.cleanup.splice(0)) off();
+    // Unmounted after the current event: close() can run inside the body's own click handler.
+    const root = this.root;
+    this.root = null;
+    if (root) queueMicrotask(() => root.unmount());
     this.panel?.remove();
     this.panel = null;
     this.anchor = null;
@@ -522,6 +417,8 @@ class Popup {
     panel.setAttribute("role", "dialog");
     panel.setAttribute("aria-label", "Usage limits");
     panel.dataset.usageMeter = "popup";
+    // The body is Tailwind, which bb compiles under the plugin's marks; body has none.
+    for (const [name, value] of Object.entries(PLUGIN_MARKS)) panel.setAttribute(name, value);
     // Kept off screen until the height is known.
     panel.style.left = "-9999px";
     panel.style.top = "0";
@@ -567,107 +464,14 @@ class Popup {
   render(state: UsageState | null): void {
     const panel = this.panel;
     if (!panel) return;
-    panel.replaceChildren();
-
-    panel.append(element("div", TITLE_STYLE, "Usage limits"));
-
-    // Figures are shown after a failure too: they are old but real. An empty
-    // panel remains only where there is nothing to show.
-    const figures = hasFigures(state);
-    if (!state || (state.status !== "ok" && !figures)) {
-      panel.append(this.note(statusLine(state), "margin-top:0.375rem"));
-      this.place();
-      return;
-    }
-
-    if (state.planLabel) {
-      panel.append(
-        element("div", "margin-top:0.25rem;font-weight:500", state.planLabel),
+    this.root ??= createRoot(panel);
+    const root = this.root;
+    // Synchronous, so place() measures the height of what is on screen now.
+    flushSync(() => {
+      root.render(
+        <UsagePopover state={state} detailsHref={usagePanelHref()} onDetails={this.openDetails} />,
       );
-    }
-    if (state.accountEmail) {
-      panel.append(
-        element("div", `${MUTED_STYLE};font-size:0.75rem`, state.accountEmail),
-      );
-    }
-
-    const rows = element(
-      "div",
-      "margin-top:0.5rem;display:flex;flex-direction:column;gap:0.25rem",
-    );
-    let rings = false;
-    for (const limit of state.windows) {
-      const key = labelKey(limit.label);
-      const row = element(
-        "div",
-        "display:flex;gap:0.375rem;align-items:center;min-width:0",
-      );
-      // Windows that have a ring are marked with it; a ringless window with the
-      // same dot that lit on the button; the rest with an indent of the same
-      // width, so the percentages stand in one column.
-      const percent = percentOf(limit);
-      const ring = ringOf(limit.label);
-      if (ring) {
-        rings = true;
-        row.append(ringGlyph(ring, percent));
-      } else if (percent !== null && percent >= WARN) {
-        row.append(dotGlyph(percent));
-      } else {
-        row.append(element("span", `width:${GLYPH_SIZE}px;flex:none`));
-      }
-
-      // The API sets the window label, and a long one ("Claude Opus 4.6 extended
-      // thinking window") has to be truncated inside the panel, not spill out.
-      const label = element(
-        "span",
-        "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap",
-        SHORT_LABEL[key] ?? limit.label,
-      );
-      if (!SHORT_LABEL[key]) label.title = limit.label;
-      row.append(label);
-      row.append(
-        element(
-          "span",
-          "flex:none;white-space:nowrap",
-          `${Math.round(limit.usedPercent)}%`,
-        ),
-      );
-      const reset = resetText(limit.resetsAt);
-      if (reset) {
-        row.append(
-          element(
-            "span",
-            `${MUTED_STYLE};font-size:0.75rem;flex:none;white-space:nowrap`,
-            `· ${reset}`,
-          ),
-        );
-      }
-      rows.append(row);
-    }
-    if (state.windows.length === 0) {
-      rows.append(element("div", MUTED_STYLE, "No limit windows"));
-    }
-    panel.append(rows);
-    panel.append(...accountsSection(state));
-
-    // These are the previous figures: without this row the rings would pass off old as fresh.
-    if (state.status !== "ok") {
-      panel.append(this.note(staleLine(state), "margin-top:0.375rem"));
-    }
-    // The thresholds are named in words: the neighbouring footer button uses
-    // different ones, and a colour alone does not say at what percentage it lights.
-    if (rings) {
-      panel.append(
-        this.note(
-          {
-            text: `Rings turn amber from ${WARN}% and red above ${DANGER}%`,
-            title: null,
-          },
-          "margin-top:0.375rem;font-size:0.6875rem",
-        ),
-      );
-    }
-    panel.append(this.pageLink());
+    });
     this.place();
   }
 
@@ -676,38 +480,15 @@ class Popup {
    * middle-clicking and copying the address work; an ordinary click is taken
    * over by the in-app navigation when React has left an opener behind.
    */
-  private pageLink(): HTMLElement {
-    const link = document.createElement("a");
-    link.href = usagePanelHref();
-    link.textContent = "More details →";
-    link.setAttribute(
-      "style",
-      [
-        "display:inline-block",
-        "margin-top:0.5rem",
-        "color:var(--primary, var(--foreground, #e5e5e5))",
-        "text-decoration:none",
-        "font-size:0.75rem",
-      ].join(";"),
-    );
-    link.addEventListener("click", (event) => {
-      // Modified clicks belong to the browser: a new tab is a legitimate answer.
-      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
-        return;
-      }
-      event.preventDefault();
-      this.close();
-      openUsagePanel();
-    });
-    return link;
-  }
-
-  /** A muted row at the bottom of the panel; unfamiliar text goes into the tooltip. */
-  private note(line: Line, extra: string): HTMLElement {
-    const node = element("div", `${MUTED_STYLE};${extra}`, line.text);
-    if (line.title) node.title = line.title;
-    return node;
-  }
+  private openDetails = (event: ReactMouseEvent<HTMLAnchorElement>): void => {
+    // Modified clicks belong to the browser: a new tab is a legitimate answer.
+    if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+      return;
+    }
+    event.preventDefault();
+    this.close();
+    openUsagePanel();
+  };
 
   /** To the right of the button, bottom edges aligned; always fits on screen. */
   private place(): void {

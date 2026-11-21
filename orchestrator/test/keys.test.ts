@@ -96,9 +96,19 @@ test("J/K walk the cards without wrapping; an answered card's slot goes to the n
 });
 
 test("every key the cheat sheet lists is one decide() acts on", () => {
-  assert.equal(KEYMAP.length, 9);
-  for (const [k, shift, code] of [["j", false, ""], ["k", false, ""], ["1", false, ""], ["4", false, ""], ["o", false, ""], ["a", false, ""], ["c", false, ""], ["N", true, "KeyN"], ["?", true, ""]] as const) {
+  assert.equal(KEYMAP.length, 11);
+  for (const [k, shift, code] of [["j", false, ""], ["k", false, ""], ["1", false, ""], ["4", false, ""], ["o", false, ""], ["a", false, ""], ["c", false, ""], ["N", true, "KeyN"], ["?", true, ""], ["[", false, ""], ["]", false, ""], ["\\", false, ""], ["-", false, ""]] as const) {
     assert.ok(decide(key(k, { shiftKey: shift, code: code || undefined }), page), k);
   }
   assert.equal(decide(key("5"), page), null);
+});
+
+test("the pane keys (split panes): [ and ] walk the panes, \\ and - split; never while typing or with a modifier, where bb's own pane keys live", () => {
+  assert.deepEqual(decide(key("["), page), { t: "pane", dir: -1 });
+  assert.deepEqual(decide(key("]"), page), { t: "pane", dir: 1 });
+  assert.deepEqual(decide(key("\\"), page), { t: "split", dir: "row" });
+  assert.deepEqual(decide(key("-"), page), { t: "split", dir: "col" });
+  assert.equal(decide(key("-"), { tagName: "INPUT", type: "text" }), null, "a minus typed in a box is text");
+  assert.equal(decide(key("]", { metaKey: true }), page), null);
+  assert.equal(decide(key("[", { ctrlKey: true }), page), null);
 });

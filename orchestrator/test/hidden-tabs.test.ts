@@ -28,9 +28,9 @@ test("a hidden Scope tab shows, in its place, while something waits in it, and h
   assert.deepEqual(ids(["scope"], 3), ids([], 3), "hidden by id or not, the strip is the same while something waits");
   // the page passes what waits in Scope (its open cards and its scoping deliverables to review, the number drawn on the
   // tab) and the views its panes are on, so the rule is wired, not only defined
-  assert.match(app, /const visible = shownTabs\(VIEWS, new Set\(config\.data\?\.hiddenTabs \?\? \[\]\), scopeWaiting, new Set\(panes\(layout\.root\)\.map\(\(p\) => p\.view\)\)\);/);
-  assert.match(app, /const scopeWaiting = \(scope\.data\?\.badge \?\? 0\) \+ \(deliverables\.data \?\? \[\]\)\.filter\(\(d\) => inScope\(d\) && /);
-  assert.match(app, /v\.id === "scope" && scopeWaiting > 0\s*\? scopeWaiting/);
+  assert.match(app, /const visible = shownTabs\(VIEWS, new Set\(config\.data\?\.hiddenTabs \?\? \[\]\), scopeWaiting, new Set\(panes\(layout\.root\)\.map\(\(p\) => p\.route\.view\)\), inUse, PLACES\);/);
+  assert.match(app, /const scopeWaiting = owner\.scope;/, "the rail badge's Scope part (kit.ts ownerCounts: its cards and scoping deliverables)");
+  assert.match(app, /projects: scopeWaiting \|\| /, "what waits in Scoping is the number the nav draws on Projects, where its group now is");
 });
 
 test("a hidden Scope tab stays while a pane is on it, with nothing waiting, and goes once no pane is", () => {
@@ -47,7 +47,7 @@ test("what waits in Scope, or a pane on it, changes no other tab", () => {
 
 test("hiding every tab shows them all; a pane left on a hidden tab moves to one that shows", () => {
   assert.deepEqual(ids(ALL, 0), ALL);
-  assert.match(app, /setView\(l, p\.id, visible\[0\]!\.id\)/);
+  assert.match(app, /setRoute\(l, p\.id, rootOf\(visible\[0\]!\.id\)\)/);
 });
 
 test("the setting is empty by default and matched case-insensitively against ids and labels", () => {
@@ -57,9 +57,18 @@ test("the setting is empty by default and matched case-insensitively against ids
   assert.deepEqual(ids(["activity", "open prs"], 0), ["deliverables", "projects", "scope"], "lower-cased labels match");
 });
 
-test("the CodeRabbit tab (2026-11-18) is listed, shown by default, and hidden by hiddenTabs: coderabbit", () => {
+test("the CodeRabbit tab (2026-11-18) is listed, shown once set up (2026-11-20), and hidden by hiddenTabs: coderabbit", () => {
   assert.match(app, /\{ id: "coderabbit", subPath: "coderabbit", label: "CodeRabbit" \}/);
   const views = [...VIEWS, { id: "coderabbit", label: "CodeRabbit" }];
-  assert.ok(!shownTabs(views, new Set(["coderabbit"]), 0, new Set(["deliverables"])).some((v) => v.id === "coderabbit"), "hidden");
-  assert.ok(shownTabs(views, new Set(), 0, new Set(["deliverables"])).some((v) => v.id === "coderabbit"), "shown by default");
+  const on = new Set(["coderabbit"]);
+  assert.ok(!shownTabs(views, new Set(["coderabbit"]), 0, new Set(["deliverables"]), on).some((v) => v.id === "coderabbit"), "hidden by name even when set up");
+  assert.ok(shownTabs(views, new Set(), 0, new Set(["deliverables"]), on).some((v) => v.id === "coderabbit"), "shown once set up");
+  assert.ok(!shownTabs(views, new Set(), 0, new Set(["deliverables"])).some((v) => v.id === "coderabbit"), "not set up: hidden");
+});
+
+test("hiddenTabs never hides the four places (Home first, step 2): it applies to the rest", () => {
+  const views = [{ id: "home", label: "Home" }, { id: "chat", label: "Chat" }, { id: "rules", label: "Rules" }];
+  const keep = new Set(["home", "chat"]);
+  assert.deepEqual(shownTabs(views, new Set(["home", "chat", "rules"]), 0, new Set(["home"]), new Set(), keep).map((v) => v.id), ["home", "chat"]);
+  assert.match(app, /const PLACES = new Set\(MAIN\.map\(\(m\) => m\.id\)\);/);
 });

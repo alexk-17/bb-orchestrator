@@ -15,7 +15,7 @@ import { ProofLink } from "./proof-link.tsx";
 import { gate, write } from "./store.ts";
 import { Fold } from "./answer-ui.tsx";
 import { Button } from "./ui/button.tsx";
-import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "./ui/item.tsx";
+import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle, WITH_DESCRIPTION } from "./ui/item.tsx";
 import { cn } from "./ui/utils.ts";
 import { Btn, when } from "./ui.tsx";
 import { servedBy, sizeText, type FileItem } from "./past.ts";
@@ -43,8 +43,11 @@ export const KindIcon = ({ kind, label }: { kind: Output["kind"]; label?: string
   return <Icon className="mt-0.5 size-4 flex-none text-muted-foreground" strokeWidth={1.5} role="img" aria-label={label ?? kind} />;
 };
 
-/** A file's or proof's name: a link button that opens it (shared with the tree's proof rows). */
-export const OPEN = "h-auto p-0 text-start text-sm font-normal whitespace-normal text-foreground [overflow-wrap:anywhere]";
+/**
+ * A file's or proof's name: a link button that opens it (shared with the tree's proof rows). It may shrink below its one-line
+ * width (a Button is shrink-0): a long file name ran past a phone's edge in an opened past deliverable (2026-11-21).
+ */
+export const OPEN = "h-auto min-w-0 max-w-full shrink p-0 text-start text-sm font-normal whitespace-normal text-foreground [overflow-wrap:anywhere]";
 /** The quiet line under a file's name, and its note. */
 export const META_LINE = "mt-0.5 flex min-w-0 flex-wrap gap-x-3 gap-y-0.5 text-xs text-muted-foreground";
 export const NOTE = "m-0 mt-1 text-xs whitespace-pre-wrap text-muted-foreground [overflow-wrap:anywhere]";
@@ -173,7 +176,7 @@ function Whence({ f, onDeliverable, noProject }: { f: FileItem; onDeliverable?: 
     <span className={META_LINE}>
       {f.d ? (
         onDeliverable ? (
-          <Button variant="link" data-file-deliverable={f.d.id} className="h-auto min-h-6 p-0 text-xs font-normal whitespace-normal text-muted-foreground [overflow-wrap:anywhere]" onClick={() => onDeliverable(f.d!.id)}>
+          <Button variant="link" data-file-deliverable={f.d.id} className="h-auto min-h-6 max-w-full min-w-0 shrink p-0 text-start text-xs font-normal whitespace-normal text-muted-foreground [overflow-wrap:anywhere]" onClick={() => onDeliverable(f.d!.id)}>
             {f.d.title}
           </Button>
         ) : (
@@ -198,7 +201,7 @@ export function FileRow2({ f, host, after, onDeliverable, noProject }: { f: File
   const Icon = f.url ? Link : FILE_ICONS[f.kind];
   return (
     <Item size="sm" data-file={f.key} data-file-kind={f.kind} data-missing={f.missing ? "" : undefined} className="items-start gap-3 px-1 py-2">
-      <ItemMedia variant="icon">
+      <ItemMedia variant="icon" className={WITH_DESCRIPTION}>
         <Icon strokeWidth={1.5} role="img" aria-label={KIND_WORD[f.kind]} className={f.missing ? "text-muted-foreground" : undefined} />
       </ItemMedia>
       <ItemContent className="min-w-0 gap-0.5">

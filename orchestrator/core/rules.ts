@@ -158,7 +158,7 @@ export function ownerPick(d: Decision): string | null {
 
 export function shapeOf(d: Decision): Shape | null {
   const a = d.answer;
-  if (!a || a.by !== "person" || a.via === "merged" || !a.option || d.kind !== "question" || d.orchestrator.action === "merge" || d.orchestrator.rule_proposal) return null;
+  if (!a || a.by !== "person" || a.via === "merged" || !a.option || d.kind !== "question" || d.orchestrator.action === "merge" || d.orchestrator.rule_proposal || d.orchestrator.board_review) return null;
   const pickId = ownerPick(d);
   const own = d.request.options.find((o) => o.id === pickId);
   if (!own) return null;

@@ -57,8 +57,12 @@ export function SearchBox({ value, onChange }: { value: string; onChange: (q: st
 }
 
 const OLDER_MIN = 3;
-/** The value after the owner stops typing for a moment: the plugin is asked once per pause, not per key. */
-function useSettled(v: string, ms = 250): string {
+/**
+ * The value after the owner stops typing for a moment: the plugin is asked once per pause, not per key. The Projects
+ * results follow it too (2026-11-20, typing lag): each key used to add and remove result rows, and inside bb's page one
+ * element added or removed restyles about 2,700 elements, so typing stuttered.
+ */
+export function useSettled(v: string, ms = 250): string {
   const [s, setS] = useState(v);
   useEffect(() => {
     const t = setTimeout(() => setS(v), ms);

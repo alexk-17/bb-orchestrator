@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-usage-meter",
-  "version": "0.3.0",
+  "version": "0.4.1",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -20,6 +20,10 @@
     },
     "server": "./server.ts",
     "app": "./app.tsx"
+  },
+  "scripts": {
+    "test": "node --test --disable-warning=ExperimentalWarning test/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "zod": "^4.3.6"

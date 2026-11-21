@@ -29,7 +29,7 @@ function setup() {
     cardUp: () => pushes.push("cardUp"),
     delivered: () => pushes.push("delivered"),
   };
-  const make = () => new Engine(db as never, ports as never, { owner: "Robin" });
+  const make = () => new Engine(db as never, ports as never, { batchInbox: false, owner: "Robin" });
   const e = make();
   const cos = e.register("T-cos", "cos", null);
   const lead = e.register("T-lead", "lead", "kite");

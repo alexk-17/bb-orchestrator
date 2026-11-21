@@ -116,7 +116,7 @@ function engine() {
   const sent: { text: string; item: Item }[] = [];
   const db = new DatabaseSync(":memory:");
   const ports = { now: () => Date.parse("2026-11-17T10:00:00Z"), deliver: async (_t: string, text: string, item: Item): Promise<DeliverResult> => (sent.push({ text, item }), { delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} };
-  const e = new Engine(db as never, ports, {});
+  const e = new Engine(db as never, ports, { batchInbox: false });
   e.register("T-cos", "cos", null);
   e.createProject("otter", "normal", "cos", "otter", "Search.");
   e.register("T-lead", "lead", "otter");
@@ -206,7 +206,7 @@ async function server(upload: (a: any) => Promise<unknown>, refuseImages = false
           return {
             define: (schema: Record<string, { default: unknown }>) => {
               const v: any = Object.fromEntries(Object.entries(schema).map(([key, d]) => [key, d.default]));
-              Object.assign(v, { stateDir: join(root, "state"), projectsDir: join(root, "projects"), memoryConfig: "", diskPath: root });
+              Object.assign(v, { batchInbox: false, stateDir: join(root, "state"), projectsDir: join(root, "projects"), memoryConfig: "", diskPath: root });
               return { get: async () => v, onChange: () => {} };
             },
           };
@@ -222,7 +222,7 @@ async function server(upload: (a: any) => Promise<unknown>, refuseImages = false
     },
   );
   await plugin(bb);
-  const e = new Engine(db as never, { now: () => Date.now(), deliver: async (): Promise<DeliverResult> => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} }, {});
+  const e = new Engine(db as never, { now: () => Date.now(), deliver: async (): Promise<DeliverResult> => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} }, { batchInbox: false });
   e.register("T-cos", "cos", null);
   e.createProject("otter", "normal", "cos", "otter", "Search.");
   e.register("T-lead", "lead", "otter");
@@ -318,8 +318,10 @@ test("server: the CoS bar's images reach the CoS's thread as images, their count
   assert.match(up.result, /^img-/);
   const sent = await s.post(WRITES.cosMessage, { text: "What is this banner?", images: [up.result] });
   assert.equal(sent.ok, true, JSON.stringify(sent));
+  await settle();
   const toCos = s.sends.find((x) => x.threadId === "T-cos")!;
-  assert.match(toCos.input[0].text, /^What is this banner\?\n\n\(1 image attached; open each with your file reader: .*bar-1\.png\)$/);
+  // tracked (D3): the owner's words and images first, then the one line on how the CoS answers it
+  assert.match(toCos.input[0].text, /^What is this banner\?\n\n\(1 image attached; open each with your file reader: .*bar-1\.png\)\n\n\[orchestrator\] .*orch_reply_owner\(ref=i-/);
   assert.deepEqual(toCos.input.slice(1), [{ type: "localImage", path: kept, sourceProjectId: "bbp-1" }]);
   // an id is good for one send
   const again = await s.post(WRITES.cosMessage, { text: "Again", images: [up.result] });
@@ -330,8 +332,12 @@ test("server: the CoS bar's images reach the CoS's thread as images, their count
 test("server: a text-only message from the CoS bar is the one text input it always was", async () => {
   const s = await server(async () => assert.fail("no upload for text"));
   assert.equal((await s.post(WRITES.cosMessage, { text: "Hold the reindex." })).ok, true);
+  await settle();
   const toCos = s.sends.find((x) => x.threadId === "T-cos")!;
-  assert.deepEqual(toCos.input, [{ type: "text", text: "Hold the reindex.", mentions: [] }]);
+  assert.equal(toCos.input.length, 1, "one text input");
+  assert.equal(toCos.mode, "queue-if-active", "it waits for the CoS's turn to end, as the bar's message always did");
+  assert.deepEqual((s.db.prepare(`SELECT kind, sender, recipient FROM items WHERE kind = 'owner.cos'`).all() as object[]).map((r) => ({ ...r })), [{ kind: "owner.cos", sender: "person", recipient: "cos" }], "tracked: one record the feed and the Chat tab read");
+  assert.match(toCos.input[0].text, /^Hold the reindex\.\n\n\[orchestrator\] .*'s message i-\w+\. Answer it with orch_reply_owner/);
   assert.equal(cosMessageBody.safeParse({ text: "  " }).success, false, "no words and no image: refused");
   assert.equal(cosMessageBody.safeParse({ text: "", images: Array.from({ length: 7 }, (_, i) => `img-${i}`) }).success, false, "at most 6");
 });

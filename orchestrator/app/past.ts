@@ -22,9 +22,10 @@ type Output = Outputs[number];
 type Proof = Deliverable["revisions"][number]["proof"][number];
 type Folder = DeliverableFolders["folders"][string];
 
-export type Filter = "all" | "approved" | "changes" | "withdrawn" | "files";
+export type Filter = "all" | "decided" | "approved" | "changes" | "withdrawn" | "files";
 export const FILTERS: { id: Filter; label: string }[] = [
   { id: "all", label: "All" },
+  { id: "decided", label: "Decided" },
   { id: "approved", label: "Approved" },
   { id: "changes", label: "Changes requested" },
   { id: "withdrawn", label: "Withdrawn" },
@@ -244,6 +245,7 @@ export function deliverablesTab(ds: readonly Deliverable[], os: readonly Output[
   const fileHits = allFiles.filter((f) => inProject(f.project) && matches(fileText(f), v.query));
   const counts: Record<Filter, number> = {
     all: pastHits.length,
+    decided: pastHits.filter((d) => d.state === "approved" || d.state === "changes").length,
     approved: pastHits.filter((d) => d.state === "approved").length,
     changes: pastHits.filter((d) => d.state === "changes").length,
     withdrawn: pastHits.filter((d) => d.state === "withdrawn").length,
@@ -262,7 +264,7 @@ export function deliverablesTab(ds: readonly Deliverable[], os: readonly Output[
   });
   return {
     review,
-    past: v.filter === "files" ? [] : pastHits.filter((d) => v.filter === "all" || d.state === v.filter),
+    past: v.filter === "files" ? [] : pastHits.filter((d) => v.filter === "all" || d.state === v.filter || (v.filter === "decided" && (d.state === "approved" || d.state === "changes"))),
     files: fileHits.filter((f) => v.kind === "all" || f.kind === v.kind),
     filesBy,
     counts,
@@ -405,4 +407,11 @@ export function sizeText(n: number | null): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** The outputs that are no board deliverable's proof: a board review's report stays on its review, off Files. */
+export function offBoards(ds: readonly Deliverable[], os: readonly Output[]): Output[] {
+  const key = (project: string | null, where: string | null | undefined) => `${projectKey(project)}\0${where}`;
+  const taken = new Set(ds.filter((d) => d.board).flatMap((d) => d.revisions.flatMap((r) => r.proof.flatMap((p) => [p.path, p.source, p.url].filter(Boolean).map((w) => key(d.project, w))))));
+  return os.filter((o) => !taken.has(key(o.project, o.path ?? o.url)));
 }

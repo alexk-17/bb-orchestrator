@@ -79,7 +79,7 @@ export function Party({ shown, boxed, size = 24 }: { shown: readonly Member[]; b
   const names = shown.map((a) => a.form ?? a.mon).join(", ");
   return (
     <div className="inline-flex items-center gap-2" data-party={shown.length}>
-      <AvatarGroup role="img" aria-label={`Party: ${names}${boxed ? `, and ${boxed} more in the box` : ""}`}>
+      <AvatarGroup className="-space-x-1.5" role="img" aria-label={`Party: ${names}${boxed ? `, and ${boxed} more in the box` : ""}`}>
         {shown.map((a) => (
           <MonSprite key={a.address} mon={a.form ?? a.mon} dex={a.formDex} address={a.address} size={size} boost={false} />
         ))}

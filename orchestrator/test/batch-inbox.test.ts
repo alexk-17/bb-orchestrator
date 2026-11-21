@@ -52,7 +52,8 @@ test("burst accumulates without delivery, then one debounced wake; full ordered 
   await Promise.all([s.e.flush(), s.e.flush()]);
   assert.equal(s.sent.length, 1);
   assert.match(s.sent[0]!.item.id, /^wake:/);
-  assert.doesNotMatch(s.sent[0]!.text, /first x/);
+  assert.match(s.sent[0]!.text, /This is your digest/, "the wake carries the mail, so no orch_inbox call is needed");
+  assert.ok(s.sent[0]!.text.indexOf(first.id) < s.sent[0]!.text.indexOf(second.id), "both items, oldest first");
   const read = s.e.batch.read(s.lead);
   assert.equal(read.count, 2);
   assert.ok(read.text.indexOf(first.id) < read.text.indexOf(second.id));

@@ -19,7 +19,7 @@ function setup() {
     mirror: () => {},
     changed: () => {},
     log: () => {},
-  });
+  }, { batchInbox: false });
   e.register("T-cos", "cos", null);
   const lead = e.register("T-la", "lead", "alpha");
   const worker = e.register("T-w1", "thread", "alpha", "T-la");

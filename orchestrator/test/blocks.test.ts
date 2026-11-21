@@ -20,7 +20,7 @@ function setup() {
     mirror: () => {},
     changed: () => {},
     log: () => {},
-  });
+  }, { batchInbox: false });
   const cos = e.register("T-cos", "cos", null);
   const lead = e.register("T-la", "lead", "alpha");
   return { e, db, cos, lead, sent };

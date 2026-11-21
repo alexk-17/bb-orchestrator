@@ -86,7 +86,7 @@ async function server(settings: Record<string, unknown> = {}) {
           return {
             define: (schema: Record<string, { default: unknown }>) => {
               const v: any = Object.fromEntries(Object.entries(schema).map(([key, d]) => [key, d.default]));
-              Object.assign(v, { stateDir: join(root, "state"), projectsDir: projects, projectRecord: RECORD, memoryConfig: "", diskPath: root, ownerName: "", ...settings });
+              Object.assign(v, { batchInbox: false, stateDir: join(root, "state"), projectsDir: projects, projectRecord: RECORD, memoryConfig: "", diskPath: root, ownerName: "", ...settings });
               return { get: async () => v, onChange: () => {} };
             },
           };
@@ -102,7 +102,7 @@ async function server(settings: Record<string, unknown> = {}) {
     },
   );
   await plugin(bb);
-  const engine = new Engine(db as never, ports, {});
+  const engine = new Engine(db as never, ports, { batchInbox: false });
   /** The owner's Start lead button: a POST from the app's own screen. */
   const button = async (slug: string) => {
     const c = {
@@ -248,7 +248,7 @@ function core(over: Partial<NewProjectPorts> = {}) {
   const root = scratch("core");
   const repo = join(root, "repo");
   mkdirSync(repo);
-  const engine = new Engine(new DatabaseSync(":memory:") as never, ports, {});
+  const engine = new Engine(new DatabaseSync(":memory:") as never, ports, { batchInbox: false });
   const p: NewProjectPorts = { engine, root: join(root, "projects"), record: RECORD, memoryFolder: () => undefined, now: ports.now(), by: "cos", ...over };
   const brief = { slug: "delta", title: "Delta", repo, goal: "Build delta.", base: "main", constraints: ["No prod."], priority: "normal" };
   return { root, repo, engine, p, brief };

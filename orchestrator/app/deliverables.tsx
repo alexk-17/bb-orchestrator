@@ -13,8 +13,7 @@ import { CHANGED_CHANNEL, PROOF_ROUTE, WRITE_BASE, WRITES, rpcContract, type Del
 import { ItemGroup } from "./ui/item.tsx";
 import { Skeleton } from "./ui/skeleton.tsx";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card.tsx";
-import { Label } from "./ui/label.tsx";
-import { Textarea } from "./ui/textarea.tsx";
+import { ReplyAction, ReplyButton, ReplyComposer, ReplyField } from "./reply-composer.tsx";
 import { cn } from "./ui/utils.ts";
 import { Fold } from "./answer-ui.tsx";
 import { AgentFace } from "./face.tsx";
@@ -32,8 +31,8 @@ import { useViewKeys } from "./key-view.ts";
 import { age } from "./lanes.ts";
 import { Btn, EmptyState, Kind, PageError, ReadState, Who, when } from "./ui.tsx";
 import { FileFull, FoldedOutputs, OpenFolder } from "./files.tsx";
-import { START, deliverablesTab, fold, shownDeliverable, shownRevision, type FileItem, type View } from "./past.ts";
-import { PastControls, PastRows, STATE_WORD, type FoldersState } from "./past-view.tsx";
+import { START, deliverablesTab, fold, offBoards, shownDeliverable, shownRevision, type FileItem, type View } from "./past.ts";
+import { FilesAndWithdrawn, OFF_PAGE, PastControls, PastRows, STATE_WORD, type FoldersState } from "./past-view.tsx";
 import { useElementWidth } from "./panes.tsx";
 import { requestDeliverable } from "./reveal.ts";
 import { isWide } from "./source.ts";
@@ -48,11 +47,8 @@ export const proofSrc = (id: string) => `${WRITE_BASE}${PROOF_ROUTE}?id=${encode
 /** A recorded output's file, through the same route and rules (2026-11-17). */
 export const outputSrc = (id: string) => `${WRITE_BASE}${PROOF_ROUTE}?output=${encodeURIComponent(id)}`;
 
-/** In review, newest first: what the Deliverables tab and the badges count. A scoping project's wait in the Scope tab instead. */
-export const inReview = (all: Deliverables | undefined): Deliverable[] => (all ?? []).filter((d) => d.state === "review" && !d.scope).sort((a, b) => b.updatedAt - a.updatedAt);
-
-/** In review in a scoping project's Scope pane (1.11.0): not on Deliverables until the project is active. */
-export const inScope = (d: Deliverable) => d.state === "review" && !!d.scope;
+export { inReview, inScope, onDeliverablesTab } from "./kit.ts";
+import { onDeliverablesTab } from "./kit.ts";
 
 /** A Markdown proof (a .md or .markdown file) is rendered the way bb renders a chat message, not shown as its source. */
 const isMarkdown = (p: { path?: string | null; caption: string }) => /\.(md|markdown)$/i.test(p.path ?? "");
@@ -195,59 +191,66 @@ function Review({ d, refetchAll }: { d: Deliverable; refetchAll: () => void }) {
   return (
     <div className="mt-3 grid gap-2">
       {asking ? (
-        <>
-          <div className="grid gap-1.5">
-            <Label htmlFor={`changes-${d.id}`}>What to change</Label>
-            <Textarea id={`changes-${d.id}`} value={text} onChange={(e) => setText(e.target.value)} maxLength={4000} className="min-h-20" placeholder="The lead gets these words and re-delivers" data-changes-text={d.id} />
-          </div>
-          <div className="flex flex-wrap justify-end gap-2">
-            <Btn tone="ghost" disabled={busy} onClick={() => setAsking(false)}>
-              Cancel
-            </Btn>
-            <Btn tone="primary" data-changes-send={d.id} disabled={busy || !text.trim()} onClick={() => void sendBack()}>
-              Send back
-            </Btn>
-          </div>
-        </>
+        <ReplyComposer
+          field={
+            <ReplyField
+              id={`changes-${d.id}`}
+              aria-label="What to change"
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              maxLength={4000}
+              placeholder="What to change? The lead gets these words and re-delivers"
+              data-changes-text={d.id}
+            />
+          }
+          actions={
+            <>
+              <ReplyAction disabled={busy} onClick={() => setAsking(false)}>
+                Cancel
+              </ReplyAction>
+              <ReplyButton data-changes-send={d.id} disabled={busy || !text.trim()} onClick={() => void sendBack()}>
+                Send back
+              </ReplyButton>
+            </>
+          }
+        />
       ) : (
-        <>
-          <Textarea
-            aria-label="Next move"
-            value={next}
-            onChange={(e) => setNext(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                e.preventDefault();
-                if (!busy && action) void approve();
-              }
-            }}
-            maxLength={4000}
-            // one line to start, up to four as it fills
-            rows={1}
-            className="max-h-28 min-h-9"
-            placeholder="Next move? e.g. forward this to the team"
-            data-next-text={d.id}
-          />
-          <div className="flex flex-wrap justify-end gap-2">
-            <Btn data-changes={d.id} disabled={busy} onClick={() => setAsking(true)}>
-              Request changes
-            </Btn>
-            <Btn
-              tone="primary"
-              data-approve={d.id}
-              data-next-send={action ? d.id : undefined}
-              title={action ? "Approve, and the lead does this next" : "Closes it; the lead does nothing further"}
-              disabled={busy}
-              onClick={() => void approve()}
-            >
-              {action ? "Send to lead" : "Done, nothing more"}
-            </Btn>
-          </div>
-          {/* said under the button, not only in its tooltip: a phone has no hover */}
-          <p data-approve-hint="" className="m-0 text-right text-xs text-muted-foreground">
-            {action ? "Approves it; the lead does this and reports back" : "Closes it; the lead does nothing further"}
-          </p>
-        </>
+        <ReplyComposer
+          field={
+            <ReplyField
+              aria-label="Next move"
+              value={next}
+              onChange={(e) => setNext(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                  e.preventDefault();
+                  if (!busy && action) void approve();
+                }
+              }}
+              maxLength={4000}
+              // one line to start, growing as it fills
+              placeholder="Next move? e.g. forward this to the team"
+              data-next-text={d.id}
+            />
+          }
+          // said in the row, not only in the button's tooltip: a phone has no hover
+          hint={
+            <span data-approve-hint="" className="text-xs text-muted-foreground">
+              {action ? "Approves it; the lead does this and reports back" : "Closes it; the lead does nothing further"}
+            </span>
+          }
+          actions={
+            <>
+              <ReplyAction variant="outline" data-changes={d.id} disabled={busy} onClick={() => setAsking(true)}>
+                Request changes
+              </ReplyAction>
+              {/* enabled while empty: "Done, nothing more" closes it with no next move */}
+              <ReplyButton data-approve={d.id} data-next-send={action ? d.id : undefined} title={action ? "Approve, and the lead does this next" : "Closes it; the lead does nothing further"} disabled={busy} onClick={() => void approve()}>
+                {action ? "Send to lead" : "Done, nothing more"}
+              </ReplyButton>
+            </>
+          }
+        />
       )}
       <PageError where={d.id} />
     </div>
@@ -588,7 +591,7 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
   }, []);
   useRealtime(CHANGED_CHANNEL, refetchOutputs);
   const sorted = useSidebarOrder(order.data);
-  const [view, setView] = useState<View>(files ? { ...START, filter: "files" } : START);
+  const [view, setView] = useState<View>({ ...START, filter: files ? "files" : "decided" });
   useEffect(() => {
     if (files) setView((v) => ({ ...v, filter: "files" }));
   }, [files]);
@@ -619,13 +622,14 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
   });
   if (!q.data) return <ReadState q={q} what="the deliverables" />;
   // a scoping project's deliverables in review are reviewed in the Scope tab; once decided they file here as usual
-  const all = q.data.filter((d) => !inScope(d));
-  const tab = deliverablesTab(all, outputs.data ?? [], view, sorted, folders.data?.folders ?? {});
+  const all = q.data.filter(onDeliverablesTab);
+  const tab = deliverablesTab(all, offBoards(q.data, outputs.data ?? []), view, sorted, folders.data?.folders ?? {});
   const review = tab.review;
   const filesState = { loaded: outputs.data !== undefined, error: outputs.error?.message ?? null };
   const foldersState: FoldersState = { data: folders.data, error: folders.error?.message ?? null };
   const empty = <EmptyState title="Nothing to review" text="Leads deliver finished work here with proof (orch_deliver). You approve it or send it back." />;
-  const heading = view.filter === "files" ? "Files" : "Past deliverables";
+  const off = OFF_PAGE.includes(view.filter);
+  const heading = off ? "Files and withdrawn" : view.filter === "decided" ? "Decided" : "Past deliverables";
   // a file's deliverable link: back to the list, with that deliverable picked (wide) or opened (narrow)
   const showDeliverable = (id: string) => {
     setView(() => START);
@@ -640,10 +644,11 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
       <div ref={setRoot} data-deliverables-width={width}>
         <div className="flex flex-col gap-4 pb-8" data-layout="column" style={{ maxWidth: 768, marginInline: "auto" }}>
           <ReadState q={q} what="the deliverables" />
-          {review.length === 0 ? empty : review.map((r) => <DeliverableCard key={r.d.id} d={r.d} refetchAll={refetchAll} outputs={r.outputs} outputsAfter={refetchOutputs} />)}
+          {off ? null : review.length === 0 ? empty : review.map((r) => <DeliverableCard key={r.d.id} d={r.d} refetchAll={refetchAll} outputs={r.outputs} outputsAfter={refetchOutputs} />)}
           <h2 className="m-0 text-base leading-6 font-semibold">{heading}</h2>
           <PastControls tab={tab} view={view} setView={setView} />
           {rows()}
+          {off ? null : <FilesAndWithdrawn tab={tab} setView={setView} />}
         </div>
       </div>
     );
@@ -658,7 +663,7 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
         <ReadState q={q} what="the deliverables" />
         <div className="grid grid-cols-[minmax(340px,420px)_minmax(0,1fr)] items-start gap-6">
           <nav className="flex min-w-0 flex-col gap-6" aria-label="Deliverables">
-            <section aria-label="In review">
+            <section aria-label="In review" hidden={off}>
               <h2 className="m-0 mb-2 text-base leading-6 font-semibold">In review · {review.length}</h2>
               {review.length === 0 ? (
                 <p className="m-0 text-sm text-muted-foreground">Nothing to review.</p>
@@ -687,6 +692,7 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
               <h2 className="m-0 text-base leading-6 font-semibold">{heading}</h2>
               <PastControls tab={tab} view={view} setView={setView} />
               {filesView ? null : rows({ id: shown?.id ?? null, on: setPicked })}
+              {off ? null : <FilesAndWithdrawn tab={tab} setView={setView} />}
             </section>
           </nav>
           {filesView ? (

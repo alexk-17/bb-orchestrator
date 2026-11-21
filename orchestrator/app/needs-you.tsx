@@ -32,8 +32,9 @@ import { Card as Frame } from "./ui/card.tsx";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu.tsx";
 import { Item, ItemGroup } from "./ui/item.tsx";
 import { cn } from "./ui/utils.ts";
+import { useTouchPhone } from "./phone.ts";
 import { AgentFace, type Face } from "./face.tsx";
-import { Btn, EmptyState, Kind, ReadState, Section, Tag, Who, when } from "./ui.tsx";
+import { Btn, EmptyState, Kind, ReadState, Section, Tag, Who, ago, when } from "./ui.tsx";
 
 /** The device's zone, which the server works the defer presets out in. One value, so every read shares a cache entry. */
 export const ZONE: string = (() => {
@@ -132,6 +133,7 @@ export type Act = {
 
 /** One card, answerable in place: Needs you's cards, and the Scope tab's (with no defer presets there). */
 export function CardView({ card, list, presets, isArmed, act, mon, monType = null }: { card: Card; list: List; presets: Preset[]; isArmed: boolean; act: Act; mon: Face | null; monType?: string | null }) {
+  const phone = useTouchPhone();
   const [note, setNote] = useState("");
   const [unticked, setUnticked] = useState<Map<number, Set<number>>>(() => new Map());
   const toggle = (block: number, item: number) =>
@@ -170,8 +172,8 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
               <p className={META}>
                 {/* the project in its accent (accent.ts) */}
                 <span style={accentTone(monType) ? { color: ACCENT, fontWeight: 600 } : undefined}>{card.project ?? "no project"}</span>
-                <span aria-hidden>·</span>
-                <span className="orch-mono">{card.origin}</span>
+                <span aria-hidden data-origin-lead={card.origin === `lead:${card.project}` && card.asker === card.origin ? "" : undefined}>·</span>
+                <span className="orch-mono" data-origin-lead={card.origin === `lead:${card.project}` && card.asker === card.origin ? "" : undefined}>{card.origin}</span>
                 {card.asker !== card.origin ? (
                   <>
                     <span aria-hidden>via</span>
@@ -195,7 +197,7 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
             </div>
             {/* one fixed slot: the mark replaces the time, so marking moves nothing */}
             <span data-mark={mark ? "" : undefined} className={cn(WHEN, mark && "font-medium")} style={{ color: markColor }}>
-              {mark ?? when(card.askedAt)}
+              {mark ?? (phone ? ago(Date.parse(card.askedAt), Date.now()) : when(card.askedAt))}
             </span>
           </header>
           {notice ? (

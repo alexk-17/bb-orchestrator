@@ -3,6 +3,11 @@ https://github.com/shadcn-ui/ui apps/v4/registry/new-york-v4/ui at c257f688cf4de
 (2026-09-04). Changes, each marked in the source with a 2026-11-17 comment: imports point at this folder, Radix
 portals carry bb's plugin marks (utils.ts PORTAL), menus have no entry or exit animation, the joined toggle group and
 the scroll bar use no left border, error words (the destructive Alert and menu item) are bb's --destructive-text, `dark:` is written `[&:is(.dark_*)]:` (bb's .dark class), and Avatar has 16 to 48 px sizes and a sprite variant for pixel art.
+2026-11-20: sidebar.tsx, sheet.tsx and use-mobile.ts (from registry/new-york-v4/hooks) at the same commit; the sidebar
+writes no sidebar_state cookie and adds no ⌘/Ctrl+B listener (both are bb's own sidebar's), and the sheet's portal
+parts carry the plugin marks.
+resizable.tsx was added 2026-11-20 from the same registry, on react-resizable-panels 4.24.1 (Group, Panel, Separator); only its import of cn points here.
+command.tsx was added 2026-11-20 from the same registry and commit, on cmdk 1.1.1 (pinned); only its imports of cn and the dialog point here.
 
 MIT License
 

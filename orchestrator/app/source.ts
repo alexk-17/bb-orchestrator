@@ -9,8 +9,8 @@ import type { Lane } from "./lanes.ts";
 type Project = Projects[number];
 type Card = NeedsYou["cards"][number];
 
-/** At this tab width and wider, the list sits beside the selected project; narrower, one column that expands in place. */
-export const WIDE_MIN = 1200;
+/** At this pane width and wider the list sits beside the selected item; narrower, the item opens as its own page with Back (the owner, 2026-11-20). */
+export const WIDE_MIN = 720;
 export const isWide = (width: number) => width >= WIDE_MIN;
 
 /** Waits that are the owner's to settle: they go under Needs you, the rest under Blocked by. */

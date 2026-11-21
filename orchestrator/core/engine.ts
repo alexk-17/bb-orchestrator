@@ -3,6 +3,7 @@
 // Every write is a transaction on the store; delivery to a bb thread is a separate step (`flush`) that the server
 // runs through bb's SDK. An item is written before it is sent, so a crash between the two re-sends it, marked
 // "(again)" — never loses it. Nothing here calls a model: escalation, resends and dead letters are the `tick`.
+import { cosLine, feedPage, feedThread, type CosLineEntry, type FeedFilter, type FeedMsg, type FeedPage, type FeedPrompt, type FeedSource } from "./feed.ts";
 import { BatchInbox, type MailPolicy } from "./batch-inbox.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
@@ -46,6 +47,8 @@ export const UNHELD_GRACE_MS = 24 * 3_600_000;
 /** How far apart bb's two "no such thread" answers must be before an agent is retired for it (threadNotFound). */
 export const GONE_CONFIRM_MS = 5 * 60_000;
 /** A project's direct line on the Projects row (contract.ts directLineSchema). */
+/** A feed post by its key (Engine.post): `line` is where a reply to it goes, null when it only opens. */
+export interface Post { key: string; kind: string; id: string; title: string; project: string | null; line: string | null; rev: number | null }
 export interface DirectLine {
   messages: { id: string; text: string; at: number; followUp: string | null; state: string; outcome: string | null; note: string | null; answeredAt: number | null; unread: boolean; images?: { name: string }[] }[];
   unread: boolean;
@@ -54,6 +57,10 @@ export interface DirectLine {
 export const DIRECT_IN_FORCE_MS = 48 * 3_600_000;
 /** The most of a project's direct thread the Projects row reads. */
 export const DIRECT_SHOWN = 4;
+/** An owner's message that starts a feed post of its own: its about becomes msg:<its id>. */
+export const OWN_POST = "msg:";
+/** direct_images rows staged for the owner's tracked messages to the CoS (no project). */
+export const COS_IMAGES = "@cos";
 const WHEN_WORDS: Record<WaitWhen, string> = { approved: "approved", green: "green (checks passing)", ready: "ready to merge", merged: "merged" };
 /** How far apart a handoff's retire and its successor's start may lie (two clock reads before 1.2.0). */
 const HANDOFF_GAP_MS = 1000;
@@ -98,14 +105,14 @@ export interface Settings {
   // Pokémon are opt-in (requested 2026-11-13). Off: agents still get one in the database, so switching on shows it, but
   // every Agent the engine hands out has mon null, so no name reaches a brief, a board row, the app or the sidebar.
   pokemon: boolean;
-  batchInbox: boolean; // off by default, in the server setting and here: per-message delivery until the owner switches it on
+  batchInbox: boolean; // on by default, in the server setting and here (2026-11-20, tokens): off is per-message delivery
   inboxDebounceMs: number;
   // The personas hook (2026-11-18, personas.ts): the pack the personaPack setting names, already checked; an error when
   // the path is set but the pack failed (nothing shows, nothing moves); null when none is set. Picks follow a loaded pack
   // whatever the pokemon setting (so switching it moves nothing); what shows needs pokemon on too.
   personas?: PersonaPack | { error: string } | null;
 }
-export const DEFAULT_SETTINGS: Settings = { escalateMs: 5 * 60_000, resendMs: 10 * 60_000, owner: "", pokemon: false, batchInbox: false, inboxDebounceMs: 2000, personas: null };
+export const DEFAULT_SETTINGS: Settings = { escalateMs: 5 * 60_000, resendMs: 10 * 60_000, owner: "", pokemon: false, batchInbox: true, inboxDebounceMs: 2000, personas: null };
 const packOf = (x: Settings["personas"]): PersonaPack | null => (x && !("error" in x) ? x : null);
 
 export type DeliverResult = { delivery: "sent" } | { delivery: "queued"; queuedMessageId: string } | { delivery: "held"; why: string };
@@ -174,6 +181,7 @@ interface ItemRow {
   dead_seq: number | null;
   dead_at: number | null;
   on_board: number;
+  about: string | null;
 }
 const toItem = (r: ItemRow): Item => ({
   id: r.id,
@@ -194,6 +202,7 @@ const toItem = (r: ItemRow): Item => ({
   note: r.note,
   deadAt: r.dead_at ?? null,
   onBoard: r.on_board === 1,
+  about: r.about ?? null,
 });
 
 interface AgentRow {
@@ -549,6 +558,8 @@ export interface DeliverInput {
   points?: Point[];
   /** A scoping task (1.12.0, its id or an open task's name): reviewed in the owner's Scope pane under it. */
   scopeTask?: string | null;
+  /** A Multiplayer board's review (its board id, resolved by the caller): reviewed on that board, never on Deliverables. */
+  board?: { id: string; record?: string; flag?: string } | null;
 }
 interface TaskRow {
   id: string;
@@ -686,7 +697,7 @@ export class Engine {
     migrate(db);
     this.batch = new BatchInbox(db, () => this.now(), (id) => {
       const it = this.item(id);
-      return it ? this.render(it, false) : null;
+      return it ? this.renderInDigest(it) : null;
     });
     if (this.settings.batchInbox) this.batch.sync();
     // the Pokémon families: it must never stop the plugin from starting (its transaction rolls back on a failure). A
@@ -1357,8 +1368,8 @@ export class Engine {
     return r ? toItem(r) : null;
   }
 
-  /** Write an item. With a key, writing it again returns the first one (a safe resend). */
-  private put(p: { recipient: string; sender: string; kind: ItemKind; ref?: string | null; body: string; key?: string | null; needsAck: boolean }): Item {
+  /** Write an item. With a key, writing it again returns the first one (a safe resend). `about: OWN_POST` keys it to itself. */
+  private put(p: { recipient: string; sender: string; kind: ItemKind; ref?: string | null; body: string; key?: string | null; needsAck: boolean; about?: string | null }): Item {
     if (p.key) {
       const r = this.db.prepare(`SELECT * FROM items WHERE sender = ? AND send_key = ?`).get(p.sender, p.key) as ItemRow | undefined;
       if (r) return toItem(r);
@@ -1366,9 +1377,9 @@ export class Engine {
     const id = `i-${hex(6)}`;
     this.db
       .prepare(
-        `INSERT INTO items (id, recipient, sender, kind, ref, body, send_key, needs_ack, state, attempts, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)`,
+        `INSERT INTO items (id, recipient, sender, kind, ref, body, send_key, needs_ack, state, attempts, created_at, about) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
       )
-      .run(id, p.recipient, p.sender, p.kind, p.ref ?? null, p.body, p.key ?? null, p.needsAck ? 1 : 0, this.now());
+      .run(id, p.recipient, p.sender, p.kind, p.ref ?? null, p.body, p.key ?? null, p.needsAck ? 1 : 0, this.now(), p.about === OWN_POST ? `msg:${id}` : (p.about ?? null));
     const item = this.item(id)!;
     if (this.settings.batchInbox) this.batch.record(item);
     return item;
@@ -1383,6 +1394,7 @@ export class Engine {
   /** The text a thread sees. Short, one header line, the body, then what to do. */
   render(it: Item, again: boolean): string {
     if (it.kind === "owner.message") return this.renderDirect(it, again);
+    if (it.kind === "owner.cos") return this.renderCos(it, again);
     const head = `[orchestrator] ${it.kind} ${it.ref && it.kind.startsWith("decision") ? it.ref : it.id} from ${it.sender}${again ? " (again)" : ""}:`;
     const close =
       it.kind === "message"
@@ -1393,19 +1405,35 @@ export class Engine {
     return `${head} ${it.body}${close}`;
   }
 
+  /** An item inside a digest: the digest's own line gives its id, kind, sender, ref and flags, and its header the
+   *  ack rules, so only the body is left. The owner's messages (to a lead, to the CoS) keep all their rules. */
+  private renderInDigest(it: Item): string {
+    if (it.kind === "owner.message") return this.renderDirect(it, false);
+    if (it.kind === "owner.cos") return this.renderCos(it, false);
+    return it.body;
+  }
+
   /**
    * The owner's direct message as its lead reads it. It states its own rules, because a running lead keeps the role
    * text it started with (PLAN 3.2): how to answer, the 48 h conflict rule, and that it approves nothing.
    */
   private renderDirect(it: Item, again: boolean): string {
     const o = this.owner;
-    const head = `[orchestrator] direct message ${it.id} from ${o.Name} (the owner, from the Projects tab)${it.ref ? `, a follow-up of ${it.ref}` : ""}${again ? " (again)" : ""}:`;
+    const re = this.reLine(it.about);
+    const head = `[orchestrator] direct message ${it.id} from ${o.Name} (the owner, ${re ? `replying in the feed to ${re}` : "from the Projects tab"})${it.ref ? `, a follow-up of ${it.ref}` : ""}${again ? " (again)" : ""}:`;
     return [
       `${head} ${it.body}`,
       `(How to answer: orch_ack(id=${it.id}, outcome, note). The note is what ${o.name} reads on the Projects row, and the CoS gets a copy. An ack means taken, not finished: say in the note what you will do, and ack at once even for long work. Don't message ${o.name} any other way.`,
       `Conflicts: for 48 h this word wins on its point over a CoS instruction, earlier or later; only ${o.name}'s own later word (another direct message, or a card ${o.name} answers) changes it. If the CoS says ${o.name} changed their mind, file one card with both instructions as options. Say in your note what you set aside, and tell the CoS. orch_inbox lists the direct messages still in force.`,
       `Gates: this is not an approval. A merge, a production change or a public push still needs its own card even if this says to do it: file the card and cite ${it.id}. An ack bound to a PR (pr, when) is refused for it. It is not a plan approval or a standing rule.)`,
     ].join("\n");
+  }
+
+  /** The owner's tracked message as the CoS reads it: their words first, then one line on how to answer (a running CoS keeps its old role text). */
+  private renderCos(it: Item, again: boolean): string {
+    const o = this.owner;
+    const re = this.reLine(it.about);
+    return `${it.body}\n\n[orchestrator] ${o.Name}'s message ${it.id}${re ? `, re ${re}` : ""}${it.ref ? `, a follow-up of ${it.ref}` : ""}${again ? " (again)" : ""}. Answer it with orch_reply_owner(ref=${it.id}, text): your reply shows under it in ${o.name}'s feed. It approves nothing.`;
   }
 
   /** Send every pending item whose recipient can take it. Safe to call often. */
@@ -1416,7 +1444,7 @@ export class Engine {
         retryMs: this.settings.resendMs,
         agent: (address) => this.agentByAddress(address),
         held: (a) => !!(a.project && this.project(a.project)?.heldAt),
-        deliver: (a, text, token) => this.ports.deliver(a.threadId, text, { id: `wake:${token}`, sender: "orchestrator", recipient: a.address, kind: "notice" } as Item),
+        deliver: (a, text, token, bare) => this.ports.deliver(a.threadId, text, { id: `wake:${token}`, sender: "orchestrator", recipient: a.address, kind: "notice", body: bare } as Item),
         log: (text) => this.ports.log(text),
         dead: (recipient, _token, note) => this.wakeDead(recipient, note),
         paused: (itemId) => this.importPaused(itemId),
@@ -1867,7 +1895,7 @@ export class Engine {
   private directRoot(id: string): Item | null {
     let it = this.item(id);
     for (let hops = 0; it && hops < 8; hops++) {
-      if (it.kind === "owner.message") return it;
+      if (it.kind === "owner.message" || it.kind === "owner.cos") return it;
       if (!it.ref?.startsWith("i-")) return null;
       it = this.item(it.ref);
     }
@@ -1879,7 +1907,7 @@ export class Engine {
    * characters. `followUp` names an earlier direct message to the same lead. Refused without a live lead. The CoS gets
    * a read-only copy and Activity keeps a row. Never a push.
    */
-  ownerMessage(slug: string, text: string, followUp: string | null = null, images: string[] = []): Item {
+  ownerMessage(slug: string, text: string, followUp: string | null = null, images: string[] = [], about: string | null = null): Item {
     const words = text.trim();
     if (!words && !images.length) throw new EngineError("invalid", "empty message");
     if (words.length > 4000) throw new EngineError("invalid", `a message is at most 4000 characters; this is ${words.length}`);
@@ -1890,6 +1918,8 @@ export class Engine {
     const to = `lead:${slug}`;
     if (!this.liveAt(to)) throw new EngineError("bad_state", `${slug} has no live lead: start it first`);
     return tx(this.db, () => {
+      const thread = this.conversation(to, "owner.message", followUp, about);
+      followUp = thread.followUp;
       if (followUp) {
         const first = this.item(followUp);
         if (!first || first.kind !== "owner.message" || first.recipient !== to) throw new EngineError("invalid", `${followUp} isn't a direct message to ${to}`);
@@ -1900,14 +1930,203 @@ export class Engine {
       for (const i of imgs) if (!i || i.slug !== slug || i.item_id !== null) throw new EngineError("invalid", "an image isn't one sent for this message: attach it again");
       const kept = imgs.map((i) => imageOf(i!));
       const body = withImages(words, kept);
-      const it = this.put({ recipient: to, sender: "person", kind: "owner.message", ref: followUp, body, needsAck: true });
+      const it = this.put({ recipient: to, sender: "person", kind: "owner.message", ref: followUp, body, needsAck: true, about: thread.about });
       kept.forEach((i, n) => this.db.prepare(`UPDATE direct_images SET item_id = ?, n = ? WHERE id = ?`).run(it.id, n, i.id));
+      const re = this.reLine(it.about);
       if (this.agentByAddress("cos"))
-        this.put({ recipient: "cos", sender: "person", kind: "copy", ref: it.id, body: `(copy of ${this.owner.name}'s direct message ${it.id} to ${to}${followUp ? `, a follow-up of ${followUp}` : ""}; ${to} answers it, not you) ${body}`, key: `copy:cos:${it.id}`, needsAck: false });
+        this.put({ recipient: "cos", sender: "person", kind: "copy", ref: it.id, body: `(copy of ${this.owner.name}'s direct message ${it.id} to ${to}${followUp ? `, a follow-up of ${followUp}` : ""}${re ? `, re ${re}` : ""}; ${to} answers it, not you) ${body}`, key: `copy:cos:${it.id}`, needsAck: false });
       this.boardAdd("direct", "person", slug, `${this.owner.Name} → ${to}${followUp ? ` (follow-up of ${followUp})` : ""}`, body, it.id);
       this.ports.changed();
       return it;
     });
+  }
+
+  /** An owner message's conversation: `about` (checked against line `to`), else `followUp`'s post, else its own. */
+  private conversation(to: string, kind: "owner.message" | "owner.cos", followUp: string | null, about: string | null): { about: string; followUp: string | null } {
+    if (about) {
+      const post = this.post(about);
+      if (!post) throw new EngineError("not_found", `no post ${about}`);
+      if (post.line !== to) throw new EngineError("invalid", `a reply to ${about} goes to ${post.line ?? "nobody (it only opens)"}, not ${to}`);
+      const last = this.db.prepare(`SELECT id FROM items WHERE about = ? AND kind = ? AND recipient = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(about, kind, to) as { id: string } | undefined;
+      return { about, followUp: followUp ?? last?.id ?? (about.startsWith("msg:") ? about.slice(4) : null) };
+    }
+    const prev = followUp ? this.item(followUp) : null;
+    return { about: prev?.about ?? (followUp ? `msg:${followUp}` : OWN_POST), followUp };
+  }
+
+  /** A feed post by its key: what it is, its title, and the line a reply takes (D6: by its author); null if none. */
+  post(key: string): Post | null {
+    const i = key.indexOf(":");
+    const kind = key.slice(0, i);
+    const id = key.slice(i + 1);
+    if (i < 1 || !id) return null;
+    if (kind === "decision") {
+      const d = this.decision(id);
+      if (!d) return null;
+      const origin = d.orchestrator.origin;
+      const line = origin === "cos" ? "cos" : origin === "steward" || !d.project ? null : `lead:${d.project}`;
+      return { key, kind, id, title: d.ask?.title ?? d.request.title, project: d.project, line, rev: null };
+    }
+    if (kind === "deliverable") {
+      const d = this.deliverable(id);
+      return d ? { key, kind, id, title: d.title, project: d.project, line: d.lead, rev: d.rev } : null;
+    }
+    if (kind === "status") return this.project(id) ? { key, kind, id, title: `${id}'s status`, project: id, line: `lead:${id}`, rev: null } : null;
+    if (kind === "merge") {
+      const r = this.db.prepare(`SELECT project, note FROM events WHERE ref = ? AND kind = 'pr' AND value = 'merged' ORDER BY at DESC LIMIT 1`).get(id) as { project: string | null; note: string | null } | undefined;
+      return r ? { key, kind, id, title: `PR ${r.note ? `#${r.note} ` : ""}merged`, project: r.project, line: r.project ? `lead:${r.project}` : null, rev: null } : null;
+    }
+    if (kind === "board") {
+      const r = this.db.prepare(`SELECT kind, project, title FROM board WHERE id = ?`).get(id) as { kind: string; project: string | null; title: string } | undefined;
+      if (!r || (r.kind !== "dead" && r.kind !== "alarm")) return null;
+      return { key, kind, id, title: r.title, project: r.project, line: r.kind === "dead" ? "cos" : null, rev: null };
+    }
+    if (kind === "msg") {
+      const it = this.item(id);
+      if (!it || (it.kind !== "owner.message" && it.kind !== "owner.cos")) return null;
+      return { key, kind, id, title: it.body.replace(/\s+/g, " ").slice(0, 80), project: it.recipient.startsWith("lead:") ? it.recipient.slice(5) : null, line: it.recipient, rev: null };
+    }
+    return null;
+  }
+
+  /** The post a message is about, as its reader is told ("deliverable v-1 “Onboarding checklist” (rev 2)"); none for its own post. */
+  private reLine(about: string | null): string | null {
+    if (!about || about.startsWith("msg:")) return null;
+    const p = this.post(about);
+    if (!p) return null;
+    const what = { decision: "card", deliverable: "deliverable", status: "the status card of", merge: "", board: "" }[p.kind as "decision"] ?? "";
+    if (p.kind === "status") return `${what} ${p.id}`;
+    if (p.kind === "merge") return `the merge of ${p.id}`;
+    return `${what ? `${what} ` : ""}${p.id} ${JSON.stringify(p.title)}${p.rev ? ` (rev ${p.rev})` : ""}`;
+  }
+
+  /** The owner's tracked message to the CoS (D3), answered with orch_reply_owner; `images` are addCosImage ids. */
+  ownerCosMessage(text: string, images: string[] = [], about: string | null = null): Item {
+    const words = text.trim();
+    if (!words && !images.length) throw new EngineError("invalid", "empty message");
+    if (words.length > 8000) throw new EngineError("invalid", `a message is at most 8000 characters; this is ${words.length}`);
+    if (images.length > MAX_IMAGES) throw new EngineError("invalid", `a message carries at most ${MAX_IMAGES} images; this has ${images.length}`);
+    if (!this.liveAt("cos")) throw new EngineError("bad_state", "No Chief of Staff is running: start it from the Projects tab");
+    return tx(this.db, () => {
+      const thread = this.conversation("cos", "owner.cos", null, about);
+      const imgs = [...new Set(images)].map((id) => this.directImageRow(id));
+      if (imgs.length !== images.length) throw new EngineError("invalid", "an image is named twice");
+      for (const i of imgs) if (!i || i.slug !== COS_IMAGES || i.item_id !== null) throw new EngineError("invalid", "an image isn't one sent for this message: attach it again");
+      const kept = imgs.map((i) => imageOf(i!));
+      const it = this.put({ recipient: "cos", sender: "person", kind: "owner.cos", ref: thread.followUp, body: withImages(words, kept), needsAck: true, about: thread.about });
+      kept.forEach((i, n) => this.db.prepare(`UPDATE direct_images SET item_id = ?, n = ? WHERE id = ?`).run(it.id, n, i.id));
+      if (this.settings.batchInbox) this.batch.policy(it.id, { severity: "ACTION", needsReply: true });
+      this.boardAdd("direct", "person", null, `${this.owner.Name} → cos`, it.body, it.id);
+      this.ports.changed();
+      return it;
+    });
+  }
+
+  /** An image staged for the owner's next message to the CoS, kept by the server at `img.path`: its id. */
+  addCosImage(img: { name: string; mime: ImageType; size: number; path: string; sourceProject: string | null }): string {
+    if (img.size > MAX_IMAGE_BYTES) throw new EngineError("invalid", `an image is at most ${MAX_IMAGE_BYTES / 1024 / 1024} MB`);
+    if (!isAbsolute(img.path)) throw new EngineError("invalid", "an image is kept at an absolute path");
+    const id = `img-${hex(6)}`;
+    this.db
+      .prepare(`INSERT INTO direct_images (id, slug, item_id, n, name, mime, size, path, source_project, created_at) VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)`)
+      .run(id, COS_IMAGES, img.name, img.mime, img.size, img.path, img.sourceProject, this.now());
+    return id;
+  }
+
+  /** orch_reply_owner: the CoS's reply, recorded under the message's post, never delivered; it closes the message. */
+  replyOwner(by: Agent, ref: string, text: string): Item {
+    if (by.role !== "cos") throw new EngineError("forbidden", "only the CoS replies to the owner's messages");
+    const words = text.trim();
+    if (!words) throw new EngineError("invalid", "empty reply");
+    if (words.length > 4000) throw new EngineError("invalid", `a reply is at most 4000 characters; this is ${words.length}`);
+    const it = this.item(ref);
+    if (!it || it.kind !== "owner.cos") throw new EngineError("invalid", `${ref} isn't ${this.owner.name}'s message to you: orch_reply_owner answers an owner.cos item`);
+    const id = `i-${hex(6)}`;
+    tx(this.db, () => {
+      const t = this.now();
+      this.db
+        .prepare(`INSERT INTO items (id, recipient, sender, kind, ref, body, needs_ack, state, attempts, created_at, closed_at, outcome, about) VALUES (?, 'person', ?, 'cos.reply', ?, ?, 0, 'closed', 0, ?, ?, 'done', ?)`)
+        .run(id, by.address, ref, words, t, t, it.about);
+      this.closeItems(`id = ?`, [ref], "replied", `replied in ${id}`);
+      this.batch.readOne(ref);
+    });
+    this.ports.changed();
+    return this.item(id)!;
+  }
+
+  /** The CoS's recorded answer to an owner's message, if any. */
+  private cosReplyTo(id: string): Item | null {
+    const r = this.db.prepare(`SELECT * FROM items WHERE ref = ? AND kind = 'cos.reply' ORDER BY created_at DESC LIMIT 1`).get(id) as ItemRow | undefined;
+    return r ? toItem(r) : null;
+  }
+
+  /** The owner's Resend (D6): a dead letter is resent; an unanswered one is redelivered or its recipient re-woken. */
+  resendOwner(id: string): Item {
+    const it = this.item(id);
+    if (!it || it.sender !== "person" || (it.kind !== "owner.message" && it.kind !== "owner.cos")) throw new EngineError("invalid", `${id} isn't one of ${this.owner.name}'s messages`);
+    if (it.state === "dead") return this.resend(id);
+    if (it.kind === "owner.message" ? it.state === "closed" : !!this.cosReplyTo(id)) throw new EngineError("bad_state", `${id} is answered`);
+    // batched, an unread message stays pending: its wake is what went out
+    if ((it.state === "pending" && !this.settings.batchInbox) || it.state === "queued") throw new EngineError("bad_state", `${id} is still on its way to ${it.recipient}`);
+    if (!this.agentByAddress(it.recipient)) throw new EngineError("bad_state", `${it.recipient} has no live agent: start it first`);
+    tx(this.db, () => {
+      // batched, the re-wake is its delivery: the feed's resend clock starts again from it
+      this.db.prepare(`UPDATE items SET state = 'pending', attempts = MAX(attempts, 1), queued_message_id = NULL, delivered_at = ?, closed_at = NULL, outcome = NULL, note = NULL WHERE id = ?`).run(this.settings.batchInbox ? this.now() : null, id);
+      if (this.settings.batchInbox) {
+        this.batch.reroute(id, it.recipient);
+        this.batch.rewake(it.recipient);
+      }
+      this.boardAdd("notice", "person", null, `Resent ${id} to ${it.recipient}`, "", id);
+    });
+    this.ports.changed();
+    return this.item(id)!;
+  }
+
+  private feedSource(prompts: FeedPrompt[] = []): FeedSource {
+    return {
+      db: this.db,
+      now: this.now(),
+      seen: this.feedSeen(),
+      resendMs: this.settings.resendMs,
+      batched: this.settings.batchInbox,
+      batchReadAt: (id) => this.batch.receipt(id).readAt,
+      openCards: this.needsYou().cards,
+      scopeCards: this.scopeView().flatMap((p) => p.cards),
+      live: (address) => !!this.liveAt(address),
+      heldProjects: new Set(this.projects().filter((p) => p.heldAt).map((p) => p.slug)),
+      prompts,
+    };
+  }
+
+  /** One page of the Feed tab (core/feed.ts). `prompts`: the pending bb prompts the server last read for Needs you. */
+  feed(opts: { cursor: string | null; filter: FeedFilter; limit?: number }, prompts: FeedPrompt[] = []): FeedPage {
+    return feedPage(this.feedSource(prompts), opts);
+  }
+
+  /** "You and the CoS" on the Chat tab (core/feed.ts cosLine). */
+  cosLine(before: number | null, limit = 40): { entries: CosLineEntry[]; more: boolean } {
+    return cosLine(this.feedSource(), before, limit, (about) => {
+      const p = this.post(about);
+      return p ? `${p.title}${p.rev ? `, rev ${p.rev}` : ""}${p.project ? ` · ${p.project}` : ""}` : null;
+    });
+  }
+
+  /** A post's conversation before `before`, oldest first (core/feed.ts). */
+  feedThread(about: string, before: number | null, limit = 100): { messages: FeedMsg[]; more: boolean } {
+    return feedThread(this.feedSource(), about, before, limit);
+  }
+
+  /** The feed's one seen-up-to line (D5): posts with agent activity after it are new. */
+  feedSeen(): number {
+    return this.cursor("feed.seen") ?? 0;
+  }
+
+  /** The owner left the feed, or marked all read: the line moves to `upTo`, only forward and never past now. */
+  markFeedSeen(upTo: number): number {
+    const v = Math.max(this.feedSeen(), Math.min(upTo, this.now()));
+    this.setCursor("feed.seen", v);
+    this.ports.changed();
+    return v;
   }
 
   /**
@@ -3213,6 +3432,7 @@ export class Engine {
         if (sd.task) this.closeTask(sd.task, "done", "person", d.id, sd.summary, sd.doc ?? null);
         else this.setMode(d.project, "active", "person", d.id);
       }
+      if (d.orchestrator.board_review) this.settleBoardCard(d);
       if (proposal?.rule_id) this.put({ recipient: "cos", sender: "person", kind: "notice", ref: d.id, body: `Rule ${proposal.rule_id} is live: ${JSON.stringify(proposal.text)}. It settles the cards it matches by itself; you hear about each one.`, key: `rule-live:${d.id}`, needsAck: false });
       this.offerRule(d);
       this.releaseHeld();
@@ -3509,16 +3729,20 @@ export class Engine {
       if (by.role !== "thread") return "On the board.";
       const lead = `lead:${by.project}`;
       const it = this.put({ recipient: lead, sender: by.address, kind: "notice", ref: ref?.startsWith("i-") ? ref : null, body: `report: ${JSON.stringify(title)}${pr ? ` (${pr})` : ""}. It is on the board.`, needsAck: false });
+      // a report wakes its lead: new threads' turn ends no longer do (parentNotifications "stuck", 2026-11-20)
+      if (this.settings.batchInbox) this.batch.policy(it.id, { severity: "ACTION" });
       const closed = this.replyCloses(by, lead, ref?.trim() || null, { id: it.id, body: `report ${JSON.stringify(title)}${pr ? ` (${pr})` : ""}: ${body}` });
       return `On the board and sent to your lead.${closed ? ` It closes ${closed.id} as replied.` : ""}`;
     });
   }
 
   /** Tell an agent's supervisor something (failures, a finished worker). */
-  notifySupervisor(a: Agent, body: string): void {
+  /** wake: an ACTION notice (a failure, a thread blocked on a prompt); a plain turn end stays INFO, for the next digest. */
+  notifySupervisor(a: Agent, body: string, wake = false, key: string | null = null): void {
     const sup = this.supervisorOf(a);
     if (!sup || !this.agentByAddress(sup)) return;
-    this.put({ recipient: sup, sender: "orchestrator", kind: "notice", ref: null, body: `${a.address}: ${body}`, needsAck: false });
+    const it = this.put({ recipient: sup, sender: "orchestrator", kind: "notice", ref: null, body: `${a.address}: ${body}`, key, needsAck: false });
+    if (wake && this.settings.batchInbox) this.batch.policy(it.id, { severity: "ACTION" });
   }
 
   /** A host alarm for the Steward. */
@@ -4616,9 +4840,10 @@ export class Engine {
     return d;
   }
 
-  /** Newest change first. */
-  deliverables(limit = 200): Deliverable[] {
-    return (this.db.prepare(`SELECT id, json FROM deliverables ORDER BY updated_at DESC, id DESC LIMIT ?`).all(limit) as DeliverableDbRow[]).map((r) => JSON.parse(r.json));
+  /** Newest change first; `board`: only a board's (true) or only the rest (false). */
+  deliverables(limit = 200, board?: boolean): Deliverable[] {
+    const only = board === undefined ? "" : `WHERE json_extract(json, '$.board') IS ${board ? "NOT " : ""}NULL`;
+    return (this.db.prepare(`SELECT id, json FROM deliverables ${only} ORDER BY updated_at DESC, id DESC LIMIT ?`).all(limit) as DeliverableDbRow[]).map((r) => JSON.parse(r.json));
   }
 
   private saveDeliverable(d: Deliverable): void {
@@ -4754,7 +4979,7 @@ export class Engine {
   deliverableFolders(): { hostId: string | null; folders: Record<string, NonNullable<ReturnType<typeof listFolder>>> } {
     const folders: Record<string, NonNullable<ReturnType<typeof listFolder>>> = {};
     let hostId: string | null = null;
-    for (const d of this.deliverables()) {
+    for (const d of [...this.deliverables(200, false), ...this.deliverables(200, true)]) {
       hostId ??= d.revisions.flatMap((r) => r.proof).find((p) => p.stored === "copied" && p.hostId)?.hostId ?? null;
       const f = d.folder ? listFolder(d.folder) : null;
       if (f) folders[d.id] = f;
@@ -4835,14 +5060,22 @@ export class Engine {
       const t = this.now();
       // scoping (1.11.0): reviewed in the owner's Scope pane, not on Deliverables; no push, a read-only copy to the CoS.
       // A scoping task's (1.12.0) too; a revision stays in the task its earlier rev was in while that task is open.
+      if (input.board && input.scopeTask) throw new EngineError("invalid", "board and scope_task route a deliverable to different places: give one");
       let task = input.scopeTask ? this.resolveTask(by, input.scopeTask).id : null;
-      let scoping = !!task || this.isScoping(by.project);
+      let scoping = !input.board && (!!task || this.isScoping(by.project));
       let d: Deliverable;
+      let board: Deliverable["board"] = input.board ? { id: input.board.id, ...(input.board.record ? { record: input.board.record } : {}), ...(input.board.flag ? { flag: input.board.flag } : {}) } : undefined;
       if (input.revises) {
         d = this.mustDeliverable(input.revises);
         if (d.lead !== by.address) throw new EngineError("forbidden", `${d.id} is ${d.lead}'s deliverable`);
         if (d.state !== "changes") throw new EngineError("bad_state", `${d.id} is ${d.state}: revise only a deliverable ${this.owner.name} sent back with changes`);
-        if (!task && d.scope_task && this.task(d.scope_task)?.state === "scoping") {
+        // an old-schema lead revises without board: the revision stays on its board
+        if (!board && d.board) {
+          board = { id: d.board.id, ...(d.board.record ? { record: d.board.record } : {}) };
+          scoping = false;
+        }
+        this.closeBoardCard(d, `rev ${d.rev + 1} replaced it`);
+        if (!board && !task && d.scope_task && this.task(d.scope_task)?.state === "scoping") {
           task = d.scope_task;
           scoping = true;
         }
@@ -4856,6 +5089,8 @@ export class Engine {
         else delete d.scope;
         if (task) d.scope_task = task;
         else delete d.scope_task;
+        if (board) d.board = board;
+        else delete d.board;
         this.saveDeliverable(d);
         // The owner's request is answered by the new revision: its item would otherwise be resent and dead-lettered
         this.closeItems(`recipient = ? AND kind = 'deliverable.changes' AND ref = ?`, [by.address, d.id], "done", `re-delivered as rev ${d.rev}`);
@@ -4876,13 +5111,19 @@ export class Engine {
           withdrawn: null,
           ...(scoping ? { scope: true } : {}),
           ...(task ? { scope_task: task } : {}),
+          ...(board ? { board } : {}),
         };
         this.fileInto(d, proof);
         this.saveDeliverable(d);
         this.boardAdd("deliverable", by.address, by.project, `Delivered: ${title}`, summary, d.id);
       }
-      if (!scoping) this.ports.delivered?.(d);
-      else if (this.agentByAddress("cos"))
+      if (d.board?.flag) {
+        d.board.card = this.boardCard(d).id;
+        this.saveDeliverable(d);
+      }
+      // a board's review stays quiet on its board; a flag reaches the owner as its Needs you card
+      if (!scoping && !d.board) this.ports.delivered?.(d);
+      else if (scoping && this.agentByAddress("cos"))
         this.put({
           recipient: "cos",
           sender: by.address,
@@ -4896,6 +5137,74 @@ export class Engine {
     });
   }
 
+  /** A flagged board deliverable's Needs you card: asked by the orchestrator, so no rule settles it and its answer acts on the deliverable. */
+  private boardCard(dl: Deliverable): Decision {
+    const t = this.now();
+    const flag = dl.board?.flag ?? "";
+    const options = this.options([{ label: "Approve", detail: "Approves this revision; the lead is told" }, { label: "Send back", detail: "Sends it back to the lead with your note, or the flag" }], 2);
+    const question = oneLine(`${flag}: ${dl.title}`.slice(0, 600), 600, "question");
+    const context = `${dl.lead} delivered ${dl.id} (rev ${dl.rev}) from a Multiplayer board, flagged: ${flag}. Approve or send it back here, or on the board's review view.`;
+    const d: Decision = {
+      schema: 1,
+      id: decisionId(t),
+      rev: 0,
+      state: "open",
+      kind: "question",
+      created_at: iso(t),
+      updated_at: iso(t),
+      project: dl.project,
+      request_key: `board-flag:${dl.id}:${dl.rev}`,
+      request: { by: { role: "orchestrator", project: null, thread: null, terminal: null, machine: null, address: "orchestrator" }, title: "Board review needs you", question, context, options },
+      reply_to: { labels: { "orchestrator.address": "orchestrator" }, terminal: null, machine: null },
+      ask: null,
+      answer: null,
+      relay: null,
+      ack: null,
+      cos_notified_at: null,
+      owed_from: null,
+      merged_into: null,
+      merged: [],
+      withdrawn: null,
+      deferred: null,
+      returned: null,
+      history: [],
+      orchestrator: {
+        at_level: "person",
+        asker: "orchestrator",
+        origin: "orchestrator",
+        action: null,
+        triage: { filed_at: null, due_at: null, triaged_at: null, by: null, escalated_at: null },
+        forwarded_by: null,
+        plan: null,
+        board_review: { deliverable: dl.id, rev: dl.rev },
+      },
+    };
+    this.save(d, "add", "orchestrator", null, null);
+    this.putAsk(d, "orchestrator", d.request.title, question, context, options, true);
+    // a flag means the lead couldn't settle it, so neither answer is recommended
+    d.ask!.options = d.ask!.options.map((o) => ({ ...o, recommended: false }));
+    this.save(d, "ask", "orchestrator", null, null);
+    this.ports.cardUp?.(d);
+    return this.mustDecision(d.id);
+  }
+
+  /** The owner answered a board card: option 1 approves that revision; anything else sends it back. The card then closes. */
+  private settleBoardCard(c: Decision): void {
+    const br = c.orchestrator.board_review!;
+    const dl = this.deliverable(br.deliverable);
+    const text = c.answer?.text ?? null;
+    if (dl && dl.state === "review" && dl.rev === br.rev) {
+      if (c.answer?.option === "1") this.personApprove(dl.id, dl.rev, text);
+      else this.personRequestChanges(dl.id, dl.rev, text ?? `Sent back from Needs you: ${dl.board?.flag ?? "flagged"}`);
+    }
+    this.orchestratorAck(c.id, "done", dl && dl.state === "review" ? null : `${br.deliverable} was already ${dl?.state ?? "gone"}`);
+  }
+
+  private closeBoardCard(dl: Deliverable, why: string): void {
+    const c = dl.board?.card ? this.decision(dl.board.card) : null;
+    if (c && (c.state === "open" || c.state === "asked")) this.mootOne(c, why, "orchestrator");
+  }
+
   /** The lead takes back a deliverable that is in review or sent back (never an approved one). */
   withdrawDeliverable(by: Agent, id: string, reason: string | null): Deliverable {
     if (by.role !== "lead") throw new EngineError("forbidden", "only a lead withdraws its deliverables");
@@ -4906,6 +5215,7 @@ export class Engine {
       const why = reason?.trim() ? reason.trim().slice(0, 2000) : null;
       d.state = "withdrawn";
       d.withdrawn = { at: iso(this.now()), reason: why };
+      this.closeBoardCard(d, "the lead withdrew it");
       this.saveDeliverable(d);
       this.closeItems(`recipient = ? AND kind = 'deliverable.changes' AND ref = ?`, [by.address, id], "superseded", "withdrawn");
       this.boardAdd("deliverable", by.address, by.project, `Withdrawn: ${d.title}`, why ?? "", id);
@@ -4935,6 +5245,7 @@ export class Engine {
       const at = iso(this.now());
       d.state = "approved";
       d.feedback.push({ rev, by: "person", text, at, outcome: "approved" });
+      this.closeBoardCard(d, `${this.owner.name} approved it`);
       if (action) {
         const it = this.put({
           recipient: d.lead,
@@ -4975,6 +5286,7 @@ export class Engine {
       const d = this.reviewable(id, rev);
       d.state = "changes";
       d.feedback.push({ rev, by: "person", text: words, at: iso(this.now()), outcome: "changes" });
+      this.closeBoardCard(d, `${this.owner.name} sent it back`);
       this.saveDeliverable(d);
       this.put({
         recipient: d.lead,
@@ -5013,7 +5325,7 @@ export class Engine {
         const fb = d.feedback.at(-1);
         const note = fb ? `; ${this.owner.name} ${fb.outcome === "approved" ? "approved" : "asked for changes to"} rev ${fb.rev} ${fb.at}${fb.text ? `: ${JSON.stringify(fb.text.slice(0, 400))}` : ""}` : "";
         const withdrawn = d.withdrawn ? `; withdrawn ${d.withdrawn.at}${d.withdrawn.reason ? `: ${JSON.stringify(d.withdrawn.reason.slice(0, 200))}` : ""}` : "";
-        lines.push(`- ${d.id} ${JSON.stringify(d.title)} by ${d.lead}, rev ${d.rev}, ${label[d.state]}${d.scope && d.state === "review" ? ` [scoping: in ${this.owner.name}'s Scope pane]` : ""}; delivered ${iso(d.createdAt)}, updated ${iso(d.updatedAt)}${note}${withdrawn}`);
+        lines.push(`- ${d.id} ${JSON.stringify(d.title)} by ${d.lead}, rev ${d.rev}, ${label[d.state]}${d.scope && d.state === "review" ? ` [scoping: in ${this.owner.name}'s Scope pane]` : ""}${d.board ? ` [a board's review: on ${this.owner.name}'s Multiplayer tab]` : ""}; delivered ${iso(d.createdAt)}, updated ${iso(d.updatedAt)}${note}${withdrawn}`);
         const next = this.deliverableNext(d);
         if (next) {
           const how =
@@ -5117,6 +5429,8 @@ export class Engine {
       if (!a || a.status !== "idle" || a.idleAt === null) continue;
       // on hold the owner's direct message waits without expiring (PLAN 3.8): the lead answers it after the resume
       if (it.kind === "owner.message" && a.project && this.project(a.project)?.heldAt) continue;
+      // the owner's message to the CoS never goes dead: its feed state says "no reply yet" and offers Resend
+      if (it.kind === "owner.cos") continue;
       const since = Math.max(a.idleAt, it.deliveredAt ?? 0);
       if (t - since < this.settings.resendMs) continue;
       // 2026-11-13: a resend landed thread:agent-v2:9's "squash then QA" 63 min late, after five newer messages from
@@ -5258,6 +5572,8 @@ export class Engine {
       lines.push(
         it.kind === "owner.message"
           ? `- direct message ${it.id} from ${this.owner.Name}${it.ref ? ` (a follow-up of ${it.ref})` : ""} [needs ack with a note; not an approval]: ${it.body}`
+          : it.kind === "owner.cos"
+          ? `- ${this.owner.Name}'s message ${it.id} [answer with orch_reply_owner(ref=${it.id}, text)]: ${it.body}`
           : `- ${it.kind} ${it.ref && it.kind.startsWith("decision") ? it.ref : it.id}${it.ref && !it.kind.startsWith("decision") ? ` (re ${it.ref})` : ""} from ${it.sender}${it.needsAck ? " [needs ack]" : ""}: ${preview}`,
       );
     }

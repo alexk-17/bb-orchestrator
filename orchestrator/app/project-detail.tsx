@@ -1,13 +1,13 @@
 // A project's own page (2026-11-16: "almost like a gantt chart, also like agent flow and dependency diagram"), opened
-// from its row on the Projects tab. Three views, pictures first and few words:
+// from its row on the Projects tab. Three sections on one scroll, pictures first and few words:
 // - Timeline: one bar per lead and thread address, coloured by state, with PR, handoff and resolve marks and the owner's
 //   cards as a band from asked to answered;
 // - Flow: the lead, the threads it started, each one's providers in order (handoffs) and its PRs;
 // - Dependencies: what waits on what, blockers first.
 // The history comes from the events log (core/history.ts); the lanes (live state, model, branch, context) from the
-// Projects tab's own reads. 2026-11-17 (the shadcn pass): the switches are ToggleGroups, the chips Badges in the
+// Projects tab's own reads. 2026-11-17 (the shadcn pass): the Range is a ToggleGroup, the chips Badges in the
 // palette's tones; the diagrams keep their own geometry.
-import { useCallback, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
 import { CHANGED_CHANNEL, rpcContract, type ProjectHistory, type Projects } from "../contract.ts";
 import { Badge } from "./ui/badge.tsx";
@@ -26,11 +26,13 @@ import type { OpenCard } from "./projects.tsx";
 import { StatusBar, useMinute } from "./status-bar.tsx";
 import { AllWaits } from "./cc-lines.tsx";
 import { useIdentity } from "./identity.ts";
+import { PathwaysSection } from "./scope.tsx";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collapsible.tsx";
+import { ChevronDown, ChevronRight } from "lucide-react";
 
 type Hist = ProjectHistory;
 type Row = Hist["rows"][number];
 type Dep = Hist["deps"][number];
-type View = "timeline" | "flow" | "deps";
 
 const SEG_TONE: Record<string, Tone> = {
   working: KIND_TONES.done,
@@ -484,26 +486,85 @@ function withPrompts(deps: Dep[], lanes: Lane[]): Dep[] {
   return extra.length ? [...extra, ...deps] : deps;
 }
 
+/** One part of the project's page, on the same scroll (no view switch since 2026-11-20). */
+function DetailSection({ name, title, count, children }: { name: string; title: string; count?: number; children: ReactNode }) {
+  return (
+    <section data-detail-view={name} aria-label={title} className="flex min-w-0 flex-col gap-2">
+      <h3 className="m-0 flex items-center gap-2 text-sm font-semibold">
+        {title}
+        {count ? <Badge variant="secondary" className="h-5 min-w-5 rounded-full px-1.5 tabular-nums">{count}</Badge> : null}
+      </h3>
+      {children}
+    </section>
+  );
+}
+
 // ---------------------------------------------------------------- the page
 
-export function ProjectDetail({ project, lanes, onBack, openCard, ownerName }: { project: Projects[number]; lanes: Lane[] | undefined; onBack: () => void; openCard: OpenCard; ownerName: string }) {
+/** Pathways, a section of the project's page (2026-11-20): closed until opened, since it reads Linear; a Pathways link opens it. */
+export function PathwaysPart({ slug, narrow, open: first = false }: { slug: string; narrow?: boolean; open?: boolean }) {
+  const [open, setOpen] = useState(first);
+  const box = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (first) box.current?.scrollIntoView({ block: "start" });
+  }, [first]);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} asChild>
+      <section ref={box} data-detail-view="pathways" aria-label="Pathways" className="flex min-w-0 flex-col gap-2">
+        <h3 className="m-0 text-sm font-semibold">
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" size="sm" className="-ml-2 h-7 gap-1 px-2 text-sm font-semibold has-[>svg]:px-2" data-pathways-toggle={slug}>
+              Pathways
+              {open ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />}
+            </Button>
+          </CollapsibleTrigger>
+        </h3>
+        <CollapsibleContent>{open ? <PathwaysSection slug={slug} narrow={narrow} /> : null}</CollapsibleContent>
+      </section>
+    </Collapsible>
+  );
+}
+
+/** Timeline, Flow and Dependencies: on the project's page (web), and under the book on a phone's project page. */
+export function ProjectSections({ project, lanes, openCard, ownerName }: { project: Projects[number]; lanes: Lane[] | undefined; openCard: OpenCard; ownerName: string }) {
   const q = experimental_useRpcQuery({ contract: rpcContract, method: "projectHistory", input: { slug: project.slug } });
-  // every wait, in the row's words (the row shows two)
-  const now = useMinute();
-  const { cosTitle } = useIdentity();
   const refetch = useRef(q.refetch);
   refetch.current = q.refetch;
   useRealtime(
     CHANGED_CHANNEL,
     useCallback(() => void refetch.current(), []),
   );
-  const [view, setView] = useState<View>("timeline");
   const box = useRef<HTMLDivElement>(null);
   const width = useWidth(box);
   const laneOf = new Map((lanes ?? []).map((l) => [l.agent.address, l] as const));
   const h = q.data;
   const deps = h ? withPrompts(h.deps, lanes ?? []) : [];
   const blocking = deps.filter((d) => d.block).length;
+  return (
+    <div ref={box} className="flex min-w-0 flex-col gap-6" data-project-sections={project.slug}>
+      {!h ? (
+        <ReadState q={q} what="the history" />
+      ) : (
+        <>
+          <DetailSection name="timeline" title="Timeline">
+            {width === 0 ? null : <Timeline h={h} width={width} lanes={laneOf} />}
+          </DetailSection>
+          <DetailSection name="flow" title="Flow">
+            <Flow h={h} lanes={laneOf} />
+          </DetailSection>
+          <DetailSection name="deps" title="Dependencies" count={blocking}>
+            {width === 0 ? null : <Dependencies deps={deps} width={width} now={h.now} ownerName={ownerName} openCard={openCard} />}
+          </DetailSection>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** The project's page on web (projects/<slug>, or an old pathways/<slug> with Pathways open): its history, then Pathways. */
+export function ProjectDetail({ project, lanes, onBack, openCard, ownerName, pathwaysOpen = false }: { project: Projects[number]; lanes: Lane[] | undefined; onBack: () => void; openCard: OpenCard; ownerName: string; pathwaysOpen?: boolean }) {
+  const now = useMinute();
+  const { cosTitle } = useIdentity();
   const lead = project.lead;
   return (
     <div data-project-detail={project.slug} data-accent={project.monType ?? undefined} className="flex min-w-0 flex-col gap-3 pb-8" style={accentVars(project.monType)}>
@@ -520,27 +581,8 @@ export function ProjectDetail({ project, lanes, onBack, openCard, ownerName }: {
       </div>
       <StatusBar status={project.status} ownerName={ownerName} lanes={lanes} openCard={openCard} />
       <AllWaits waits={project.summary?.waits ?? []} now={now} cos={cosTitle} />
-      <div className="flex">
-        <ToggleGroup type="single" variant="outline" size="sm" aria-label="View" value={view} onValueChange={(v) => v && setView(v as View)}>
-          <ToggleGroupItem value="timeline">Timeline</ToggleGroupItem>
-          <ToggleGroupItem value="flow">Flow</ToggleGroupItem>
-          <ToggleGroupItem value="deps">
-            Dependencies
-            {blocking ? <Badge variant="secondary" className="h-5 min-w-5 rounded-full px-1.5 tabular-nums">{blocking}</Badge> : null}
-          </ToggleGroupItem>
-        </ToggleGroup>
-      </div>
-      <div ref={box} data-detail-view={view} className="min-w-0">
-        {!h ? (
-          <ReadState q={q} what="the history" />
-        ) : width === 0 ? null : view === "timeline" ? (
-          <Timeline h={h} width={width} lanes={laneOf} />
-        ) : view === "flow" ? (
-          <Flow h={h} lanes={laneOf} />
-        ) : (
-          <Dependencies deps={deps} width={width} now={h.now} ownerName={ownerName} openCard={openCard} />
-        )}
-      </div>
+      <ProjectSections project={project} lanes={lanes} openCard={openCard} ownerName={ownerName} />
+      <PathwaysPart slug={project.slug} open={pathwaysOpen} />
     </div>
   );
 }

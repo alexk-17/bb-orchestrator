@@ -20,6 +20,7 @@ import { chatOrder, chatPreview, directState, followUpOf, seenUpTo } from "./com
 import { directWrite, imageWrite, leadChatView, messageStates } from "./lead-chat.ts";
 import { admit, canSend, imageFiles } from "./lead-images.ts";
 import { AttachButton, ImageThumbs, attached, base64, useDrop, type Attached } from "./image-attach.tsx";
+import { ReplyButton, ReplyComposer, ReplyField, ReplyHint } from "./reply-composer.tsx";
 import { age } from "./lanes.ts";
 import { INLINE_LINK } from "./ref-text.tsx";
 import { firstScroller, useStickBottom } from "./stick-bottom.ts";
@@ -29,7 +30,6 @@ import { Button } from "./ui/button.tsx";
 import { Card } from "./ui/card.tsx";
 import { Checkbox } from "./ui/checkbox.tsx";
 import { Label } from "./ui/label.tsx";
-import { Textarea } from "./ui/textarea.tsx";
 import { ChevronRight, Image as ImageIcon } from "lucide-react";
 
 type Project = Projects[number];
@@ -68,15 +68,11 @@ export const directCss = /* css */ `
 [data-orch] .orch-cc .k-chat__log > .k-jump { position: sticky; bottom: 0; }
 [data-orch] .orch-cc .k-leadthread > .k-jump { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); }
 [data-orch] .orch-cc .k-chat__empty { margin: 0; font-size: 12px; line-height: 16px; color: var(--muted-foreground); }
-/* the composer (1.16.0): the text area with Send beside it, where it stays while the field grows; under them, only
-   when there is something to say, the follow-up switch and one quiet line */
-[data-orch] .orch-cc .k-composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; padding: 12px 16px; }
-[data-orch] .orch-cc .k-composer__meta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; font-size: 12px; line-height: 16px; color: var(--muted-foreground); }
-[data-orch] .orch-cc .k-composer__hint { min-width: 0; cursor: default; }
+/* the composer (2026-11-20): the reply box (reply-composer.tsx) in the card's last zone; the row's quiet line says only
+   what changes, and a dead message's warning in the need colour */
+[data-orch] .orch-cc .k-composer { padding: 12px 16px; }
+[data-orch] .orch-cc .k-composer__hint { min-width: 0; font-size: 12px; line-height: 16px; color: var(--muted-foreground); }
 [data-orch] .orch-cc .k-composer__hint .warn { color: var(--k-need); font-weight: 600; }
-/* screenshots (2026-11-17): the attach button beside Send; the thumbnails and a refusal (image-attach.tsx) span the box */
-[data-orch] .orch-cc .k-composer__actions { display: flex; align-items: center; gap: 4px; margin-top: 2px; }
-[data-orch] .orch-cc .k-composer__wide { grid-column: 1 / -1; }
 `;
 
 /**
@@ -354,9 +350,9 @@ function resend(slug: string, id: string, refetchAll: () => void) {
  * Whatever the chat above shows, a send is the owner's tracked direct message (lead-chat.ts directWrite). While the
  * lead's thread shows, the quiet line also says where the latest message is, and offers Resend for a dead one: the
  * transcript doesn't. `via`: where the message goes, when it is not plainly "the lead" (the Scope tab's scoping thread).
- * 1.16.0: a text area with Send beside it (it stays there while the field grows); the follow-up switch (a checkbox)
- * and one quiet line sit under them (shadcn's Textarea and Checkbox since 2026-11-17). The line says only what changes (the last message's state, a dead
- * one's Resend, who passes it on) and that this is not an approval; the full rules are its tooltip.
+ * 2026-11-20 (the owner's model, X's inline reply): the reply box (reply-composer.tsx). The field, then one row: attach
+ * and the follow-up switch, one quiet line, Send. The line says only what changes (the last message's state, a dead
+ * one's Resend, who passes it on) and "Not an approval", whose detail holds the full rules.
  */
 export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact = false, via }: { project: Project; now: number; cos: string; busy: boolean; refetchAll: () => void; onFocus: () => void; compact?: boolean; via?: string }) {
   const slug = project.slug;
@@ -449,8 +445,9 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
     box.current?.focus(); // the Send button it was on is disabled now: back to the box, for the next message
   };
   const left = MAX - text.length;
-  const to = via ?? `Goes to the ${project.slug} lead`;
-  const rules = `${to}; the ${cos} gets a copy. Not an approval: merges, production changes and public pushes still need their card. No secrets here.`;
+  const to = via ?? `Goes straight to the ${project.slug} lead`;
+  // the rule, once: the hint's detail (its words "Not an approval" are the hint itself)
+  const rules = `${to}; the ${cos} gets a copy. Merges, production changes and public pushes still need their card. For 48 h it wins over a ${cos} instruction on its point. No secrets here.`;
   // the message states, while the lead's thread shows instead of the log (which shows them on each message)
   const states = leadChatView(project.lead).kind === "thread" ? messageStates(project.direct, cos) : null;
   // compact (the detail, 2026-11-17): the quiet line shows once typed in, or while a message needs a Resend; the
@@ -459,75 +456,92 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
   const following = !!followUp && (!compact || !!text || !!images.length);
   const why = refused.get(slug) ?? null;
   const uploading = staging.has(slug);
+  // idle on one line (2026-11-20, the lead: X's reply collapses until you focus it): compact, empty, nothing attached or
+  // refused, and focus nowhere in the box. It saves a row in the project's head, so the whole box shows at 1440x900
+  const [within, setWithin] = useState(false);
+  const idle = compact && !within && !text && !images.length && !why && !states?.dead.length;
   return (
-    // a file dropped anywhere on the box attaches (2026-11-17); what isn't an image is refused in the line below
-    <div role="group" aria-label={`Message the ${project.slug} lead`} data-composer={project.slug} className={compact ? "k-composer compact" : "k-composer"} {...drop}>
-      <Textarea
-        ref={box}
-        value={text}
-        maxLength={MAX}
-        rows={compact ? 1 : 2}
-        // it grows with the text (field-sizing) up to eight lines, then scrolls
-        className={`max-h-44 resize-none ${compact ? "min-h-9" : "min-h-16"}`}
-        aria-keyshortcuts="Meta+Enter Control+Enter"
-        title={rules}
-        placeholder={`Message the ${project.slug} lead… (not an approval)`}
-        aria-label={`Message to lead:${project.slug}`}
-        onFocus={onFocus}
-        onChange={(e) => update(e.target.value)}
-        // a pasted screenshot attaches (2026-11-17); a paste with no image in it is the text box's own, as before
-        onPaste={(e) => {
-          const pasted = imageFiles(e.clipboardData.files);
-          if (!pasted.length) return;
-          e.preventDefault();
-          attach(pasted);
-        }}
-        // ⌘/Ctrl+Enter sends; Esc leaves the text box and keeps the draft (the app's rule for every text box)
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+    // a file dropped anywhere on the box attaches (2026-11-17); what isn't an image is refused under the field
+    <ReplyComposer
+      role="group"
+      aria-label={`Message the ${project.slug} lead`}
+      data-composer={project.slug}
+      className={compact ? "k-composer compact" : "k-composer"}
+      {...drop}
+      inline={idle}
+      onFocus={() => setWithin(true)}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setWithin(false);
+      }}
+      field={
+        <ReplyField
+          ref={box}
+          value={text}
+          maxLength={MAX}
+          // it grows with the text (field-sizing) up to eight lines, then scrolls
+          aria-keyshortcuts="Meta+Enter Control+Enter"
+          placeholder={`Message Lead · ${project.slug}…`}
+          aria-label={`Message to lead:${project.slug}`}
+          onFocus={onFocus}
+          onChange={(e) => update(e.target.value)}
+          // a pasted screenshot attaches (2026-11-17); a paste with no image in it is the text box's own, as before
+          onPaste={(e) => {
+            const pasted = imageFiles(e.clipboardData.files);
+            if (!pasted.length) return;
             e.preventDefault();
-            void send();
-          }
-        }}
-      />
-      <div className="k-composer__actions">
-        <AttachButton onFiles={attach} disabled={uploading} data={{ "data-direct-attach": project.slug }} />
-        <Btn tone="primary" className="k-composer__send" data-direct-send={project.slug} disabled={busy || uploading || !canSend(text, images.length)} title="Send (⌘/Ctrl+Enter)" onClick={() => void send()}>
-          {uploading ? "Sending…" : "Send"}
-        </Btn>
-      </div>
-      <ImageThumbs images={images} refused={why} onRemove={detach} disabled={uploading} className="k-composer__wide" data={project.slug} />
-      {following || quiet ? (
-        <div className="k-composer__meta">
+            attach(pasted);
+          }}
+          // ⌘/Ctrl+Enter sends; Esc leaves the text box and keeps the draft (the app's rule for every text box)
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              void send();
+            }
+          }}
+        />
+      }
+      tools={
+        <>
+          <AttachButton onFiles={attach} disabled={uploading} data={{ "data-direct-attach": project.slug }} />
           {following ? (
             // the whole line is the target (24 px), the box and its words
-            <Label className="min-h-6 cursor-pointer text-xs font-normal text-muted-foreground" title={followUp.text}>
+            <Label className="min-h-6 cursor-pointer text-xs font-normal text-muted-foreground" title={`Follow-up of your last message: ${followUp.text}`}>
               <Checkbox checked={follow} onCheckedChange={(c) => update(text, c === true)} data-direct-follow={followUp.id} />
-              Follow-up of your last message
+              Follow-up
             </Label>
           ) : null}
-          {quiet ? (
-            <span className="k-composer__hint" title={rules} data-composer-hint="">
-              {states?.dead.map((m) => (
-                <span key={m.id} data-direct-dead={m.id}>
-                  <b className="warn">No ack for your message of {age(m.at, now)} ago</b> ·{" "}
-                  <Button type="button" variant="link" className={RESEND} data-direct-resend={m.id} disabled={busy} onClick={() => resend(slug, m.id, refetchAll)}>
-                    Resend
-                  </Button>
-                  {" · "}
-                </span>
-              ))}
-              {states?.last ? (
-                <span data-direct-last={states.last.id} data-chat-state="">
-                  Last message: {states.last.word} ·{" "}
-                </span>
-              ) : null}
-              {via ? `${via} · ` : ""}Not an approval
-              {left < 500 ? ` · ${left} characters left` : ""}
-            </span>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
+        </>
+      }
+      hint={
+        quiet ? (
+          <span className="k-composer__hint" data-composer-hint="">
+            {states?.dead.map((m) => (
+              <span key={m.id} data-direct-dead={m.id}>
+                <b className="warn">No ack for your message of {age(m.at, now)} ago</b> ·{" "}
+                <Button type="button" variant="link" className={RESEND} data-direct-resend={m.id} disabled={busy} onClick={() => resend(slug, m.id, refetchAll)}>
+                  Resend
+                </Button>
+                {" · "}
+              </span>
+            ))}
+            {states?.last ? (
+              <span data-direct-last={states.last.id} data-chat-state="">
+                Last message: {states.last.word} ·{" "}
+              </span>
+            ) : null}
+            {left < 500 ? `${left} characters left · ` : ""}
+            {via ? `${via} · ` : ""}
+            <ReplyHint detail={rules}>Not an approval</ReplyHint>
+          </span>
+        ) : null
+      }
+      actions={
+        <ReplyButton data-direct-send={project.slug} disabled={busy || uploading || !canSend(text, images.length)} title="Send (⌘/Ctrl+Enter)" onClick={() => void send()}>
+          {uploading ? "Sending…" : "Send"}
+        </ReplyButton>
+      }
+    >
+      <ImageThumbs images={images} refused={why} onRemove={detach} disabled={uploading} data={project.slug} />
+    </ReplyComposer>
   );
 }

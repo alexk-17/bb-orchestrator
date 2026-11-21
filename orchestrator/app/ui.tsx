@@ -40,6 +40,15 @@ const LOOK = `
 [data-orch] .orch-muted { color: var(--orch-muted); }
 [data-orch] .orch-danger { color: var(--orch-danger); }
 [data-orch] .orch-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+/* a phone card is 12 px in, not 24, inside the 16 px gutter; only wide insets (by class token) shrink, web unchanged */
+[data-orch][data-phone] [data-slot="card"]:is([class~="py-5"], [class~="py-6"]) { padding-block: 12px; }
+[data-orch][data-phone] [data-slot="card"]:is([class~="p-4"], [class~="p-5"], [class~="p-6"]) { padding: 12px; }
+[data-orch][data-phone] [data-slot="card"]:is([class~="gap-4"], [class~="gap-5"], [class~="gap-6"]) { gap: 12px; }
+[data-orch][data-phone] :is([data-slot="card-header"], [data-slot="card-content"], [data-slot="card-footer"]):is([class~="px-4"], [class~="px-5"], [class~="px-6"]) { padding-inline: 12px; }
+[data-orch][data-phone] [data-legend] [data-slot="badge"] { white-space: normal; max-width: 100%; }
+[data-orch][data-phone] [data-multiplayer] { padding-inline: 0; padding-top: 0; }
+/* a card's asker when it is its project's lead says the project twice (2026-11-20, less text): a phone drops it */
+[data-orch][data-phone] [data-origin-lead] { display: none; }
 `;
 export function Look() {
   return (
@@ -176,6 +185,15 @@ export function Muted({ children }: { children: ReactNode }) {
 }
 
 /** A time from an ISO string or epoch ms, short and local. */
+/** A short age: now, 4m, 3h, 2d. */
+export function ago(at: number, now: number): string {
+  const s = Math.max(0, now - at) / 1000;
+  if (s < 60) return "now";
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h`;
+  return `${Math.floor(s / 86400)}d`;
+}
+
 export function when(t: string | number | null | undefined): string {
   if (t === null || t === undefined || t === "") return "—";
   const d = new Date(t);

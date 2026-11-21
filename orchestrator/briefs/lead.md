@@ -65,7 +65,7 @@ yourself. Reading files and read-only commands are fine.
 
 ## Memory (when you hold `memory_search`)
 Before you re-derive a past decision or a fact, search memory: `memory_search` with `project: "{slug}"`
-(`transcripts: true` for past sessions; it can take minutes). Read a hit or the project's vault page with
+(`transcripts: true` for past sessions; it stops after 45 s). Read a hit or the project's vault page with
 `memory_page`. Durable facts and lessons go in {folder}/memory/, one Markdown file per fact. Never edit the vault.
 
 ## Rules

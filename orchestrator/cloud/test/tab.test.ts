@@ -1,18 +1,15 @@
-// Why it matters: the Cloud tab used to vanish on any machine without a cloud config, so a new install showed no Cloud
-// tab and nothing said why (2026-11-16). The tab is now always listed, like Game Boy, and without a config it says what
-// to set up: the exact path it looked for, the setting that moves it, the example file and the README.
+// Why: Cloud once vanished with no reason on a machine without a config; since 2026-11-20 it is a Tool the owner turns on, never machine-hidden.
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cloudEmptyState } from "../core/setup.ts";
 
-test("a default install lists the Cloud tab: the orchestrator page never filters it out", () => {
+test("the Cloud tab is the owner's choice: listed, shown by the showCloud setting, never hidden by a machine check", () => {
   const src = readFileSync(new URL("../../app.tsx", import.meta.url), "utf8");
+  const server = readFileSync(new URL("../../server.ts", import.meta.url), "utf8");
   assert.match(src, /\{ id: "cloud", subPath: "cloud", label: "Cloud" \}/, "Cloud is one of the page's tabs");
-  // 2026-11-17: the only filter is the owner's hiddenTabs setting, and it is empty by default
-  const tabs = readFileSync(new URL("../../app/hidden-tabs.ts", import.meta.url), "utf8");
-  assert.match(src, /const visible = shownTabs\(VIEWS, new Set\(config\.data\?\.hiddenTabs \?\? \[\]\), /, "tabs are hidden only by the owner's choice");
-  assert.match(tabs, /const named = .*=> hidden\.has\(v\.id\) \|\| hidden\.has\(v\.label\.toLowerCase\(\)\);/, "nothing but hiddenTabs decides");
+  assert.match(server, /showCloud: \{ type: "boolean", label: "Tools: Cloud", default: false \}/, "off until the owner turns it on");
+  assert.match(server, /cloud: cfg\.showCloud === true/);
   assert.doesNotMatch(src, /cs\.available[^\n]*filter|filter[^\n]*cs\.available/, "no tab is hidden by a machine check");
 });
 

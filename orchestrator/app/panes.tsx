@@ -1,31 +1,29 @@
-// The Orchestrator page as panes (layout.ts holds the rules). Each pane has its own tabs (shadcn's Tabs since 2026-11-17,
-// scrolling sideways when they don't fit), split right, split down and close. Dividers drag to resize. Each pane scrolls on
-// its own. A phone-width page shows only the focused pane.
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { Columns2, Rows2, X } from "lucide-react";
-import { MAX_PANES, panes, type Layout, type Node, type Pane } from "./layout.ts";
-import { Badge } from "./ui/badge.tsx";
-import { Tabs, TabsList, TabsTrigger } from "./ui/tabs.tsx";
+// The Orchestrator page's content: a split tree of panes (split panes, 2026-11-20); the Sidebar acts on the focused pane.
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from "react";
+import { ChevronDown, ChevronLeft, ChevronRight, Columns2, GripVertical, Rows2, X } from "lucide-react";
+import { gripsAt, minSize, panes, type Edge, type Layout, type Node, type Pane } from "./layout.ts";
+import { dragFrom } from "./drag.ts";
+import { Card } from "./ui/card.tsx";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "./ui/resizable.tsx";
+import { cn } from "./ui/utils.ts";
+import type { Route } from "./route.ts";
+import { PaneContext } from "./key-state.ts";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx";
+import { Button } from "./ui/button.tsx";
 import { Btn, cx } from "./ui.tsx";
 
-/** `counted`: the tab can carry a count, so its slot stays while there is none and a count coming or going moves no tab */
-export type ViewDef = { id: string; label: string; count?: number | string; counted?: boolean };
-
 /**
- * A counted tab's label: its count is a badge in a slot that is always there, hidden while empty, at least two digits wide.
- * While the slot is empty the label is centred across the whole box, not left of a blank gap (2026-11-17, the owner).
+ * A view that lays out its own scroll regions tells its pane so (2026-11-20). This replaces a has-selector rule on the
+ * pane's scroller: any element added or removed inside the pane (each keystroke in a reply box) made the browser re-check
+ * that rule and restyle the whole pane, a few hundred ms per key on a big Projects page.
  */
-function CountedLabel({ label, count }: { label: string; count?: number | string }) {
-  const text = typeof count === "number" ? count.toLocaleString("en-US") : (count ?? "");
-  return (
-    <span className="orch-tab-label" data-label={label} data-empty={text === "" || undefined}>
-      <span className="orch-tab-name">{label}</span>
-      <Badge variant="secondary" className="orch-tab-count h-4 min-w-[calc(2ch+8px)] px-1 tabular-nums" style={{ color: "var(--foreground)" }} data-empty={text === "" || undefined} aria-hidden={text === "" || undefined}>
-        {text}
-      </Badge>
-    </span>
-  );
+const PaneFits = createContext<(on: boolean) => void>(() => {});
+export function usePaneFits(on: boolean) {
+  const set = useContext(PaneFits);
+  useLayoutEffect(() => {
+    set(on);
+    return () => set(false);
+  }, [on, set]);
 }
 
 export function useWidth(ref: RefObject<HTMLElement | null>): number {
@@ -38,6 +36,18 @@ export function useWidth(ref: RefObject<HTMLElement | null>): number {
     return () => ro.disconnect();
   }, [ref]);
   return w;
+}
+
+export function useSize(ref: RefObject<HTMLElement | null>): { w: number; h: number } {
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setSize({ w: Math.round(e!.contentRect.width), h: Math.round(e!.contentRect.height) }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ref]);
+  return size;
 }
 
 /**
@@ -58,91 +68,268 @@ export function useElementWidth(): [number, (el: HTMLElement | null) => void] {
 
 type Props = {
   layout: Layout;
-  views: ViewDef[];
-  /** A phone-width page: only the focused pane, no splitting */
-  compact: boolean;
-  render: (view: string, pane: { id: string; width: number }) => ReactNode;
+  /** Only the focused pane is drawn (a phone, or a tree that doesn't fit), with a switcher to the others */
+  solo: boolean;
+  /** A pane header's title: where the pane is */
+  title: (route: Route) => string;
+  render: (pane: { id: string; route: Route; width: number }) => ReactNode;
   /** Views that fill the pane themselves (the chat): no padding, no page scroll */
   fill: (view: string) => boolean;
   /** Views that use the pane's whole width (Projects, layout B: the list beside the project), not the reading column */
   wide?: (view: string) => boolean;
-  onView: (paneId: string, view: string) => void;
   onFocus: (paneId: string) => void;
-  onSplit: (paneId: string, dir: "row" | "col") => void;
   onClose: (paneId: string) => void;
-  onResize: (splitId: string, index: number, delta: number) => void;
+  /** Split right or down: `from` is the button pressed, where the focus goes back on a cancel */
+  onSplit: (paneId: string, dir: "row" | "col", from: HTMLElement) => void;
+  /** The page's icon, for the header's view control */
+  icon: (route: Route) => ReactNode;
+  /** The header's view control was pressed: open (or close) the picker over that pane */
+  onView: (paneId: string, from: HTMLElement) => void;
+  /** A split's new pane, waiting for a pick: no body, a "New pane" header with a cancel */
+  pending?: string | null;
+  /** The view picker, drawn over one pane's body */
+  overlay?: { paneId: string; node: ReactNode } | null;
+  onCancelPending?: () => void;
+  onSizes: (splitId: string, sizes: number[]) => void;
+  /** A pane dragged by its header onto an edge or the centre of another */
+  onDock: (paneId: string, targetId: string, edge: Edge) => void;
+  /** Would that dock fit? An edge that wouldn't is not offered */
+  canDock: (paneId: string, targetId: string, edge: Edge) => boolean;
+  /** A pane drag began: a split waiting for a pick is cancelled */
+  onDragStart?: () => void;
+  /** Set just before a drop's commit: the panes that slide from where they were, or the new pane that fades in */
+  settle?: RefObject<Settle | null>;
+  /** The one-time drag hint, while two panes are drawn */
+  hint?: boolean;
+  onHintDone?: () => void;
 };
 
+export type Settle = { ids: string[]; kind: "move" | "new" };
+
+const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+/** The tree draws empty slots and each pane is a keyed sibling laid over its slot, so no layout change remounts or moves it. */
 export function PaneLayout(p: Props) {
   const all = panes(p.layout.root);
-  if (p.compact) {
-    const f = all.find((x) => x.id === p.layout.focus) ?? all[0]!;
-    return <PaneView pane={f} {...p} many={false} canSplit={false} />;
-  }
-  return <NodeView node={p.layout.root} {...p} many={all.length > 1} canSplit={all.length < MAX_PANES} />;
-}
-
-type Inner = Props & { many: boolean; canSplit: boolean };
-
-function NodeView({ node, ...p }: Inner & { node: Node }) {
   const box = useRef<HTMLDivElement>(null);
-  if (node.kind === "pane") return <PaneView pane={node} {...p} />;
-  const row = node.dir === "row";
+  const els = useRef(new Map<string, HTMLElement>());
+  const ro = useRef<ResizeObserver | null>(null);
+  const place = useCallback(() => {
+    const b = box.current;
+    if (!b) return;
+    const o = b.getBoundingClientRect();
+    for (const [id, el] of els.current) {
+      const slot = b.querySelector<HTMLElement>(`[data-pane-slot="${CSS.escape(id)}"]`);
+      if (!slot) {
+        el.style.display = "none";
+        continue;
+      }
+      const r = slot.getBoundingClientRect();
+      Object.assign(el.style, { display: "", left: `${r.left - o.left}px`, top: `${r.top - o.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+    }
+  }, []);
+  // when the tree changes it may move a slot without resizing it; sizes alone come through the ResizeObserver, so a commit
+  // that changes no tree (the picker opening) forces no layout here
+  useLayoutEffect(() => {
+    const s = p.settle?.current;
+    const from = new Map((s?.kind === "move" ? s.ids : []).map((id) => [id, els.current.get(id)?.style] as const).map(([id, st]) => [id, { l: parseFloat(st?.left ?? ""), t: parseFloat(st?.top ?? "") }]));
+    place();
+    if (s && p.settle) {
+      p.settle.current = null;
+      if (!reducedMotion())
+        for (const id of s.ids) {
+          const el = els.current.get(id);
+          const a = from.get(id);
+          if (!el) continue;
+          // timed from this commit, so a slow first frame (a page mounting) shortens the settle instead of delaying it
+          const now = document.timeline.currentTime;
+          let anim: Animation | null = null;
+          if (s.kind === "new") anim = el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 120, easing: "ease-out" });
+          else if (a && Number.isFinite(a.l) && Number.isFinite(a.t)) {
+            const dx = a.l - parseFloat(el.style.left);
+            const dy = a.t - parseFloat(el.style.top);
+            if (dx || dy) anim = el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], { duration: 160, easing: "cubic-bezier(0.2, 0, 0, 1)" });
+          }
+          if (anim && now !== null) anim.startTime = now;
+        }
+    }
+    const b = box.current;
+    if (!b) return;
+    ro.current ??= new ResizeObserver(place);
+    ro.current.disconnect();
+    ro.current.observe(b);
+    b.querySelectorAll("[data-pane-slot]").forEach((s) => ro.current!.observe(s));
+    // the panels settle their sizes in a render of their own after this effect; follow them before the frame, not a frame late
+    queueMicrotask(place);
+  }, [p.layout.root, p.solo, p.solo ? p.layout.focus : null, place]);
+  useEffect(() => () => ro.current?.disconnect(), []);
+  // the library's own cursor is a page-wide rule that restyles every element on each change (S10); this layer holds it instead
+  useEffect(() => {
+    const b = box.current;
+    if (!b) return;
+    let cover: HTMLDivElement | null = null;
+    const active = () => Array.from(b.querySelectorAll<HTMLElement>('[data-separator="active"]'));
+    const off = () => {
+      window.removeEventListener("pointermove", show, true);
+      cover?.remove();
+      cover = null;
+    };
+    // from the first move, so a press or a double-click keeps the divider as its target
+    const show = () => {
+      if (cover) return;
+      const on = active();
+      if (!on.length) return off();
+      const dirs = new Set(on.map((s) => s.getAttribute("aria-orientation")));
+      cover = document.createElement("div");
+      cover.dataset.resizeCover = "";
+      Object.assign(cover.style, { position: "fixed", inset: "0", zIndex: "2147483647", contain: "strict", cursor: dirs.size > 1 ? "move" : dirs.has("horizontal") ? "row-resize" : "col-resize" });
+      document.body.append(cover);
+    };
+    const mo = new MutationObserver(() => (active().length ? window.addEventListener("pointermove", show, true) : off()));
+    mo.observe(b, { subtree: true, attributes: true, attributeFilter: ["data-separator"] });
+    window.addEventListener("pointerup", off, true);
+    window.addEventListener("pointercancel", off, true);
+    window.addEventListener("blur", off);
+    return () => {
+      mo.disconnect();
+      off();
+      window.removeEventListener("pointerup", off, true);
+      window.removeEventListener("pointercancel", off, true);
+      window.removeEventListener("blur", off);
+    };
+  }, []);
+  const hold = useCallback((id: string, el: HTMLElement | null) => {
+    if (el) els.current.set(id, el);
+    else els.current.delete(id);
+  }, []);
+  // one pane drawn (a phone, or the switcher): no header; the switcher row names it and closes it
+  const many = all.length > 1 && !p.solo;
+  const at = Math.max(0, all.findIndex((x) => x.id === p.layout.focus));
+  const step = (d: number) => p.onFocus(all[(at + d + all.length) % all.length]!.id);
+  const drag = (e: ReactPointerEvent, pane: Pane) => {
+    const el = els.current.get(pane.id) ?? null;
+    const name = (id: string) => p.title(all.find((x) => x.id === id)?.route ?? pane.route);
+    dragFrom(e, box.current, {
+      label: p.title(pane.route),
+      icon: el?.querySelector("[data-view-icon] svg"),
+      dim: el,
+      self: pane.id,
+      grab: e.currentTarget as HTMLElement,
+      can: (t, edge) => p.canDock(pane.id, t, edge),
+      says: (t, edge) => (edge === "center" ? `Swap with ${name(t)}` : "Move here"),
+      onStart: p.onDragStart,
+      onDrop: (t, edge) => p.onDock(pane.id, t, edge),
+    });
+  };
   return (
-    <div ref={box} data-split={node.id} className={cx("flex h-full min-h-0 w-full min-w-0", row ? "flex-row" : "flex-col")}>
-      {node.children.map((c, i) => (
-        <div key={c.id} className="contents">
-          <div className="flex min-h-0 min-w-0" style={{ flex: `${node.sizes[i]} 1 0` }}>
-            <NodeView node={c} {...p} />
-          </div>
-          {i < node.children.length - 1 ? <Divider row={row} box={box} onMove={(d) => p.onResize(node.id, i, d)} /> : null}
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      {/* panes that don't fit: one at a time, the tree kept as it is */}
+      {p.solo && all.length > 1 ? (
+        <div className="flex shrink-0 items-center gap-1 border-b px-2 py-1" data-pane-switcher="">
+          <Btn tone="ghost" size="sm" icon={<ChevronLeft />} aria-label="Previous pane" data-switch="prev" onClick={() => step(-1)} />
+          <span className="text-sm tabular-nums">
+            {at + 1} of {all.length}
+          </span>
+          <Btn tone="ghost" size="sm" icon={<ChevronRight />} aria-label="Next pane" data-switch="next" onClick={() => step(1)} />
+          <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">{p.title(all[at]!.route)}</span>
+          <PaneAction label="Close" icon={<X />} data-close-pane="" onClick={() => p.onClose(all[at]!.id)} />
         </div>
-      ))}
+      ) : null}
+      <div ref={box} className="relative flex min-h-0 min-w-0 flex-1" data-panes="">
+        {p.solo ? <div data-pane-slot={p.layout.focus} className="min-h-0 min-w-0 flex-1" /> : <NodeView node={p.layout.root} onSizes={p.onSizes} />}
+        {all.map((pane) => (
+          <PaneView key={pane.id} pane={pane} {...p} focused={p.layout.focus === pane.id} many={many} hold={hold} grip={(e) => drag(e, pane)} />
+        ))}
+        {p.hint && many ? (
+          <Card className="absolute bottom-4 left-1/2 z-30 w-[min(560px,calc(100%-32px))] -translate-x-1/2 flex-row items-center gap-3 px-4 py-3 shadow-md" data-drag-hint="">
+            <GripVertical className="size-4 shrink-0 text-muted-foreground" />
+            <div className="min-w-0 flex-1 text-sm">
+              <p>Drag a pane by its header to move it.</p>
+              <p>Drag a page from the sidebar into a pane.</p>
+            </div>
+            <Button type="button" variant="outline" size="sm" onClick={p.onHintDone} data-hint-done="">
+              Got it
+            </Button>
+          </Card>
+        ) : null}
+      </div>
     </div>
   );
 }
 
-/** A divider: drag to move the room between its two neighbours (the move is a share of the whole split). */
-function Divider({ row, box, onMove }: { row: boolean; box: RefObject<HTMLDivElement | null>; onMove: (delta: number) => void }) {
+// the gutter between panes: muted, a line on each side, shadcn's grip; hover, focus and drag light its centre line
+const GUTTER_CLASS = cn(
+  "z-10 bg-muted transition-colors duration-100 before:absolute before:bg-transparent before:transition-colors before:duration-100",
+  "data-[separator=hover]:bg-accent data-[separator=focus]:bg-accent data-[separator=active]:bg-accent",
+  "data-[separator=hover]:before:bg-primary/40 data-[separator=focus]:before:bg-primary/40 data-[separator=active]:before:bg-primary",
+  "[&>div]:transition-colors [&>div]:duration-100 data-[separator=hover]:[&>div]:bg-background data-[separator=hover]:[&>div]:text-foreground data-[separator=focus]:[&>div]:bg-background data-[separator=focus]:[&>div]:text-foreground",
+  "data-[separator=active]:[&>div]:border-primary data-[separator=active]:[&>div]:bg-primary data-[separator=active]:[&>div]:text-primary-foreground",
+);
+// the grip sits at --grip-at along the gutter, off any junction with a crossing gutter
+const GUTTER_ROW = "cursor-col-resize [&>div]:absolute [&>div]:top-(--grip-at) [&>div]:left-1/2 [&>div]:-translate-x-1/2 [&>div]:-translate-y-1/2 w-2 border-x border-border before:inset-y-0 before:left-1/2 before:w-0.5 before:-translate-x-1/2 after:w-3 [@media(pointer:coarse)]:after:w-6";
+const GUTTER_COL =
+  "cursor-row-resize [&>div]:absolute [&>div]:top-1/2 [&>div]:left-(--grip-at) [&>div]:-translate-x-1/2 [&>div]:-translate-y-1/2 border-y border-border aria-[orientation=horizontal]:h-2 before:inset-x-0 before:top-1/2 before:h-0.5 before:-translate-y-1/2 aria-[orientation=horizontal]:after:h-3 [@media(pointer:coarse)]:aria-[orientation=horizontal]:after:h-6";
+
+function NodeView({ node, onSizes }: { node: Node; onSizes: Props["onSizes"] }) {
+  if (node.kind === "pane") return <div data-pane-slot={node.id} className="h-full min-h-0 w-full min-w-0" />;
+  const row = node.dir === "row";
+  const along = (c: Node) => (row ? minSize(c).w : minSize(c).h);
+  const grips = gripsAt(node);
   return (
-    <div
-      role="separator"
-      aria-orientation={row ? "vertical" : "horizontal"}
-      data-divider=""
-      className={cx(
-        "relative flex-none touch-none after:absolute after:rounded-xs after:bg-transparent after:transition-colors hover:after:bg-foreground/15 active:after:bg-foreground/15",
-        row ? "w-1.5 cursor-col-resize after:inset-x-0.5 after:inset-y-2" : "h-1.5 cursor-row-resize after:inset-x-2 after:inset-y-0.5",
-      )}
-      onPointerDown={(e) => {
-        const el = box.current;
-        if (!el) return;
-        e.preventDefault();
-        const size = row ? el.getBoundingClientRect().width : el.getBoundingClientRect().height;
-        let last = row ? e.clientX : e.clientY;
-        const target = e.currentTarget;
-        target.setPointerCapture(e.pointerId);
-        const move = (ev: PointerEvent) => {
-          const now = row ? ev.clientX : ev.clientY;
-          if (size > 0 && now !== last) onMove((now - last) / size);
-          last = now;
-        };
-        const up = () => {
-          target.removeEventListener("pointermove", move);
-          target.removeEventListener("pointerup", up);
-          target.removeEventListener("pointercancel", up);
-        };
-        target.addEventListener("pointermove", move);
-        target.addEventListener("pointerup", up);
-        target.addEventListener("pointercancel", up);
+    <ResizablePanelGroup
+      // a new set of children starts from the tree's sizes; a drag only reports back
+      key={node.children.map((c) => c.id).join(",")}
+      id={node.id}
+      orientation={row ? "horizontal" : "vertical"}
+      disableCursor
+      defaultLayout={Object.fromEntries(node.children.map((c, i) => [c.id, node.sizes[i]! * 100]))}
+      onLayoutChanged={(layout, meta) => {
+        if (meta.isUserInteraction) onSizes(node.id, node.children.map((c) => layout[c.id] ?? 0));
       }}
-    />
+    >
+      {node.children.flatMap((c, i) => [
+        // above the panes laid over the slots: a 12 px hit area, 24 px on touch (feel spec, part 2)
+        i > 0 ? <ResizableHandle key={`d-${c.id}`} withHandle data-divider="" className={cn(GUTTER_CLASS, row ? GUTTER_ROW : GUTTER_COL)} style={{ "--grip-at": `${grips[i - 1]! * 100}%` } as CSSProperties} /> : null,
+        <ResizablePanel key={c.id} id={c.id} minSize={along(c)} defaultSize={`${100 / node.children.length}%`} className="flex min-h-0 min-w-0">
+          <NodeView node={c} onSizes={onSizes} />
+        </ResizablePanel>,
+      ])}
+    </ResizablePanelGroup>
   );
 }
 
+/**
+ * Its children one frame later, in a render of their own: the picker's DOM then lands after the split's (or the press's)
+ * layout and its pages' own measuring, not in the same task.
+ */
+function NextFrame({ children }: { children: ReactNode }) {
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    const f = requestAnimationFrame(() => setOn(true));
+    return () => cancelAnimationFrame(f);
+  }, []);
+  return on ? children : null;
+}
+
+// focus the picker gives back (Esc) opens no tooltip: it would only close again in the next press's task
+let quiet = false;
+export function focusQuietly(el: HTMLElement | null) {
+  quiet = true;
+  try {
+    el?.focus({ preventScroll: true });
+  } finally {
+    quiet = false;
+  }
+}
+function useTip() {
+  const [open, setOpen] = useState(false);
+  return { open, onOpenChange: (o: boolean) => setOpen(o && !quiet) };
+}
+
 /** A pane's icon button: its name is its tooltip (and its accessible name) */
-function PaneAction({ label, icon, ...p }: { label: string; icon: ReactNode; onClick: () => void; [data: `data-${string}`]: string | undefined }) {
+function PaneAction({ label, icon, ...p }: { label: string; icon: ReactNode; onClick: (e: React.MouseEvent<HTMLButtonElement>) => void; [data: `data-${string}`]: string | undefined }) {
   return (
-    <Tooltip>
+    <Tooltip {...useTip()}>
       <TooltipTrigger asChild>
         <Btn tone="ghost" icon={icon} aria-label={label} {...p} />
       </TooltipTrigger>
@@ -151,92 +338,128 @@ function PaneAction({ label, icon, ...p }: { label: string; icon: ReactNode; onC
   );
 }
 
-function PaneView({ pane, views, render, fill, wide, onView, onFocus, onSplit, onClose, layout, many, canSplit }: Inner & { pane: Pane }) {
-  const ref = useRef<HTMLElement>(null);
-  const width = useWidth(ref);
-  const strip = useRef<HTMLDivElement>(null);
-  const focused = layout.focus === pane.id;
-  // The active tab stays in view when the strip scrolls. And a tab a shortcut or a link switched away from gives up the
-  // focus to the active one: Radix selects a tab when it gets the focus, so a stale focused tab would switch the pane
-  // back the next time the window or a closed dialog hands the focus back to it.
-  useLayoutEffect(() => {
-    const s = strip.current;
-    const t = s?.querySelector<HTMLElement>("[role=tab][data-state=active]");
-    if (!s || !t) return;
-    const a = document.activeElement;
-    if (a instanceof HTMLElement && a !== t && a.getAttribute("role") === "tab" && s.contains(a)) t.focus({ preventScroll: true });
-    if (s.scrollWidth <= s.clientWidth) return;
-    const sr = s.getBoundingClientRect();
-    const tr = t.getBoundingClientRect();
-    if (tr.left < sr.left) s.scrollLeft -= sr.left - tr.left + 8;
-    else if (tr.right > sr.right) s.scrollLeft += tr.right - sr.right + 8;
-  }, [pane.view, width]);
-  // 2026-11-18: the strip's scrollbar is hidden, so a quiet fade at an edge says more tabs sit past it (none when all fit)
-  const [fade, setFade] = useState("");
-  useLayoutEffect(() => {
-    const s = strip.current;
-    if (!s) return;
-    const read = () => {
-      const more = s.scrollWidth - s.clientWidth;
-      setFade(more <= 1 ? "" : [s.scrollLeft > 1 && "start", s.scrollLeft < more - 1 && "end"].filter(Boolean).join(" "));
-    };
-    read();
-    s.addEventListener("scroll", read, { passive: true });
-    const ro = new ResizeObserver(read);
-    ro.observe(s);
-    if (s.firstElementChild) ro.observe(s.firstElementChild);
-    return () => {
-      s.removeEventListener("scroll", read);
-      ro.disconnect();
-    };
-  }, [views.length]);
-  const fills = fill(pane.view);
-  const column = wide?.(pane.view) ? "w-full" : "mx-auto w-full max-w-3xl";
+function PaneView({ pane, render, fill, wide, title, icon, onFocus, onClose, onSplit, onView, pending, overlay, onCancelPending, focused, many, hold, grip }: Props & { pane: Pane; focused: boolean; many: boolean; hold: (id: string, el: HTMLElement | null) => void; grip: (e: ReactPointerEvent) => void }) {
+  const ref = useRef<HTMLElement | null>(null);
+  const viewTip = useTip();
+  const measured = useWidth(ref);
+  // a hidden pane (a phone draws only the focused one) keeps the width it had, so its layout stays as it was
+  const last = useRef(0);
+  if (measured > 0) last.current = measured;
+  const width = last.current;
+  const setRef = useCallback((el: HTMLElement | null) => {
+    ref.current = el;
+    hold(pane.id, el);
+  }, [hold, pane.id]);
+  const view = pane.route.view;
+  const fills = fill(view);
+  const column = wide?.(view) ? "w-full" : "mx-auto w-full max-w-3xl";
+  const take = () => {
+    if (!focused) onFocus(pane.id);
+  };
+  const waiting = pending === pane.id;
+  const [fits, setFits] = useState(false);
+  const over = overlay?.paneId === pane.id ? overlay.node : null;
+  const body = waiting ? null : render({ id: pane.id, route: pane.route, width });
   return (
     <section
-      ref={ref}
+      ref={setRef}
       data-pane={pane.id}
-      data-pane-view={pane.view}
+      data-pane-view={view}
       data-focused={focused || undefined}
-      className={cx("orch-pane flex min-h-0 min-w-0 flex-1 flex-col", many && "m-1 rounded-lg border data-[focused]:border-foreground/25")}
-      onPointerDownCapture={() => {
-        if (!focused) onFocus(pane.id);
+      tabIndex={-1}
+      className="orch-pane absolute flex min-h-0 min-w-0 flex-col outline-none"
+      // a press on the header focuses nothing until it is a click, so a drag or an Esc leaves the focus where it was
+      onPointerDownCapture={(e) => {
+        if (!(e.target as Element).closest("[data-pane-header]")) take();
       }}
+      onFocusCapture={take}
     >
-      {/* the strip's row spans the pane on every tab (tabs left, split buttons right), whatever width the tab's content
-          takes, so it never moves with the tab (2026-11-17: only the wide tabs drew it so) and fits more tabs before it
-          scrolls; the tab's content scrolls under it, in its own column */}
-      {/* the strip keeps the content's inset, px-3 in a split pane as its cards (2026-11-18, the owner: at px-2 it ran
-          closer to the pane's edge than the cards) */}
-      <header className={cx("flex shrink-0 items-center gap-1", many ? "px-3 pt-2" : "px-4 pt-4")}>
-        {/* every tab one width, the widest tab's (2026-11-17, the owner: "make all the tab widths the same"): a grid of
-            equal columns at its natural width, labels centred; too narrow for them all, the strip scrolls sideways with the
-            tabs still equal, none cut short (a strip stretched across the row would make each a tenth of a wide pane).
-            A tab not shown is bb's muted text, as in dark: shadcn's 60% ink on the light tray is 3.4:1, under 4.5:1 */}
-        <Tabs ref={strip} data-tab-strip="" data-fade={fade || undefined} value={pane.view} onValueChange={(id) => onView(pane.id, id)} className="min-w-0 flex-1 gap-0 overflow-x-auto overflow-y-hidden [scrollbar-width:none]">
-          <TabsList className="grid w-max auto-cols-fr grid-flow-col">
-            {views.map((v) => (
-              <TabsTrigger key={v.id} value={v.id} className="text-muted-foreground">
-                {v.counted || v.count !== undefined ? <CountedLabel label={v.label} count={v.count} /> : v.label}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </Tabs>
-        {canSplit ? (
-          <>
-            <PaneAction label="Split right" icon={<Columns2 />} data-split-right="" onClick={() => onSplit(pane.id, "row")} />
-            <PaneAction label="Split down" icon={<Rows2 />} data-split-down="" onClick={() => onSplit(pane.id, "col")} />
-          </>
+      {/* two panes: each names where it is and can close; the focused one has the cue the Sidebar acts on. One pane draws no header */}
+      {many ? (
+        <header
+          className={cx("flex shrink-0 cursor-grab items-center gap-1 border-t-2 border-b py-1 pr-3 pl-1 select-none [&_button]:cursor-default", focused ? "border-t-primary" : "border-t-transparent")}
+          data-pane-header=""
+          // the whole header drags but Split and Close; on touch only the grip, so a finger elsewhere scrolls and taps
+          onPointerDown={(e) => {
+            const t = e.target as Element;
+            if (waiting || t.closest("[data-no-drag]") || (e.pointerType !== "mouse" && !t.closest("[data-pane-grip]"))) return;
+            grip(e);
+          }}
+          onMouseDown={(e) => {
+            if (!(e.target as Element).closest("[data-no-drag]")) e.preventDefault();
+          }}
+          onClick={(e) => {
+            if ((e.target as Element).closest("button")) return;
+            take();
+            ref.current?.focus({ preventScroll: true });
+          }}
+        >
+          {waiting ? (
+            <>
+              <span className="min-w-0 flex-1 truncate pl-2 text-sm text-muted-foreground" data-pane-title="">New pane</span>
+              <PaneAction label="Cancel" icon={<X />} data-cancel-pane="" data-no-drag="" onClick={() => onCancelPending?.()} />
+            </>
+          ) : (
+            <>
+          {/* the grip alone takes touch-action: none, so a finger elsewhere still scrolls; 44 × 36 to a finger */}
+          <Tooltip delayDuration={500}>
+            <TooltipTrigger asChild>
+              <span aria-hidden className="flex size-6 shrink-0 touch-none items-center justify-center rounded-md text-muted-foreground [@media(pointer:coarse)]:h-9 [@media(pointer:coarse)]:w-11 [&_svg]:size-4" data-pane-grip="">
+                <GripVertical />
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>Drag to move</TooltipContent>
+          </Tooltip>
+          {/* the view control: a button on every pane, focused or not; it opens the picker over this pane */}
+          <Tooltip {...viewTip}>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className={cx("h-7 min-w-[72px] shrink justify-start gap-1.5 px-2 font-normal", focused ? "text-foreground" : "text-muted-foreground")}
+                aria-label={`Change view, now ${title(pane.route)}`}
+                aria-haspopup="dialog"
+                aria-expanded={!!over}
+                data-view-control=""
+                onClick={(e) => onView(pane.id, e.currentTarget)}
+              >
+                <span className="flex shrink-0 text-muted-foreground [&_svg]:size-4" data-view-icon="">{icon(pane.route)}</span>
+                <span className="min-w-0 truncate" data-pane-title="">{title(pane.route)}</span>
+                <ChevronDown className="size-3.5 shrink-0 opacity-50" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Change view</TooltipContent>
+          </Tooltip>
+          <span className="min-w-0 flex-1" />
+          <PaneAction label="Split right" icon={<Columns2 />} data-split-right="" data-no-drag="" onClick={(e) => onSplit(pane.id, "row", e.currentTarget)} />
+          <PaneAction label="Split down" icon={<Rows2 />} data-split-down="" data-no-drag="" onClick={(e) => onSplit(pane.id, "col", e.currentTarget)} />
+          <PaneAction label="Close" icon={<X />} data-close-pane="" data-no-drag="" onClick={() => onClose(pane.id)} />
+            </>
+          )}
+        </header>
+      ) : null}
+      <div className={cx("relative flex min-h-0 flex-1 flex-col", waiting && "bg-muted")} data-pane-body="">
+        {waiting ? null : (
+          <PaneContext.Provider value={pane.id}>
+          <PaneFits.Provider value={setFits}>
+            {fills ? (
+              <div className="flex min-h-0 flex-1 flex-col pt-2">{body}</div>
+            ) : (
+              <div className="orch-pane__scroll min-h-0 flex-1 overflow-y-auto" data-fits={fits || undefined}>
+                <div className={cx(column, "pb-8", many ? "px-3 pt-3" : "px-4 pt-4")}>{body}</div>
+              </div>
+            )}
+          </PaneFits.Provider>
+          </PaneContext.Provider>
+        )}
+        {/* the picker over this pane: in a split's empty pane, or over a pane's own content, which stays mounted */}
+        {over ? (
+          <div className={cx("absolute inset-0 z-20", !waiting && "bg-background/70")}>
+            <NextFrame>{over}</NextFrame>
+          </div>
         ) : null}
-        {many ? <PaneAction label="Close pane" icon={<X />} data-close-pane="" onClick={() => onClose(pane.id)} /> : null}
-      </header>
-      {fills ? (
-        <div className="flex min-h-0 flex-1 flex-col pt-2">{render(pane.view, { id: pane.id, width })}</div>
-      ) : (
-        <div className="orch-pane__scroll min-h-0 flex-1 overflow-y-auto">
-          <div className={cx(column, "pb-8", many ? "px-3 pt-3" : "px-4 pt-4")}>{render(pane.view, { id: pane.id, width })}</div>
-        </div>
-      )}
+      </div>
     </section>
   );
 }
@@ -247,21 +470,23 @@ export const paneCss = /* css */ `
 /* 2026-11-17, the owner: on Projects the list and the project's header stay put and only the cards scroll. A tab that
    lays out its own scroll regions marks its root [data-fits-pane]: the pane hands it its whole height and scrolls nothing
    itself, so there is one scrollbar per region and none for the page */
-[data-orch] .orch-pane__scroll:has([data-fits-pane]) { display: flex; flex-direction: column; overflow: hidden; scrollbar-gutter: auto; }
-[data-orch] .orch-pane__scroll:has([data-fits-pane]) > div { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; padding-bottom: 0; }
+[data-orch] .orch-pane__scroll[data-fits] { display: flex; flex-direction: column; overflow: hidden; scrollbar-gutter: auto; }
+[data-orch] .orch-pane__scroll[data-fits] > div { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; padding-bottom: 0; }
 [data-orch] [data-fits-pane] { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
-/* 2026-11-18: the tab strip fades at a side (a mask reads only alpha, so black is no colour here) that has more tabs past it (data-fade: start, end, or both) */
-[data-orch] [data-tab-strip][data-fade] { --fade-l: 0px; --fade-r: 0px; -webkit-mask-image: linear-gradient(to right, transparent, black var(--fade-l), black calc(100% - var(--fade-r)), transparent); mask-image: linear-gradient(to right, transparent, black var(--fade-l), black calc(100% - var(--fade-r)), transparent); }
-[data-orch] [data-tab-strip][data-fade~="start"] { --fade-l: 24px; }
-[data-orch] [data-tab-strip][data-fade~="end"] { --fade-r: 24px; }
-/* A counted tab's box is its label, the gap and the slot, count or none. A hidden copy of the label holds column one, so
-   with the slot empty the label itself spans both columns, centred, and the box keeps its width */
-[data-orch] .orch-tab-label { display: inline-grid; grid-template-columns: auto auto; align-items: center; column-gap: 4px; }
-[data-orch] .orch-tab-label::before { content: attr(data-label); grid-area: 1 / 1; visibility: hidden; }
-[data-orch] .orch-tab-name { grid-area: 1 / 1; }
-[data-orch] .orch-tab-count { grid-area: 1 / 2; }
-[data-orch] .orch-tab-label[data-empty] .orch-tab-name { grid-column: 1 / -1; justify-self: center; }
-[data-orch] .orch-tab-count[data-empty] { visibility: hidden; }
 /* 2026-11-17: in a plugin pane bb-app 0.49.0's ThreadChat caps only the transcript at its 760px column, not the composer (bb's own thread page caps both), so the composer's wrapper (bb's [data-scroll-footer] and [data-app-composer] hooks) gets the same cap; a no-op once bb centres it itself */
 [data-orch] [data-pane-view="chat"] [data-scroll-footer] :has(> [data-app-composer]) { max-width: 760px; margin-inline: auto; }
+/* the view picker fades in over 120 ms, begun one frame in so its first drawn frame already shows it; nothing moves */
+@keyframes orch-picker-in { from { opacity: 0; } }
+[data-orch] :is([data-view-picker], [data-picker-drag-line]) { animation: orch-picker-in 120ms ease-out -17ms backwards; }
+@media (prefers-reduced-motion: reduce) { [data-orch] :is([data-view-picker], [data-picker-drag-line]) { animation: none; } }
+/* the picker's list shows its scrollbar whenever it overflows (a small pane cuts it after a few rows), overlay scrollbars too */
+[data-orch] [data-view-picker] [cmdk-list] { scrollbar-width: auto; scrollbar-color: auto; }
+[data-orch] [data-view-picker] [cmdk-list]::-webkit-scrollbar { width: 10px; }
+[data-orch] [data-view-picker] [cmdk-list]::-webkit-scrollbar-thumb { background: var(--border); background-clip: padding-box; border: 2px solid transparent; border-radius: 9999px; }
+/* a forced layout inside one pane (the picker opening, a page's own measuring) does not walk the others */
+[data-orch] .orch-pane { contain: layout paint; }
+/* a pane header lit as a handle: the grip, when the pointer is on the header but not on one of its buttons */
+[data-orch] [data-pane-header]:hover:not(:has(button:hover)) [data-pane-grip] { background: var(--accent); color: var(--foreground); }
+/* the Sidebar opens to the rail and back at once: a width that animated would move every pane beside it for 200 ms */
+[data-orch] [data-page-sidebar], [data-orch] [data-page-sidebar] * { transition-property: color, background-color, border-color, text-decoration-color, fill, stroke, opacity !important; }
 `;

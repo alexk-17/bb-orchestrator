@@ -43,30 +43,49 @@ function detailOrder(detail: string): string | null {
 
 test("the pane hands a [data-fits-pane] tab its height and scrolls nothing itself", () => {
   const panes = src("app/panes.tsx");
-  const frame = rule(panes, "[data-orch] .orch-pane__scroll:has([data-fits-pane])");
+  const frame = rule(panes, "[data-orch] .orch-pane__scroll[data-fits]");
   assert.match(frame, /display: flex;/);
   assert.match(frame, /overflow: hidden;/, "the pane would scroll the list and the header with the cards");
   // a stable gutter under overflow: hidden still takes the scrollbar's room
   assert.match(frame, /scrollbar-gutter: auto;/);
-  assert.match(rule(panes, "[data-orch] .orch-pane__scroll:has([data-fits-pane]) > div"), /flex: 1 1 auto;.*min-height: 0;/);
+  assert.match(rule(panes, "[data-orch] .orch-pane__scroll[data-fits] > div"), /flex: 1 1 auto;.*min-height: 0;/);
   assert.match(rule(panes, "[data-orch] [data-fits-pane]"), /flex: 1 1 auto;.*min-height: 0;/);
+  // the owner, 2026-11-20: "the input bars right now are so slow and laggy". A has-selector on the pane's scroller made
+  // every keystroke restyle the whole pane; the views now tell their pane with usePaneFits
+  assert.doesNotMatch(panes, /orch-pane__scroll:has\(/, "a has-selector on the pane's scroller restyles the pane on every keystroke");
+  assert.match(src("app/projects.tsx"), /usePaneFits\(wide\)/);
+  assert.match(src("app/scope.tsx"), /usePaneFits\(wide \|\| fits\)/);
 });
 
 test("Projects, wide: the list and the project's header stay put, only the cards scroll", () => {
   const projects = src("app/projects.tsx");
-  // only the wide layout opts in: one column keeps the pane's one scroll, the detail opening in place under its row
+  // only the wide layout opts in: one column keeps the pane's one scroll, a project opening as its own page
   assert.match(projects, /<div ref=\{root\} data-projects-width=\{width\} data-fits-pane=\{wide \|\| undefined\}>/);
   assert.match(projects, /<div className=\{wide \? "k-listpane" : undefined\} data-projects-list="">/);
   // the height reaches the two columns, which scroll each on its own
   assert.match(rule(projects, "[data-orch] [data-fits-pane] .b-body"), /flex: 1 1 0;.*min-height: 0;.*grid-template-rows: minmax\(0, 1fr\);.*align-items: stretch;/);
   assert.match(rule(projects, "[data-orch] [data-fits-pane] .b-body > .k-listpane"), /min-height: 0;.*overflow-y: auto;/, "the list scrolls on its own when taller");
   assert.match(rule(projects, "[data-orch] [data-fits-pane] .b-body > .detail > .k-dcards"), /flex: 1 1 0;.*overflow-y: auto;/, "the cards scroll in their own region");
-  // the head takes at most half the height, so the cards keep the other half: an open chat's transcript gives up the room
-  assert.match(rule(projects, "[data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed"), /flex: 0 1 auto; min-height: 0; max-height: 50%;/);
-  assert.match(projects, /\.k-dfixed \.k-chat > :is\(\.k-leadthread, \.k-chat__log\) \{ flex: 0 1 auto; min-height: 0; \}/, "the transcript doesn't shrink, so the head scrolls as a whole and the message box goes out of view");
+  // the head (2026-11-20, 1.36.1): never cut below its own height while the cards keep 48 px, so a closed chat's message box
+  // shows whole; the 50% cap hid Send under the fold once a profile card joined the head
+  assert.match(rule(projects, "[data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed"), /flex: none; min-height: 0; max-height: calc\(100% - 48px\); overflow-y: auto;/);
+  assert.doesNotMatch(projects, /max-height: 50%;/, "the 1.36.1 cap: Send under the fold at 1440x900");
+  // nothing in the chat card shrinks (1.36.0: the row slid under the box); an open transcript is measured (head-fit.ts)
+  assert.match(projects, /\.k-dfixed > \.k-chatcard, [^{]*\.k-dfixed \.k-chat, [^{]*\.k-dfixed \.k-chat > \* \{ flex: none; \}/, "the card, the chat, its row and its transcript keep their size");
+  assert.doesNotMatch(projects, /\.k-dfixed \.k-chat[^{]*\{ flex: 0 1 auto; min-height: 0; \}/, "the 1.36.0 line: the closed row shrank under the box");
+  assert.doesNotMatch(projects, /cqh - 240px/, "the 1.36.1 constant for the rest of the head: 150 px off with a profile card");
+  assert.match(projects, /\.k-dfixed \.k-chat > \.k-leadthread \{ height: var\(--k-transcript-h, var\(--k-leadthread-h, 480px\)\); \}/);
+  assert.match(projects, /\.k-dfixed \.k-chat > \.k-chat__log \{ max-height: var\(--k-transcript-h, 480px\); \}/);
+  assert.match(projects, /const headFit = useHeadFit<HTMLDivElement>\(\);/);
+  assert.match(projects, /<div className="k-dfixed" ref=\{headFit\} data-detail-head=\{project\.slug\}>/, "the measure is on the head");
+  // past the room (a short window) the head scrolls, and the message box stays stuck to the bottom of what shows
+  assert.match(projects, /\.k-dfixed > \.k-chatcard \{ overflow: clip; \}/, "clip, not hidden: a hidden card would be the box's scroller and unstick it");
+  assert.match(projects, /\.k-dfixed \.k-composer \{ position: sticky; bottom: 0; z-index: 1; background: var\(--card\); \}/);
+  // the real-browser check (Send inside the head's visible box, closed and open, three sizes) is test/e2e/chat-row.mjs
   assert.equal(detailOrder(fn(projects, "DetailPanel")), null);
   // a new project's cards start at the top: the detail is a new element per project, the list the same one
-  assert.match(projects, /<DetailPanel key=\{selected\.slug\} /);
+  assert.match(projects, /<DetailPanel key=\{p\.slug\} /);
+  assert.match(projects, /detailPanel\(selected\)/);
   // the old detail: the head and the cards one flow inside the pane's scroll
   const old = `<div className="k-dhead">…</div>
         {project.lead ? (<ChatCard slug={project.slug}><Composer compact /></ChatCard>) : null}
@@ -76,9 +95,11 @@ test("Projects, wide: the list and the project's header stay put, only the cards
   assert.match(detailOrder('<div className="k-dfixed"><div className="k-dhead"></div><ChatCard><Composer /></ChatCard><div className="k-dcards"><ProjectBook /></div></div>') ?? "", /still open/);
 });
 
-test("Scope, wide: the list and the entry's header card stay put, only the body scrolls", () => {
+test("Scope, wide: the entry's header card stays put beside Projects' list, only the body scrolls", () => {
   const scope = src("app/scope.tsx");
-  assert.match(scope, /<div ref=\{setRoot\} data-scope-tab="" data-scope-width=\{width\} data-fits-pane=\{wide \|\| undefined\}>/);
+  // since 2026-11-20 the entry sits beside Projects' list (fits), which holds the Scoping rows
+  assert.match(scope, /<div ref=\{setRoot\} data-scope-tab="" data-scope-width=\{width\} data-fits-pane=\{wide \|\| fits \|\| undefined\} className=\{fits \? "flex min-h-0 flex-col" : undefined\}>/);
+  assert.match(src("app/projects.tsx"), /entryOnly fits=\{wide\}/);
   assert.match(rule(scope, "[data-orch] [data-fits-pane] .orch-scope__grid"), /min-height: 0;.*grid-template-rows: minmax\(0, 1fr\);/);
   assert.match(rule(scope, "[data-orch] [data-fits-pane] .orch-scope__list"), /min-height: 0;.*overflow-y: auto;/);
   assert.match(rule(scope, "[data-orch] [data-fits-pane] .orch-scope__fixed"), /flex: none;/);

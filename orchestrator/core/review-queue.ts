@@ -98,6 +98,9 @@ export const stateSchema = z.object({
 });
 export type QueueState = z.infer<typeof stateSchema>;
 
+/** Set up (Home first, 2026-11-20): the schedule on, anything queued, a run, or dry-run turned off. A fresh install is none of these. */
+export const queueSetUp = (s: QueueState, dryRun: boolean): boolean => s.config.enabled || s.entries.length > 0 || s.lastAt !== null || Object.keys(s.history).length > 0 || !dryRun;
+
 /** The defaults: Schedule off, Auto off. Dry-run is the reviewQueueDryRun setting (on by default), not state. */
 export const initialState = (): QueueState => ({
   config: { enabled: false, auto: false, intervalMinutes: 65, hostId: "", pickerProvider: "", pickerModel: "", pickerProjectId: "" },

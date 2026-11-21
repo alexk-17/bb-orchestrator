@@ -201,7 +201,7 @@ test("an upgraded database keeps its PR rows, and then an environment can hold a
   db.exec(`CREATE TABLE _migrations (id INTEGER PRIMARY KEY)`);
   const before = MIGRATIONS.findIndex((m) => /CREATE TABLE prs_v2/.test(m));
   assert.ok(before > 0, "the prs rebuild is a migration of its own, appended");
-  assert.equal(before, MIGRATIONS.length - 1, "appended last");
+  assert.equal(before, 36, "appended at 36: later migrations come after it, never before");
   MIGRATIONS.slice(0, before).forEach((sql, i) => {
     db.exec(sql);
     db.prepare(`INSERT INTO _migrations (id) VALUES (?)`).run(i);

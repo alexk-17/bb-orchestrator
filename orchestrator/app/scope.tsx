@@ -24,9 +24,9 @@ import { experimental_useRpcQuery, useBbNavigate } from "@get-bb/plugin-sdk/app"
 import { Check, ChevronRight, Hourglass, Minus, Plus, UserRound } from "lucide-react";
 import { WRITES, rpcContract, type Card, type Deliverables, type Projects, type Scope, type Pathways, type PathwaysErrorKind, type answerBody, type secretBody } from "../contract.ts";
 import { layout } from "./diagram-layout.ts";
-import { openInBb, PANEL_PATH } from "./open-proof.ts";
+import { openInBb } from "./open-proof.ts";
 import { ccCss } from "./cc-lines.tsx";
-import { ChatBody, ChatCard, Composer, ThreadBox, directCss, markSeen } from "./direct-line.tsx";
+import { ChatBody, ChatCard, Composer, directCss, markSeen } from "./direct-line.tsx";
 import { CardView, useArming, via, type Act } from "./needs-you.tsx";
 import { DeliverableCard, inScope } from "./deliverables.tsx";
 import { answerCss } from "./answer-ui.tsx";
@@ -41,11 +41,9 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "./ui/empty.tsx";
 import { Input } from "./ui/input.tsx";
 import { Label } from "./ui/label.tsx";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select.tsx";
 import { Separator } from "./ui/separator.tsx";
 import { Skeleton } from "./ui/skeleton.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip.tsx";
-import { Tabs, TabsList, TabsTrigger } from "./ui/tabs.tsx";
 import { cn } from "./ui/utils.ts";
 import { Chip, kitCss } from "./kit-ui.tsx";
 import { STATE_CHIP, inScopeEntry, plannerOf, scopeDone, scopeEntries, scopeNext, scopeQuiet, scopeStatus, type ScopeEntry, type ScopeStatus } from "./kit.ts";
@@ -57,7 +55,7 @@ import { OpenRef } from "./project-book.tsx";
 import { panel } from "./refs.ts";
 import { age } from "./lanes.ts";
 import { isWide } from "./source.ts";
-import { useElementWidth } from "./panes.tsx";
+import { useElementWidth, usePaneFits } from "./panes.tsx";
 import { useMinute } from "./status-bar.tsx";
 import { useIdentity } from "./identity.ts";
 import { ownerOnScreen } from "../core/owner.ts";
@@ -138,14 +136,70 @@ function PlannerLine({ e, mon, size = 20, slug = true, ...data }: { e: ScopeEntr
   );
 }
 
-/** `focus`: the entry (scopeKey) a link elsewhere (a project's "Answer") asked to open here. */
-export function ScopeView({ q, projects, deliverables, refetchAll, mons, accents, focus = null }: { q: Query; projects: Projects | undefined; deliverables: Deliverables | undefined; refetchAll: () => void; mons: ReadonlyMap<string, Face>; accents?: ReadonlyMap<string, string | null>; focus?: string | null }) {
+/** What waits on the owner in a scoping entry: its open cards and its deliverables in review (the count Scope's list drew). */
+export function scopeWaitingIn(p: Scope["projects"][number], e: ScopeEntry, deliverables: Deliverables | undefined): number {
+  const task = e.task?.id ?? null;
+  const cards = p.cards.filter((c) => !gone.has(`${c.id}@${c.rev}`) && inScopeEntry(p, task, c.scopeTask)).length;
+  return cards + (deliverables ?? []).filter((d) => d.project === p.slug && inScope(d) && inScopeEntry(p, task, d.scopeTask)).length;
+}
+
+/**
+ * Projects' Scoping group (2026-11-20, build plan step 3; mockups-v2 projects-1440): one outline row per scoping entry,
+ * its planner's face, what it is, what waits, and Open scope. Nothing scoping: nothing drawn.
+ */
+export function ScopingRows({ q, projects, deliverables, mons, selected, onOpen }: { q: Query; projects: Projects | undefined; deliverables: Deliverables | undefined; mons: ReadonlyMap<string, Face>; selected?: string | null; onOpen: (key: string) => void }) {
+  const list = q.data?.projects ?? [];
+  const entries = scopeEntries(list);
+  if (!entries.length) return null;
+  const monOf = (address: string): Face | null => {
+    const lead = projects?.find((x) => `lead:${x.slug}` === address)?.lead;
+    return lead && (lead.mon || lead.persona) ? { mon: lead.mon, persona: lead.persona } : (mons.get(address) ?? null);
+  };
+  return (
+    <section data-group="scoping" aria-label="Scoping" className="flex flex-col gap-2">
+      <h3 className="k-list-h">Scoping · {entries.length}</h3>
+      <ItemGroup className="gap-2">
+        {entries.map((e) => {
+          const p = list.find((x) => x.slug === e.slug)!;
+          const n = scopeWaitingIn(p, e, deliverables);
+          const planner = plannerName(e);
+          return (
+            <Item key={e.key} variant="outline" size="sm" role="listitem" className={cn("cursor-pointer flex-nowrap gap-3 px-3 py-2", selected === e.key && "bg-muted/60")} data-scope-row={e.key} onClick={(ev) => ((ev.target as HTMLElement).closest("button") ? undefined : onOpen(e.key))}>
+              <AgentFace face={monOf(planner.address)} address={planner.address} size={24} boost={false} />
+              <span className="flex min-w-0 flex-1 flex-col">
+                <span className="truncate text-sm font-medium">
+                  {projectTitle(e.slug)}
+                  {e.task ? <span className="font-normal text-muted-foreground"> › {entryTitle(e).title}</span> : null}
+                </span>
+                <span className="truncate text-xs text-muted-foreground" data-scope-row-waiting={String(n)}>
+                  {n ? `${n} ${n === 1 ? "waits" : "wait"} on you` : "nothing waits"}
+                  {planner.state ? ` · ${planner.state}` : ""}
+                </span>
+              </span>
+              <Button size="sm" variant={n ? "default" : "outline"} className="shrink-0" data-scope-pick={e.key} aria-current={selected === e.key ? "true" : undefined} onClick={() => onOpen(e.key)}>
+                Open scope
+              </Button>
+            </Item>
+          );
+        })}
+      </ItemGroup>
+    </section>
+  );
+}
+
+/**
+ * `focus`: the entry (scopeKey) to open. `entryOnly` (2026-11-20, Scope folded into Projects): only that entry, as a page of
+ * Projects; its list is the Scoping group there (ScopingRows). `fits`: it sits beside that list, in a column of the pane's
+ * height, so its header stays and its body scrolls (as on the wide Scope tab).
+ */
+export function ScopeView({ q, projects, deliverables, refetchAll, mons, accents, focus = null, entryOnly = false, fits = false }: { q: Query; projects: Projects | undefined; deliverables: Deliverables | undefined; refetchAll: () => void; mons: ReadonlyMap<string, Face>; accents?: ReadonlyMap<string, string | null>; focus?: string | null; entryOnly?: boolean; fits?: boolean }) {
   useGate();
   const { ownerName, cosTitle } = useIdentity();
   const you = ownerOnScreen(ownerName);
   const now = useMinute();
   const [width, measure] = useElementWidth();
-  const [picked, setPicked] = useState<string | null>(null);
+  // the entry asked for wins over "the first entry" below, on the first render too
+  const [picked, setPicked] = useState<string | null>(focus);
   const root = useRef<HTMLDivElement | null>(null);
   const arming = useArming(root);
   useEffect(() => {
@@ -243,7 +297,8 @@ export function ScopeView({ q, projects, deliverables, refetchAll, mons, accents
   };
   const cards = ordered(open.cards.filter((c) => !gone.has(`${c.id}@${c.rev}`) && inScopeEntry(open, task, c.scopeTask)));
   const delivered = (deliverables ?? []).filter((d) => d.project === open.slug && inScope(d) && inScopeEntry(open, task, d.scopeTask)).sort((a, b) => b.updatedAt - a.updatedAt);
-  const wide = listBeside(width);
+  const wide = !entryOnly && listBeside(width);
+  usePaneFits(wide || fits);
   // nothing waits: the status card in place of the cards, beside the chat whenever the list is beside the entry
   const quiet = scopeQuiet({ cards: cards.length, delivered: delivered.length });
   const side = quiet ? wide : width >= CHAT_BESIDE_MIN;
@@ -373,11 +428,11 @@ export function ScopeView({ q, projects, deliverables, refetchAll, mons, accents
     </section>
   );
   return (
-    <div ref={setRoot} data-scope-tab="" data-scope-width={width} data-fits-pane={wide || undefined}>
+    <div ref={setRoot} data-scope-tab="" data-scope-width={width} data-fits-pane={wide || fits || undefined} className={fits ? "flex min-h-0 flex-col" : undefined}>
       {styles}
-      <div className="orch-cc orch-scope" data-layout={wide ? "list-detail" : "column"} data-chat={side ? "side" : "below"} style={wide ? undefined : { maxWidth: 800, marginInline: "auto" }}>
+      <div className="orch-cc orch-scope" data-layout={wide ? "list-detail" : "column"} data-chat={side ? "side" : "below"} style={wide || entryOnly ? undefined : { maxWidth: 800, marginInline: "auto" }}>
         <div className="orch-scope__grid">
-          {listNav}
+          {entryOnly ? null : listNav}
           <div className="orch-scope__entrybox">
             <div className="orch-scope__fixed" data-scope-fixed="">
               {left ? (
@@ -1055,84 +1110,8 @@ function PathwaysDecisionDraftView({
   );
 }
 
-export function PathwaysTab({
-  projects,
-  linkedSlug,
-}: {
-  projects: Projects | undefined;
-  linkedSlug: string | null;
-}) {
-  const navigate = useBbNavigate();
-  const [picked, setPicked] = useState(
-    () =>
-      linkedSlug ??
-      (() => {
-        try {
-          return localStorage.getItem("pathways:last-project") ?? "";
-        } catch {
-          return "";
-        }
-      })(),
-  );
-  useEffect(() => {
-    if (linkedSlug) setPicked(linkedSlug);
-  }, [linkedSlug]);
-  const slug = projects?.some((project) => project.slug === picked)
-    ? picked
-    : (projects?.[0]?.slug ?? "");
-  const pick = (value: string) => {
-    setPicked(value);
-    localStorage.setItem("pathways:last-project", value);
-    navigate.toPluginPanel(PANEL_PATH, {
-      subPath: `pathways/${encodeURIComponent(value)}`,
-    });
-  };
-  return (
-    <div
-      className="mx-auto max-w-[2200px] p-4 max-[1100px]:p-1"
-      data-pathways-tab=""
-    >
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <h2 className="m-0 text-lg font-semibold">Pathways</h2>
-        <label className="text-sm" htmlFor="pathways-project">
-          Project
-        </label>
-        <Select value={slug || undefined} onValueChange={pick}>
-          <SelectTrigger
-            id="pathways-project"
-            size="sm"
-            aria-label="Pathways project"
-          >
-            <SelectValue placeholder="Choose a project" />
-          </SelectTrigger>
-          <SelectContent>
-            {projects?.map((project) => (
-              <SelectItem key={project.slug} value={project.slug}>
-                {project.slug}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-      {projects === undefined ? (
-        <Skeleton className="h-80 w-full" />
-      ) : slug ? (
-        <PathwaysSection key={slug} slug={slug} />
-      ) : (
-        <Empty>
-          <EmptyHeader>
-            <EmptyTitle>No projects recorded</EmptyTitle>
-            <EmptyDescription>
-              Create a project to see its Pathways map.
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
-      )}
-    </div>
-  );
-}
-
-function PathwaysSection({ slug }: { slug: string }) {
+/** A project's Pathways map (a section of its page since 2026-11-20). `narrow`: its container is narrow, so the graph draws compact. */
+export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boolean }) {
   const graphViewport = useRef<SVGSVGElement>(null);
   const graphContent = useRef<SVGGElement>(null);
   const graphZoom = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null);
@@ -1149,9 +1128,10 @@ function PathwaysSection({ slug }: { slug: string }) {
     if (selectedId === null) lastFocusedRef.current = document.activeElement;
     setSelectedId(id);
   };
-  const [narrowGraph, setNarrowGraph] = useState(
+  const [narrowWindow, setNarrowGraph] = useState(
     () => window.innerWidth < 1100,
   );
+  const narrowGraph = narrow ?? narrowWindow;
   useEffect(() => {
     const resize = () => setNarrowGraph(window.innerWidth < 1100);
     window.addEventListener("resize", resize);
@@ -2658,45 +2638,22 @@ function StatusCard({ entry, s, done, next, now, mon }: { entry: ScopeEntry; s: 
   );
 }
 
-/**
- * An entry's chat (1.13.0): the lead's own thread; while a scoping thread plans the task, a switch to watch that
- * thread's own transcript instead ("Lead" | "Scoping thread"). The composer under it always writes to the lead (a
- * tracked direct message): the scoping thread hears from its lead, so the hint says the lead passes it on.
- */
+/** An entry's chat: the lead's, one chat (no switch since 2026-11-20); a scoping thread is a link, and the composer writes to the lead. */
 function ScopeChat({ project, entry, now, cos, refetchAll, onFocus, height }: { project: Project; entry: ScopeEntry; now: number; cos: string; refetchAll: () => void; onFocus: () => void; height?: string }) {
   const navigate = useBbNavigate();
   const planner = plannerOf(entry);
-  const [view, setView] = useState<"lead" | "thread">("lead");
-  const shown = planner.kind === "thread" ? view : "lead";
   const busy = gate.lock !== null;
   return (
-    <ChatCard slug={project.slug} data-scope-chat-view={shown}>
+    <ChatCard slug={project.slug} data-scope-chat-view="lead">
       <div className="k-chat__bar">
+        <h3 className="m-0 text-sm font-semibold">Chat with the lead</h3>
         {planner.kind === "thread" ? (
-          <Tabs value={shown} onValueChange={(v) => setView(v as "lead" | "thread")}>
-            <TabsList aria-label="Whose chat">
-              <TabsTrigger value="lead" data-scope-view="lead">
-                Lead
-              </TabsTrigger>
-              <TabsTrigger value="thread" data-scope-view="thread" title={planner.text}>
-                Scoping thread
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
-        ) : (
-          <h3 className="m-0 text-sm font-semibold">Chat with the lead</h3>
-        )}
-        {shown === "thread" && planner.kind === "thread" ? (
-          <Btn tone="ghost" size="sm" className="tail" title={`Open ${planner.address} in bb`} data-open-thread={planner.threadId} onClick={() => navigate.toThread(planner.threadId)}>
-            Open in bb
+          <Btn tone="ghost" size="sm" className="tail" title={`${planner.text}. Open ${planner.address} in bb`} data-open-thread={planner.threadId} onClick={() => navigate.toThread(planner.threadId)}>
+            Scoping thread ↗
           </Btn>
         ) : null}
       </div>
-      {shown === "thread" && planner.kind === "thread" ? (
-        <ThreadBox threadId={planner.threadId} label={planner.address} height={height} note={`${planner.name}'s thread. It reports to the ${project.slug} lead.`} />
-      ) : (
-        <ChatBody project={project} now={now} cos={cos} busy={busy} refetchAll={refetchAll} height={height} />
-      )}
+      <ChatBody project={project} now={now} cos={cos} busy={busy} refetchAll={refetchAll} height={height} />
       <Composer project={project} now={now} cos={cos} busy={busy} refetchAll={refetchAll} onFocus={onFocus} via={planner.kind === "thread" ? "The lead passes it to the scoping thread" : undefined} />
     </ChatCard>
   );

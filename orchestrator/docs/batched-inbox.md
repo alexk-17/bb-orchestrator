@@ -1,10 +1,10 @@
 # Batched inbox
 
-Batching is opt-in: `batchInbox` defaults to `false`, in the plugin setting and in
-the embedded Engine, so an existing install keeps per-message delivery on upgrade.
-Set `batchInbox=true` to batch for every registered recipient (CoS, Steward, leads
-and worker threads). No installed plugin or live thread is changed by building
-this source.
+Batching is on by default (2026-11-20, tokens): `batchInbox` defaults to `true`, in
+the plugin setting and in the embedded Engine. An install that never set it
+switches to batching on the update; one that saved `false` keeps per-message
+delivery. It applies to every registered recipient (CoS, Steward, leads and worker
+threads).
 
 Mail is written before delivery. `inbox_entries` gives each arrival a durable
 sequence and explicit unread state, separate from the existing item/decision
@@ -25,14 +25,19 @@ does not approve/answer a decision, grant a plan or merge anything. It closes on
 items that need no outcome (copies, notices), as per-message delivery does. An item
 that asks for an outcome (`needs_ack`: messages, relays, imported tasks) is only
 marked delivered: it stays open until `orch_ack(id, outcome)` or a reply with its
-ref, so the sender's ack note and any relay settlement still happen. Each digest
-entry is the item as its recipient reads it, ack line and labels included. Those actions
+ref, so the sender's ack note and any relay settlement still happen. The digest
+header says the ack rules once; each entry is one line (id, kind, sender, ref when
+set, severity, `outcome` when only an explicit ack or a ref'd reply closes it,
+needsReply and dueAt when set), then its body. A direct message keeps its own rules. Those actions
 retain their existing tools and approval gates. The instruction recovery view and
 `inbox --hook` remain previews, not cursor-bearing reads.
 
 One durable `inbox_wakes` row per recipient coalesces arrivals. INFO never wakes
-alone; ACTION (the send default), needs-reply or a due deadline does. Full message
-bodies never appear in a wake. `inboxDebounceMs` defaults to 2000 and is checked by
+alone; ACTION (the send default), needs-reply or a due deadline does. The wake
+carries the digest (2026-11-19): its own cursor covers exactly the items it shows,
+later arrivals stay unread for the next wake, and past `WAKE_DIGEST_CAP` characters
+it shows the first items and says how many more `orch_inbox` will read. A wake to a
+thread bb reports busy goes bare (no bodies), since bb queues it behind the turn. `inboxDebounceMs` defaults to 2000 and is checked by
 the existing 5-second clock. Busy/stopped/archived recipients and held projects
 wait. Delivery uses `queue-if-active`, so a status race cannot steer an active
 turn. A queued wake is not retried while it remains queued.

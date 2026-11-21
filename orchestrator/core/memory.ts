@@ -135,7 +135,7 @@ export function memoryPointer(slug: string, local: MemoryLocal, projectFolder: s
   return [
     "## Memory",
     `Before you re-derive a past decision or a fact about this project, search memory: \`${TOOL_SEARCH}\` with ` +
-      `\`project: "${slug}"\` (past sessions too with \`transcripts: true\`). A search can take minutes.`,
+      `\`project: "${slug}"\` (past sessions too with \`transcripts: true\`). A search stops after 45 s.`,
     `Read a hit, or this project's vault page, with \`${TOOL_PAGE}\` (\`ref: "${slug}"\`, or a hit's \`path:line\`). ` +
       `The page is ${page}: read it, never edit it. Only the memory publisher writes the vault.`,
     `Durable feedback, preferences and lessons for this project (what ${ownerWords(ownerName).name} corrected or confirmed, a rule to keep) go ` +

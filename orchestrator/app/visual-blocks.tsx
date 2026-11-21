@@ -10,7 +10,7 @@ import { BOX_W, BOX_W_MAX, layout } from "./diagram-layout.ts";
 import { ProofLink } from "./proof-link.tsx";
 import { KIND_TONES, css, tint, type KindKey } from "./palette.ts";
 import { Card } from "./ui/card.tsx";
-import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "./ui/item.tsx";
+import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle, WITH_DESCRIPTION } from "./ui/item.tsx";
 import { Table, TableBody, TableCell, TableRow } from "./ui/table.tsx";
 import { cn } from "./ui/utils.ts";
 import { Kind, Tag } from "./ui.tsx";
@@ -53,10 +53,11 @@ function Panel({ kind, title, note, children }: { kind: keyof typeof ICONS; titl
   const Icon = ICONS[kind];
   return (
     <Card role="region" aria-label={title} data-block={kind} className="gap-0 overflow-hidden py-0">
-      <div className="flex min-h-11 items-center gap-2 px-4 py-2">
+      {/* a note that doesn't fit beside the title takes its own row (2026-11-21: a diagram's legend ran past a phone's card) */}
+      <div className="flex min-h-11 flex-wrap items-center gap-2 px-4 py-2">
         <Icon className="size-4 flex-none text-muted-foreground" aria-hidden />
-        <span className="min-w-0 text-sm font-semibold [overflow-wrap:anywhere]">{title}</span>
-        {note ? <span className="ml-auto inline-flex max-w-[60%] items-center gap-1.5 text-xs text-muted-foreground">{note}</span> : null}
+        <span className="min-w-0 flex-1 basis-32 text-sm font-semibold [overflow-wrap:anywhere]">{title}</span>
+        {note ? <span className="ml-auto inline-flex max-w-full flex-wrap items-center justify-end gap-1.5 text-xs text-muted-foreground">{note}</span> : null}
       </div>
       <div className="divide-y border-t">{children}</div>
     </Card>
@@ -67,7 +68,7 @@ function Panel({ kind, title, note, children }: { kind: keyof typeof ICONS; titl
 function Row({ lead, text, sub, end, data }: { lead?: ReactNode; text: ReactNode; sub?: ReactNode; end?: ReactNode; data?: Record<string, string> }) {
   return (
     <Item size="sm" className="min-h-12 flex-nowrap rounded-none px-4 py-2.5" {...data}>
-      {lead ? <ItemMedia>{lead}</ItemMedia> : null}
+      {lead ? <ItemMedia className={sub ? WITH_DESCRIPTION : undefined}>{lead}</ItemMedia> : null}
       <ItemContent className="min-w-0 gap-0.5">
         <ItemTitle className="w-auto font-medium [overflow-wrap:anywhere]">{text}</ItemTitle>
         {sub ? <ItemDescription className="line-clamp-none text-xs text-pretty [overflow-wrap:anywhere]">{sub}</ItemDescription> : null}
@@ -262,7 +263,7 @@ export function Diagram({ b }: { b: B<"diagram"> }) {
       title={b.title ?? "Diagram"}
       note={
         used.length ? (
-          <span className="inline-flex gap-1.5">
+          <span className="inline-flex flex-wrap justify-end gap-1.5">
             {used.map((c) => (
               <Status key={c} tone={CHANGE[c].tone}>
                 {CHANGE[c].label}

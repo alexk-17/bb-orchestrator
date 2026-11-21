@@ -2,7 +2,7 @@
 // buttons, the refusal line and the drop zone, shared by the composer to a lead (direct-line.tsx, the Projects and Scope
 // boxes) and the bar to the CoS (cos-composer.tsx). Which files are taken is lead-images.ts admit; each box keeps its
 // own list. The thumbnails are the files' object URLs; nothing here reads or logs their bytes except base64, for the write.
-import { useRef, useState, type DragEvent } from "react";
+import { memo, useCallback, useLayoutEffect, useRef, useState, type DragEvent, type RefObject } from "react";
 import { ImagePlus, X } from "lucide-react";
 import { ACCEPT } from "./lead-images.ts";
 import { styleHref } from "./style-href.ts";
@@ -31,28 +31,44 @@ export const imagesCss = /* css */ `
 [data-orch] [data-dropping] { outline: 2px dashed var(--muted-foreground); outline-offset: -6px; }
 `;
 
-/** The 24 px attach button, and the hidden file picker it opens (the four accepted types, several at once). */
+/** The attach button (a 32 px ghost icon, the reply box's tool), and the hidden file picker it opens (the four accepted types, several at once). */
 export function AttachButton({ onFiles, disabled, data }: { onFiles: (files: File[]) => void; disabled?: boolean; data: Record<`data-${string}`, string> }) {
   const picker = useRef<HTMLInputElement>(null);
+  const latest = useRef(onFiles);
+  useLayoutEffect(() => {
+    latest.current = onFiles;
+  });
+  const onPick = useCallback((files: File[]) => latest.current(files), []);
   return (
     <>
-      <Button type="button" variant="ghost" size="icon-xs" aria-label="Attach images" title="Attach images (or paste or drop screenshots)" disabled={disabled} onClick={() => picker.current?.click()} {...data}>
+      <Button type="button" variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground" aria-label="Attach images" title="Attach images (or paste or drop screenshots)" disabled={disabled} onClick={() => picker.current?.click()} {...data}>
         <ImagePlus aria-hidden />
       </Button>
-      <input
-        ref={picker}
-        type="file"
-        accept={ACCEPT}
-        multiple
-        hidden
-        onChange={(e) => {
-          onFiles(Array.from(e.target.files ?? []));
-          e.target.value = "";
-        }}
-      />
+      <FilePicker picker={picker} onPick={onPick} />
     </>
   );
 }
+
+/**
+ * The hidden file input, memoized so a keystroke in the box never re-renders it (2026-11-20, the owner: "the input bars
+ * right now are so slow and laggy"). React resets an <input>'s name and type on every render it gets, and inside bb's
+ * page each of those DOM changes set off bb's own :has() rules, which restyled about 3,500 elements per key.
+ */
+const FilePicker = memo(function FilePicker({ picker, onPick }: { picker: RefObject<HTMLInputElement | null>; onPick: (files: File[]) => void }) {
+  return (
+    <input
+      ref={picker}
+      type="file"
+      accept={ACCEPT}
+      multiple
+      hidden
+      onChange={(e) => {
+        onPick(Array.from(e.target.files ?? []));
+        e.target.value = "";
+      }}
+    />
+  );
+});
 
 /** The attached images as thumbnails, each with its labelled 24 px remove button; then why a file stayed out, if one did. */
 export function ImageThumbs({ images, refused, onRemove, disabled, className, data }: { images: readonly Attached[]; refused: string | null; onRemove: (key: string) => void; disabled?: boolean; className?: string; data: string }) {

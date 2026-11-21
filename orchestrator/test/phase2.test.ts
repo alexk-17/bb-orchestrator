@@ -21,7 +21,7 @@ function setup() {
     changed: () => {},
     log: () => {},
     cardUp: (d: Decision) => up.push(d.id),
-  }, { pokemon: true }); // these tests pin the Pokémon behaviour (the setting on)
+  }, { batchInbox: false, pokemon: true }); // these tests pin the Pokémon behaviour (the setting on)
   const cos = e.register("T-cos", "cos", null);
   const lead = e.register("T-la", "lead", "alpha");
   return { e, db, cos, lead, sent, up, advance: (ms: number) => (clock += ms), now: () => clock };

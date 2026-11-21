@@ -381,6 +381,8 @@ export const deliverablesSchema = z.array(
     scope: z.boolean().optional(),
     scopeTask: z.string().optional(), // the scoping task it is reviewed under (1.12.0)
     folder: z.string().optional(), // its own folder of files and README.md (2026-11-17)
+    // a Multiplayer board's review: reviewed on that board, never on Deliverables
+    board: z.object({ id: z.string(), record: z.string().nullable(), flag: z.string().nullable() }).optional(),
   }),
 );
 export type Deliverables = z.infer<typeof deliverablesSchema>;
@@ -466,11 +468,68 @@ export type ProjectOrder = z.infer<typeof projectOrderSchema>;
 
 /** Who the page is for: the ownerName setting ("" = the page says "you") and the CoS's name. */
 // linearWorkspace / linearTeams: where a Linear id in the command center links (app/refs.ts); empty: no link
-export const configSchema = z.object({ ownerName: z.string(), cosTitle: z.string(), linearWorkspace: z.string().optional(), linearTeams: z.array(z.string()).optional(), hiddenTabs: z.array(z.string()).optional() });
+export const configSchema = z.object({ ownerName: z.string(), cosTitle: z.string(), linearWorkspace: z.string().optional(), linearTeams: z.array(z.string()).optional(), hiddenTabs: z.array(z.string()).optional(), shown: z.array(z.string()).optional() });
 export type Config = z.infer<typeof configSchema>;
+
+// The Feed tab (core/feed.ts). `line`: where a reply goes (lead:<slug> or cos), none for a post that only opens.
+export const feedMsgSchema = z.object({
+  id: z.string(),
+  who: z.string(),
+  text: z.string(),
+  at: z.number(),
+  rev: z.number().nullable(),
+  state: z.string().nullable(),
+  tone: z.enum(["ok", "warn"]).nullable(),
+  resend: z.boolean(),
+  images: z.number(),
+  isNew: z.boolean(),
+});
+export type FeedMsg = z.infer<typeof feedMsgSchema>;
+export const feedPostSchema = z.object({
+  key: z.string(),
+  kind: z.enum(["card", "prompt", "deliverable", "status", "merge", "alarm", "dead", "message"]),
+  author: z.string(),
+  project: z.string().nullable(),
+  line: z.string().nullable(),
+  lineLive: z.boolean(),
+  held: z.boolean(),
+  to: z.string().nullable(),
+  title: z.string(),
+  text: z.string(),
+  at: z.number(),
+  activity: z.number(),
+  scope: z.boolean(),
+  needsOwner: z.boolean(),
+  isNew: z.boolean(),
+  outcome: z.string().nullable(),
+  card: z.object({ id: z.string(), rev: z.number(), options: z.array(opt), allowText: z.boolean(), merge: z.boolean() }).nullable(),
+  deliverable: z.object({ id: z.string(), rev: z.number(), state: z.string(), shots: z.number(), thumb: z.string().nullable() }).nullable(),
+  status: z.object({ steps: z.array(z.object({ title: z.string(), state: z.string() })), needs: z.string().nullable() }).nullable(),
+  url: z.string().nullable(),
+  prompt: z.object({ threadId: z.string(), id: z.string() }).nullable(),
+  replies: z.number(),
+  thread: z.array(feedMsgSchema),
+  earlier: z.number(),
+  self: feedMsgSchema.nullable(),
+});
+export type FeedPost = z.infer<typeof feedPostSchema>;
+export const FEED_FILTERS = ["all", "needs", "delivered", "alerts"] as const;
+export const feedSchema = z.object({
+  posts: z.array(feedPostSchema),
+  cursor: z.string().nullable(),
+  seen: z.number(),
+  newCount: z.number(),
+  counts: z.object({ needsYou: z.number(), delivered: z.number(), alerts: z.number() }),
+  leftOut: z.number(),
+  now: z.number(),
+  last: feedMsgSchema.extend({ to: z.string(), about: z.string() }).nullable(),
+});
+export type Feed = z.infer<typeof feedSchema>;
 
 export const rpcContract = defineRpcContract({
   config: { input: z.null(), output: configSchema },
+  // the one-page guide (USAGE.md), for the How it works view
+  howItWorks: { input: z.null(), output: z.object({ markdown: z.string() }) },
   needsYou: { input: z.object({ zone: z.string().max(64) }).strict(), output: needsYouSchema },
   board: { input: z.null(), output: boardSchema },
   projects: { input: z.null(), output: projectsSchema },
@@ -486,6 +545,11 @@ export const rpcContract = defineRpcContract({
   projectOrder: { input: z.null(), output: projectOrderSchema },
   // the chat log's read (1.10.0): one project's direct messages, newest first, only when the chat is open
   directHistory: { input: z.object({ slug: z.string().min(1).max(40), before: z.number().nullable().optional(), limit: z.number().int().min(1).max(100).optional() }).strict(), output: z.object({ messages: z.array(directMessageSchema), more: z.boolean() }) },
+  feed: { input: z.object({ cursor: z.string().max(200).nullable(), filter: z.enum(FEED_FILTERS) }).strict(), output: feedSchema },
+  // "You and the CoS" on the Chat tab: the owner's tracked messages and the CoS's replies, oldest first
+  cosLine: { input: z.object({ before: z.number().nullable() }).strict(), output: z.object({ entries: z.array(z.object({ kind: z.enum(["owner", "cos", "hidden"]), msg: feedMsgSchema.nullable(), re: z.string().nullable(), hidden: z.number() })), more: z.boolean() }) },
+  // a post's conversation before an entry's time ("Show N earlier replies"), or all of it (the desktop pane)
+  feedThread: { input: z.object({ about: z.string().min(1).max(400), before: z.number().nullable() }).strict(), output: z.object({ messages: z.array(feedMsgSchema), more: z.boolean() }) },
 });
 
 // ---- the write routes (POST, JSON body). Each answers { ok: true } or { ok: false, error: { kind, message } }.
@@ -502,7 +566,7 @@ export const holdBody = z.object({ slug: z.string(), held: z.boolean() }).strict
 // 2026-11-17: `images` are ids the image write returned for this lead (never paths: a page can't attach a file of its
 // choosing), at most MAX_IMAGES; a message with images may have no words.
 export const directMessageBody = z
-  .object({ slug: z.string(), text: z.string().max(4000), followUp: z.string().nullable().optional(), images: z.array(z.string().min(1).max(40)).max(MAX_IMAGES).optional() })
+  .object({ slug: z.string(), text: z.string().max(4000), followUp: z.string().nullable().optional(), images: z.array(z.string().min(1).max(40)).max(MAX_IMAGES).optional(), about: z.string().min(1).max(400).nullable().optional() })
   .strict()
   .refine((b) => b.text.trim().length > 0 || (b.images?.length ?? 0) > 0, { message: "a message needs words or an image" });
 // one image per write, as base64 (bb's local routes take JSON only); the length cap is checked before anything decodes
@@ -520,7 +584,7 @@ export const unpinBody = z.object({ id: z.string().min(1).max(40) }).strict();
 export const startLeadBody = z.object({ slug: z.string().min(1).max(40) }).strict();
 // 2026-11-17: with images the bar staged (cosImage), by id; then the words may be empty
 export const cosMessageBody = z
-  .object({ text: z.string().trim().max(8000), images: z.array(z.string().min(1).max(40)).max(MAX_IMAGES).optional() })
+  .object({ text: z.string().trim().max(8000), images: z.array(z.string().min(1).max(40)).max(MAX_IMAGES).optional(), about: z.string().min(1).max(400).nullable().optional() })
   .strict()
   .refine((b) => b.text.length > 0 || (b.images?.length ?? 0) > 0, { message: "a message needs words or an image" });
 // one image for the CoS bar's next send, as directImageBody without the project
@@ -532,6 +596,10 @@ export const interactionAnswerBody = z
     answers: z.record(z.string(), z.object({ selected: z.array(z.string().max(500)).max(50), freeText: z.string().max(4000).optional() }).strict()),
   })
   .strict();
+// the feed's seen-up-to line (D5): moved when the owner leaves the feed or marks all read, only forward
+export const feedSeenBody = z.object({ upTo: z.number() }).strict();
+// Resend under one of the owner's own messages: delivered again, or batched, unread again and its recipient re-woken
+export const feedResendBody = z.object({ id: z.string().min(1).max(40) }).strict();
 export const roleStartBody = z.object({ role: z.enum(["cos", "steward"]) }).strict();
 // next: what the lead does with it next ("forward this to the team"); it reaches the lead as an item they must ack
 export const approveBody = z.object({ id: z.string(), rev: z.number().int(), note: z.string().max(4000).nullable(), next: z.string().max(4000).nullable().optional() }).strict();
@@ -583,4 +651,6 @@ export const WRITES = {
   watchRetarget: "/watchers/retarget",
   watchMove: "/watchers/move",
   watchDrop: "/watchers/drop",
+  feedSeen: "/feed/seen",
+  feedResend: "/feed/resend",
 } as const;

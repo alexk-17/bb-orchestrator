@@ -37,7 +37,7 @@
 // Grouped by project (2026-11-18, the owner: easy to see which project each PR belongs to): one group per project the PR
 // already carries, by name, then Unassigned, each with its count and a collapse kept per viewer (pr-groups.ts). In the
 // table a group's header is a row spanning the drawn columns, so every group shares the one header and its handles.
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode } from "react";
 import { ChevronRight } from "lucide-react";
 import { experimental_useRpcQuery, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
 import { CHANGED_CHANNEL } from "../contract.ts";
@@ -63,6 +63,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collap
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./ui/dialog.tsx";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./ui/table.tsx";
 import { useWidth } from "./panes.tsx";
+import { useTouchPhone } from "./phone.ts";
+import { ScrollRow } from "./scroll-row.tsx";
 import { useColumnWidths, type ColumnSpec, type HandleProps } from "./column-widths.ts";
 import { GROUPS_KEY, groupPrs, useCollapsed, type PrGroup } from "./pr-groups.ts";
 import { Label } from "./ui/label.tsx";
@@ -375,7 +377,7 @@ function GroupHead({ g, open, onToggle }: { g: PrGroup<OpenPr>; open: boolean; o
  * The PRs in the sort the Select picks, grouped by project (pr-groups.ts): table rows when the page is wide, folding
  * cards when it is narrow. A collapsed group shows only its header.
  */
-function PrList({ prs, wide }: { prs: OpenPr[]; wide: boolean }) {
+function PrList({ prs, wide, action }: { prs: OpenPr[]; wide: boolean; action?: ReactNode }) {
   const [sort, setSort] = useState(SORTS[0]!.value);
   const s = SORTS.find((x) => x.value === sort) ?? SORTS[0]!;
   const rows = useMemo(() => sortPrs(prs, s.key, s.desc), [prs, s.key, s.desc]);
@@ -400,6 +402,7 @@ function PrList({ prs, wide }: { prs: OpenPr[]; wide: boolean }) {
             ))}
           </SelectContent>
         </Select>
+        {action ? <span className="ml-auto">{action}</span> : null}
       </div>
       {wide ? (
         // min-w-0: a table dragged wider than the tab scrolls inside this box (ui/table.tsx's container), not the page
@@ -811,6 +814,7 @@ function OpenPrsBody({ wide }: { wide: boolean }) {
   const name = useIdentity().ownerName.trim() || "You";
   const [filter, setFilter] = useState<Filter>("needs");
   const [posting, setPosting] = useState(false);
+  const phone = useTouchPhone();
   const v = q.data;
   if (!v) return q.error ? <ReadState q={q} what="your open PRs" /> : <CardsSkeleton />;
   if (v.state === "unset")
@@ -829,28 +833,34 @@ function OpenPrsBody({ wide }: { wide: boolean }) {
   const baseline = section ? v.copied[section] : undefined;
   const changes = section && baseline ? changesSince(baseline, shown.map(copiedRow), v.prs.map(copiedRow), v.departed) : null;
   const asked = section && shown.length > 0 ? section : null;
+  const post = (
+    <Btn size={phone ? "sm" : "md"} data-post-open="" title="Post to code reviews" onClick={() => setPosting(true)}>
+      {phone ? "Post…" : "Post to code reviews…"}
+    </Btn>
+  );
   return (
     <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4" data-open-prs="">
       {/* the five filters scroll sideways on a phone instead of widening the column (2026-11-18) */}
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           {/* one filter is always on: a click on the pressed one keeps it (Radix sends "" for that) */}
-          <ToggleGroup type="single" variant="outline" size="sm" aria-label="Filter" className="max-w-full overflow-x-auto" value={filter} onValueChange={(f) => f && setFilter(f as Filter)}>
-            {FILTERS.map((x) => (
-              <ToggleGroupItem key={x.value} value={x.value} data-filter={x.value}>
-                {x.label} {v.prs.filter((p) => inFilter(p, x.value)).length}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
-          {asked ? (
-            <Btn data-post-open="" onClick={() => setPosting(true)}>
-              Post to code reviews…
-            </Btn>
-          ) : null}
+          <ScrollRow>
+            <ToggleGroup type="single" variant="outline" size="sm" aria-label="Filter" value={filter} onValueChange={(f) => f && setFilter(f as Filter)}>
+              {FILTERS.map((x) => (
+                <ToggleGroupItem key={x.value} value={x.value} data-filter={x.value}>
+                  {x.label} {v.prs.filter((p) => inFilter(p, x.value)).length}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+          </ScrollRow>
+          {asked && !phone ? post : null}
         </div>
-        <p className={NOTE}>
-          {v.login}'s open PRs, checked {v.fetchedAt === null ? "never" : <span title={when(v.fetchedAt)} data-checked-ago=""><Ago at={v.fetchedAt} /> ago</span>}
-          {v.checking ? <span data-checking="">, checking GitHub now</span> : v.pollMinutes > 0 ? `, again after ${v.pollMinutes} min` : ""}. {f.means}
+        {/* a phone: one line, the filter's meaning in its title (it wrapped to 3 lines) */}
+        <p className={phone ? `${NOTE} truncate` : NOTE} title={phone ? f.means : undefined} data-prs-note="">
+          {phone ? null : `${v.login}'s open PRs, checked `}
+          {phone ? "Checked " : null}
+          {v.fetchedAt === null ? "never" : <span title={when(v.fetchedAt)} data-checked-ago=""><Ago at={v.fetchedAt} /> ago</span>}
+          {v.checking ? <span data-checking="">, checking GitHub now</span> : v.pollMinutes > 0 && !phone ? `, again after ${v.pollMinutes} min` : ""}.{phone ? null : ` ${f.means}`}
           {v.more ? " More open PRs than one read lists; the oldest are left out." : ""}
         </p>
         {v.error ? <p className={NOTE}>Last check failed, showing the one before: {v.error}</p> : null}
@@ -860,7 +870,7 @@ function OpenPrsBody({ wide }: { wide: boolean }) {
           </p>
         ))}
       </div>
-      {shown.length === 0 ? <Muted>{f.none}</Muted> : <PrList prs={shown} wide={wide} />}
+      {shown.length === 0 ? <Muted>{f.none}</Muted> : <PrList prs={shown} wide={wide} action={asked && phone ? post : undefined} />}
       {/* Post is a Dialog over the list (2026-11-18): opening it never moves the list */}
       {posting && asked ? <Post key={asked} prs={shown} view={v} name={name} section={asked} found={changes} since={baseline?.at ?? null} onClose={() => setPosting(false)} /> : null}
     </div>

@@ -39,7 +39,8 @@ test("a cursor ack reads a message but doesn't close it: the explicit ack still 
   const s = setup();
   const m = s.e.send(s.cos, s.lead.address, "Check the release notes and tell me what you found", null);
   const digest = s.e.batch.read(s.lead);
-  assert.match(digest.text, new RegExp(`ack id=${m.id} with an outcome`), "the digest shows the message as its recipient reads it, ack line included");
+  assert.match(digest.text, new RegExp(`\\[${m.id}\\] message from cos; ACTION; outcome\\n`), "the digest marks the message as one that needs an outcome");
+  assert.match(digest.text, /Items marked "outcome" stay open until orch_ack\(id, outcome\)/, "and says once what that means");
   assert.equal(s.e.batch.ack(s.lead, digest.cursor!), 1);
   assert.equal(s.e.batch.read(s.lead).count, 0, "read: no more wakes for it");
   assert.equal(s.item(m.id).state, "delivered", "read, not handled");

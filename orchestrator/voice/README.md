@@ -1,6 +1,6 @@
 # Voice mode
 
-Talk to your orchestrator board. A mic button beside the Chief of Staff box opens a voice call that already knows your
+Talk to your orchestrator board. A mic button in Home's header opens a voice call that already knows your
 cards, projects, PR waits, deliverables and recent lead messages. It answers questions, and it can act, but only on
 your yes. It runs on Gemini Live with your own credential: your own Gemini API key, or your own Google Cloud project on
 Vertex AI. Nothing is bundled, and nothing points at anyone else's account. **Off by default.**

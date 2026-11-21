@@ -6,7 +6,7 @@
 // - the thread card's order: what waits on the owner, then what works, then the rest receding; five shown;
 // - the detail layout: Needs | Blocked first, then Now | PRs + Record; each PR once, its wait folded into its row;
 // - a pin's "updated" words.
-import type { Projects, Scope, SummaryWait } from "../contract.ts";
+import type { Deliverables, ProjectBook, Projects, Scope, SummaryWait } from "../contract.ts";
 import { blockersOf, stateOf, statusStale, type RowState } from "./command-center.ts";
 import { age, type Lane } from "./lanes.ts";
 import { otherWaits, prsInFlight } from "./source.ts";
@@ -147,6 +147,12 @@ export const DETAIL_LAYOUT = {
   right: ["prs", "record"],
 } as const;
 export type DetailSection = (typeof DETAIL_LAYOUT)[keyof typeof DETAIL_LAYOUT][number];
+export type RecordRow = { t: "done"; at: number; row: ProjectBook["done"][number] } | { t: "decided"; at: number; row: ProjectBook["decided"][number] };
+/** The book's record: what got done and what the owner decided, one list, newest first, each row tagged (no Done | Decided switch). */
+export function recordRows(done: ProjectBook["done"], decided: ProjectBook["decided"]): RecordRow[] {
+  return [...done.map((row) => ({ t: "done" as const, at: row.at, row })), ...decided.map((row) => ({ t: "decided" as const, at: row.at, row }))].sort((a, b) => b.at - a.at);
+}
+
 /** Reading order (one column, and screen readers on the wide one). */
 export const detailOrder = (): DetailSection[] => [...DETAIL_LAYOUT.attention, ...DETAIL_LAYOUT.left, ...DETAIL_LAYOUT.right];
 
@@ -392,3 +398,31 @@ export function tasksScoping(p: { mode?: "scoping" | "active"; tasks?: readonly 
   const n = p.tasks?.length ?? 0;
   return p.mode !== "scoping" && n ? `${n} ${n === 1 ? "task" : "tasks"} scoping` : null;
 }
+
+type Deliverable = Deliverables[number];
+/** In review, newest first: what the Deliverables tab and the badges count. A scoping project's wait in the Scope tab, a board's on the Multiplayer tab. */
+export const inReview = (all: Deliverables | undefined): Deliverable[] => (all ?? []).filter((d) => d.state === "review" && !d.scope && !d.board).sort((a, b) => b.updatedAt - a.updatedAt);
+
+/** In review in a scoping project's Scope pane (1.11.0): not on Deliverables until the project is active. */
+export const inScope = (d: Deliverable) => d.state === "review" && !!d.scope;
+
+/**
+ * What waits on the owner, by where it lives (2026-11-21, the owner: "mine says 6 on the plugin on the side but when i
+ * click into the app, 'needs you' 'delivered' or anything doesn't say anything"). The rail badge is `total`, and every
+ * count the page draws is one of the parts, so they always add up to it: Needs you (cards and prompts), Delivered (in
+ * review), and Scope in Projects (its cards and its scoping deliverables in review). Each item is in exactly one part.
+ */
+export function ownerCounts(needs: { badge: number } | undefined, all: Deliverables | undefined, scope: Scope | undefined): { needs: number; delivered: number; scope: number; total: number } {
+  const n = needs?.badge ?? 0;
+  const delivered = inReview(all).length;
+  const scoping = (scope?.badge ?? 0) + (all ?? []).filter((d) => inScope(d) && !!scope?.projects.some((p) => p.slug === d.project)).length;
+  return { needs: n, delivered, scope: scoping, total: n + delivered + scoping };
+}
+
+/** The rail badge's words: where its number lives, so the owner can see which tab it comes from. */
+export function ownerCountsLabel(c: { needs: number; delivered: number; scope: number }): string {
+  const parts = [c.needs ? `${c.needs} in Needs you` : "", c.delivered ? `${c.delivered} in Delivered` : "", c.scope ? `${c.scope} in Projects (Scope)` : ""].filter(Boolean);
+  return parts.join(", ");
+}
+/** What the Deliverables tab lists: a board's reviews never (they live on the Multiplayer tab), a scoping one once decided. */
+export const onDeliverablesTab = (d: Deliverable) => !d.board && !inScope(d);

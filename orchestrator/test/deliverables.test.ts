@@ -57,7 +57,7 @@ function setup(owner = "") {
     changed: () => {},
     log: () => {},
     delivered: (d) => pushed.push(structuredClone(d)),
-  }, { owner });
+  }, { batchInbox: false, owner });
   const cos = e.register("T-cos", "cos", null);
   const steward = e.register("T-st", "steward", null);
   const lead = e.register("T-la", "lead", "alpha");

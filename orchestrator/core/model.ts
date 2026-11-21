@@ -164,12 +164,16 @@ export interface Decision {
      * (1.12.0): the file is doc, and the yes closes only that task.
      */
     scoping_done?: { summary: string; project_md?: string; doc?: string; task?: string } | null;
+    /** A flagged board deliverable's card: its answer approves or sends back that revision. */
+    board_review?: { deliverable: string; rev: number } | null;
   };
 }
 
 export type ItemKind =
   | "message"
   | "owner.message" // the owner's direct message to a lead from its Projects row (2026-11-16), answered by an ack note
+  | "owner.cos" // the owner's tracked message to the CoS (the feed, the docked bar, the Chat tab), answered with orch_reply_owner
+  | "cos.reply" // the CoS's answer to one, recorded closed: it never reaches a thread
   | "copy"
   | "decision.new"
   | "decision.answer"
@@ -203,6 +207,8 @@ export interface Item {
   deadAt: number | null;
   /** A dead letter on the owner's Board: one the CoS escalated, or one from before the CoS managed them. */
   onBoard: boolean;
+  /** The feed post the owner's message or its answer belongs to (core/feed.ts keys), else null. */
+  about: string | null;
 }
 
 export interface Rule {
@@ -277,6 +283,15 @@ export interface Deliverable {
   scope_task?: string;
   /** Its own folder of files (core/deliverable-files.ts, 2026-11-17): images/, videos/, artifacts/ and README.md. */
   folder?: string;
+  /** A review a Multiplayer board triggered: reviewed on that board, never on Deliverables. `card`: the flag's Needs you card. */
+  board?: DeliverableBoard;
+}
+
+export interface DeliverableBoard {
+  id: string;
+  record?: string;
+  flag?: string;
+  card?: string;
 }
 
 /** A next action as it stands: the lead's item, open until they close it with an outcome and a note. */

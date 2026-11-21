@@ -5,17 +5,10 @@
 // page follows whatever theme bb is wearing.
 import type { ReactNode } from "react";
 
-import { DANGER, WARN } from "../lib/limits";
+import { toneOf, type Tone } from "../lib/limits";
 
-/** How alarming a percentage is. The thresholds are the rings' own. */
-export type Tone = "normal" | "warn" | "danger";
-
-export function toneOf(percent: number | null): Tone {
-  if (percent === null) return "normal";
-  if (percent > DANGER) return "danger";
-  if (percent >= WARN) return "warn";
-  return "normal";
-}
+// One tone rule for the rings, the popover bars and this page: see lib/limits.ts.
+export { toneOf, type Tone };
 
 const BAR_TONE: Record<Tone, string> = {
   normal: "bg-foreground/55",

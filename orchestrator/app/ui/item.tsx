@@ -71,8 +71,13 @@ function Item({
   )
 }
 
+// 2026-11-20 (typing lag): shadcn aligns the media to the top of an item with a description through a group-has class,
+// and inside bb's page that :has() rule made every element added or removed restyle the whole page. A row with a
+// description passes this to its ItemMedia instead.
+const WITH_DESCRIPTION = "self-start translate-y-0.5"
+
 const itemMediaVariants = cva(
-  "flex shrink-0 items-center justify-center gap-2 group-has-[[data-slot=item-description]]/item:translate-y-0.5 group-has-[[data-slot=item-description]]/item:self-start [&_svg]:pointer-events-none",
+  "flex shrink-0 items-center justify-center gap-2 [&_svg]:pointer-events-none",
   {
     variants: {
       variant: {
@@ -180,6 +185,7 @@ function ItemFooter({ className, ...props }: React.ComponentProps<"div">) {
 }
 
 export {
+  WITH_DESCRIPTION,
   Item,
   ItemMedia,
   ItemContent,

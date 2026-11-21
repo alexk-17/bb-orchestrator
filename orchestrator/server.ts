@@ -5,6 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { execFile } from "node:child_process";
+import { runGroup } from "./core/run-group.ts";
 import { randomUUID } from "node:crypto";
 import { cliRun, setupSidebar } from "./core/sidebar.ts";
 // deliverables
@@ -15,16 +16,17 @@ import { projectIssues, pathwaysMap, linkPathwaysDecisions, attachPathwaysPrefli
 import { collectPathwaysProofRecords, reducePathwaysPr, reducePathwaysProof, reducePathwaysWaitLane } from "./core/pathways-pr.ts";
 import { createPathwaysSnapshots, type PathwaysSnapshot, type PathwaysView } from "./core/pathways-snapshot.ts";
 import { localPathwaysMap } from "./core/pathways-local.ts";
+import type { FeedPrompt } from "./core/feed.ts";
 import { type DeliverPlace, type OutputPlace, type ProofInput, SCOPING_SUMMARY_MAX, SCOPING_TASK_NAME_MAX, SECRET_TTL_MS } from "./core/engine.ts";
 import { deliverBlocks, deliverPoints, fromJson, inputBlocksSchema, lessTextRefusal, looksLikeCode } from "./blocks.ts";
 import { CARD_CAPS, DELIVER_BUDGET, deliverBudgetRefusal } from "./core/caps.ts";
 import { ignoredTopLevelUpdate, statusParams, statusLine } from "./core/status.ts";
-import { type DirectImage, MAX_IMAGE_BYTES, imageInput, safeName, sniff, withImages } from "./core/direct-images.ts";
+import { type DirectImage, MAX_IMAGE_BYTES, imageInput, safeName, sniff } from "./core/direct-images.ts";
 import { checkAnswers, toQuestions } from "./interactions.ts";
 
 /** A pending interaction as bb lists it (only the fields read here). */
 type RawInteraction = { id: string; createdAt?: number; kind?: string; status?: string; payload?: { kind?: string } };
-import { type Deliverable, PROJECT_MODES, PROOF_KINDS, type ProjectMode } from "./core/model.ts";
+import { type Deliverable, oneLine, PROJECT_MODES, PROOF_KINDS, type ProjectMode } from "./core/model.ts";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -53,6 +55,8 @@ import {
   ruleRevokeBody,
   roleStartBody,
   cosMessageBody,
+  feedResendBody,
+  feedSeenBody,
   interactionAnswerBody,
   startLeadBody,
   archiveProjectBody,
@@ -97,6 +101,13 @@ import { registerOpenPrs } from "./open-prs/server.ts";
 import { OPEN_PRS_COPIED, OPEN_PRS_POST, openPrsCopiedBody, openPrsPostBody } from "./open-prs/contract.ts";
 // the CodeRabbit review queue (review-queue/)
 import { registerReviewQueue } from "./review-queue/server.ts";
+import { queueSetUp } from "./core/review-queue.ts";
+import { shownUntilUsed } from "./app/hidden-tabs.ts";
+import { registerMultiplayer } from "./multiplayer/server.ts";
+import { MULTIPLAYER_WRITES } from "./multiplayer/contract.ts";
+import { boardAddBody, boardRemoveBody } from "./multiplayer/core/boards.ts";
+import { recordParams } from "./multiplayer/core/records.ts";
+import { everyArg } from "./multiplayer/core/watch.ts";
 // voice mode (voice/), off by default
 import { registerVoice } from "./voice/server.ts";
 import { REVIEW_QUEUE_WRITE, queueActionSchema } from "./review-queue/contract.ts";
@@ -110,15 +121,15 @@ import { type ChildLevel, type NotifySaved, SAVED_KEY as NOTIFY_SAVED, serialRec
 
 const TOOLS_BY_ROLE: Record<Role, string[]> = {
   thread: ["orch_ask", "orch_ack", "orch_send", "orch_inbox", "orch_report", "orch_output"],
-  lead: ["orch_ask", "orch_forward", "orch_answer", "orch_ack", "orch_send", "orch_inbox", "orch_report", "orch_stop_thread", "orch_spawn_thread", "orch_resolve", "orch_handoff", "orch_output", "orch_deliver", "orch_deliver_withdraw", "orch_status", "orch_scope_task"],
-  cos: ["orch_triage", "orch_ack", "orch_send", "orch_inbox", "orch_needs_you", "orch_moot", "orch_deliverables", "orch_dead_letters", "orch_start_lead", "orch_new_project", "orch_project_mode", "orch_watch"],
+  lead: ["orch_ask", "orch_forward", "orch_answer", "orch_ack", "orch_send", "orch_inbox", "orch_report", "orch_stop_thread", "orch_spawn_thread", "orch_resolve", "orch_handoff", "orch_output", "orch_deliver", "orch_deliver_withdraw", "orch_status", "orch_scope_task", "orch_review_record"],
+  cos: ["orch_triage", "orch_ack", "orch_send", "orch_inbox", "orch_needs_you", "orch_moot", "orch_deliverables", "orch_dead_letters", "orch_start_lead", "orch_new_project", "orch_project_mode", "orch_watch", "orch_reply_owner"],
   steward: ["orch_ask", "orch_ack", "orch_send", "orch_inbox", "orch_host", "orch_cleanup", "orch_needs_you", "orch_deliverables"],
 };
 
 /** Each role's standing instructions; `o` names the owner (the ownerName setting). */
 const roleBrief = (o: OwnerWords): Record<Role, string> => ({
-  cos: `You are the Chief of Staff (cos) in ${o.name}'s orchestrator. You hear only what needs judgment: new decisions to triage and messages to you. For each decision use orch_triage: settle (only by citing a standing rule id that covers it; never a merge card), ask_person (2-4 options, recommended first), or merge a question into a duplicate question (never a plan or merge card). Ack messages with orch_ack. You get a read-only copy of each answer ${o.name} gives (no ack). orch_needs_you lists what is on ${o.name}'s Needs you now and what was answered or went moot lately; when a card there no longer needs an answer (its PR merged, the asker found out), take it off with orch_moot(id, reason): the asker is told why. orch_deliverables lists what leads delivered to ${o.name}, its review state and proof. Dead letters (mail nobody took) come to you, not ${o.name}'s board: an hourly notice lists new ones; with orch_dead_letters resend one, re-route it to the right address, close it for its recipient, or escalate it to ${o.name}'s board with your note when only ${o.name} can fix it. orch_new_project(brief) creates a project (its folder with PROJECT.md and the project record, and its row at the brief's priority) from slug, title, repo (an existing absolute path; a URL alone is refused, nothing is cloned), goal, and optional repo_url, base, constraints, priority, mode; it refuses a taken slug or folder and never starts the lead. mode=scoping starts the project in scoping mode: its lead's cards and deliverables go only to ${o.name}'s Scope tab, you get read-only copies (never triage, settle, merge or moot them), and ${o.name}'s yes on the lead's "Scoping done?" card makes it active; orch_project_mode(slug, mode) sets or clears it on an existing project. orch_watch lists every open PR wait and timed job, and adds, retargets (another PR and/or condition), moves (to another agent) or drops any PR wait, for anyone; its owners are told. Intervals are ${o.name}'s settings: you only list them. orch_start_lead(slug) starts lead:<slug> through the same checks as ${o.name}'s Start lead button (project folder, a repo under "## Repos" that exists here, not on hold, no live lead); ${o.name}'s board shows that you started it. You get a read-only copy of each direct message ${o.name} sends a lead from the Projects tab and of the lead's ack note: for 48 h it wins on its point over your instructions, earlier or later, and as a dead letter you may resend or escalate it but never re-route or close it. When a lead starts, plans or reports work one of ${o.name}'s standing practices in your recovery view covers, remind the lead of it and check that the plan's done criteria or the report say it was done (that includes plan cards you settle); ask the lead when they don't. Do not poll; wait for [orchestrator] messages.`,
-  steward: `You are the Steward (steward) of the runner's resources. Host alarms arrive as [orchestrator] alarm messages with a snapshot. Report with orch_send to cos; run only the allow-listed orch_cleanup actions on your own; anything else (stopping a process, deleting other files) becomes an orch_ask card. Never kill processes you didn't start, remove worktrees, touch other agents' files or point caches at /tmp.`,
+  cos: `You are the Chief of Staff (cos) in ${o.name}'s orchestrator. You hear only what needs judgment: new decisions to triage and messages to you. For each decision use orch_triage: settle (only by citing a standing rule id that covers it; never a merge card), ask_person (2-4 options, recommended first), or merge a question into a duplicate question (never a plan or merge card). Ack messages with orch_ack. You get a read-only copy of each answer ${o.name} gives (no ack). orch_needs_you lists what is on ${o.name}'s Needs you now and what was answered or went moot lately; when a card there no longer needs an answer (its PR merged, the asker found out), take it off with orch_moot(id, reason): the asker is told why. orch_deliverables lists what leads delivered to ${o.name}, its review state and proof. Dead letters (mail nobody took) come to you, not ${o.name}'s board: an hourly notice lists new ones; with orch_dead_letters resend one, re-route it to the right address, close it for its recipient, or escalate it to ${o.name}'s board with your note when only ${o.name} can fix it. orch_new_project(brief) creates a project (its folder with PROJECT.md and the project record, and its row at the brief's priority) from slug, title, repo (an existing absolute path; a URL alone is refused, nothing is cloned), goal, and optional repo_url, base, constraints, priority, mode; it refuses a taken slug or folder and never starts the lead. mode=scoping starts the project in scoping mode: its lead's cards and deliverables go only to ${o.name}'s Scope tab, you get read-only copies (never triage, settle, merge or moot them), and ${o.name}'s yes on the lead's "Scoping done?" card makes it active; orch_project_mode(slug, mode) sets or clears it on an existing project. orch_watch lists every open PR wait and timed job, and adds, retargets (another PR and/or condition), moves (to another agent) or drops any PR wait, for anyone; its owners are told. Intervals are ${o.name}'s settings: you only list them. orch_start_lead(slug) starts lead:<slug> through the same checks as ${o.name}'s Start lead button (project folder, a repo under "## Repos" that exists here, not on hold, no live lead); ${o.name}'s board shows that you started it. You get a read-only copy of each direct message ${o.name} sends a lead from the Projects tab and of the lead's ack note: for 48 h it wins on its point over your instructions, earlier or later, and as a dead letter you may resend or escalate it but never re-route or close it. ${o.Name}'s replies to you under a post in the feed are tracked: answer each with orch_reply_owner(ref=<its id>, text), which shows your reply under it in ${o.name}'s feed; an answer only in your chat leaves it "no reply yet". A message typed straight into your chat (the Chat tab) is plain chat: answer it there. When a lead starts, plans or reports work one of ${o.name}'s standing practices in your recovery view covers, remind the lead of it and check that the plan's done criteria or the report say it was done (that includes plan cards you settle); ask the lead when they don't. Do not poll; wait for [orchestrator] messages.`,
+  steward: `You are the Steward (steward) of the runner's resources. Host alarms arrive as [orchestrator] alarm messages with a snapshot. Report with orch_send to cos; run only the allow-listed orch_cleanup actions on your own; anything else (stopping a process, deleting other files) becomes an orch_ask card listing the exact commands. When ${o.name} answers Go on your own cleanup card, run exactly those commands, after re-checking each path for 0 processes, 0 dirty and 0 unpushed; a refused command goes back to ${o.name} with the denial and the allow rule it needs. Never kill processes you didn't start, remove a worktree outside such a card, touch other agents' files or point caches at /tmp.`,
   lead: `You are a project lead in ${o.name}'s orchestrator. Your threads' questions come to you as decision.new: settle with orch_answer (citing a standing rule that covers it, or with a note as your own call), else orch_forward to file it up. Answers to your decisions come only to you: relay to the thread with orch_send(ref=<decision id>) unless you withhold it, and ack. An answer to carry out only once a PR gets somewhere ("merge when approved"): ack it with pr and when, and the orchestrator brings it back to you then and reminds you daily; arm no watcher of your own. Use orch_ask for your own questions (2-4 options, recommended first; it never blocks). While your project is scoping (orch_inbox says so), your cards and deliverables go only to ${o.name}'s Scope tab: ask ${o.name} there, start no build threads (read-only investigation is fine), and end it with orch_ask(scoping_done={summary, project_md}) once the goal, constraints and first plan are in PROJECT.md. To scope only part of a project, open a scoping task (orch_scope_task), start its scoping thread with orch_spawn_thread(scope_task) and file its cards with scope_task (${o.name} sees who plans each task: you, or its scoping thread); orch_ask(scoping_done={summary, doc, task}) proposes closing it, and ${o.name}'s yes closes only that task. Threads start only from a plan card ${o.name} approved: orch_ask(kind=plan, threads=<n>, options with the go option first) lists each thread (title, goal, model, done criteria); once the answer is its go, start each with orch_spawn_thread(plan=<id>). Threads you start any other way are flagged. Put each of ${o.name}'s standing practices in your recovery view that applies into your plan cards' done criteria and your threads' briefs, and check your threads' reports against it.Resolve a finished thread with orch_resolve: it retires the role and archives the thread once its worktree is clean (nothing uncommitted, its branch in its base branch or pushed) and its PR is merged, its branch is merged into its base, its PR was closed unmerged after its report, or ${o.name} has read its final report, or pass handed_off {pr, owner} when its open PR now belongs to someone else; a dirty worktree is refused with the reason. To swap a thread to another provider, have it write handoff-<UTC date>.md in its worktree, then orch_handoff. ${o.Name} sees only your deliverables and your questions: orch_deliver (finished work with proof) and orch_ask. Bundle your threads' work into deliverables that prove the result (screenshots, video, test output, PR), not into narration. Write them for a 10-second read: visuals first; each decision or finding is one line plus a short why (points); a one-line summary; no file:line, SHAs, logs or tool names at the top, those go in text or doc proof under Details (a PR review: a verdicts block for every PR, the recommended decisions, then 2-4 findings; proof that something works: screenshots or video of it happening, checks; a root cause: rca, a screenshot of the failure, a diagram of where it sits). Never message ${o.name} any other way. ${o.Name} may write to you directly from the Projects tab (a direct message, kind owner.message): answer it only with orch_ack(id, outcome, note), at once even for long work; the note is what ${o.name} reads on the row ("done" means taken, so say whether it is finished) and the CoS gets a copy. For 48 h it wins on its point over a CoS instruction, earlier or later; only ${o.name}'s own later word changes it. If the CoS says ${o.name} changed their mind, file one card with both instructions as options; say in your note what you set aside, and tell the CoS. orch_inbox lists those still in force. A direct message is never an approval: a merge, a production change or a public push still needs its own card citing the message id, and it can't be acked with pr and when. On deliverable.changes: fix it, then orch_deliver(revises=<id>). On deliverable.next: do what ${o.name} asked, then ack it with an outcome and a note saying what you did; the note shows on the deliverable. orch_output only records a file (for example one you then give as proof); it never reaches ${o.name}. Publish orch_status (goal, numbered steps with the current one, what you wait on, blockers) when you start, at each step change and whenever what you wait on changes: it is your project page's step bar, and stale after 2 h. When a thread finishes and at each milestone, include update (working_on: 1-3 bullets, at, needs) in orch_status: it is the Lead status card on your project and replaces the last one. Write it for ${o.name}, in plain words, about the task and what is done: 1-3 short bullets of at most 12 words each; no SHAs, run ids, file paths, flag internals or tool names unless ${o.name} needs them to act. Good: 'Search fix merged; preview ready for Robin to test'. Bad: 'Rebased 4087 onto main at 3f2a1c9, CI run 88123 green'.`,
   thread: `You are a worker thread in ${o.name}'s orchestrator. Ask your lead with orch_ask (2-4 options, recommended first); it returns at once with an id, so carry on or end your turn: the answer comes as a message. Message only your lead (orch_send). When an answer or message is handled, close it with orch_ack(id, outcome); replying to its sender with ref=<its id> closes it as replied, and an ack after that still records the real outcome. Report finished work with orch_report (with the PR URL when there is one). Follow each of ${o.name}'s standing practices in your recovery view that applies to your work, and say in your report what you did for it. Use orch_output to record a finished artefact (a doc, video, image, report or link) so your lead can put it in a deliverable as proof; ${o.name} sees only what your lead delivers.`,
 });
@@ -141,7 +152,7 @@ export default async function plugin(bb: BbPluginApi) {
     cosTitle: { type: "string", label: "The CoS's name on its thread and in the app", default: "Chief of Staff" },
     stateDir: { type: "string", label: "State folder: decisions/<id>.json, the CoS and Steward folders, dream jobs (empty: state/ in the plugin's data folder)", default: "" },
     escalateMinutes: { type: "number", label: "Untriaged decisions go to you after (minutes)", default: 5 },
-    batchInbox: { type: "boolean", label: "Batched inbox: one debounced wake per recipient instead of each message into a turn (off, the default: per-message delivery)", default: false },
+    batchInbox: { type: "boolean", label: "Batched inbox: one debounced wake per recipient instead of each message into a turn (on, the default; off: per-message delivery)", default: true },
     inboxDebounceMs: { type: "number", label: "Inbox wake debounce (milliseconds)", default: 2000 },
     resendMinutes: { type: "number", label: "Unacked items are re-sent after the recipient idles (minutes)", default: 10 },
     diskPct: { type: "number", label: "Disk alarm (%)", default: 85 },
@@ -166,7 +177,10 @@ export default async function plugin(bb: BbPluginApi) {
     linearWorkspace: { type: "string", label: "Linear workspace (the slug in linear.app/<slug>): Linear ids in the Projects tab link to their issues. Empty: they stay plain text", default: "" },
     linearTeams: { type: "string", label: "Linear team keys that link, comma-separated (empty: every key). Ids of other teams, and look-alikes such as model names, stay plain text", default: "" },
     // Requested 2026-11-17: hide tabs the owner doesn't use, by id or label. Empty (the default) shows every tab.
-    hiddenTabs: { type: "string", label: "Tabs to hide, comma-separated (ids or labels, e.g. gameboy, rules, activity). Empty: show every tab. Scope still shows while something waits in it or you're on it", default: "" },
+    hiddenTabs: { type: "string", label: "Pages to hide, comma-separated (ids or labels, e.g. gameboy, rules, activity). Empty: show every page. Scope still shows while something waits in it or you're on it. Multiplayer and CodeRabbit hide their section in Reviews. needs-you and deliverables do nothing: Home's Needs you and Delivered filters never hide", default: "" },
+    // 2026-11-20 (the owner's card): Game Boy and Cloud are Tools, off until turned on
+    showGameBoy: { type: "boolean", label: "Tools: Game Boy", default: false },
+    showCloud: { type: "boolean", label: "Tools: Cloud", default: false },
     pokemon: { type: "boolean", label: "Pokémon", description: "Give each agent a Pokémon that evolves as it levels: sprites in the app and the sidebar, its name in its brief, evolutions on the board. Each project gets a Pokémon type: its lead and threads share it, and its colour is the project's accent. Sprites load from PokeAPI's public sprite repo at runtime. Pokémon is a trademark of Nintendo, Creatures and GAME FREAK; this plugin is not affiliated with them.", default: false },
     personaPack: { type: "string", label: "Personas pack (with Pokémon on): the absolute path of a JSON pack", description: "Optional, empty by default. A pack gives the CoS, the Steward and each lead a persona (a name, a title and an image) in place of a Pokémon of their own; threads stay Pokémon and draw from their lead's persona's lines first. The plugin ships no pack. It is read when this is saved and when the plugin loads; a pack that fails its checks is ignored, with the problems in the log. Check one with: node personas-check.ts <path>.", default: "" },
     pushNeedsYou: { type: "boolean", label: "Desktop/web push when a card enters Needs you (never sent while mobile push is on)", default: true },
@@ -291,7 +305,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  async function deliver(threadId: string, text: string, item: { sender: string; id?: string; kind?: string }): Promise<DeliverResult> {
+  async function deliver(threadId: string, text: string, item: { sender: string; id?: string; kind?: string; body?: string }): Promise<DeliverResult> {
     const agent = engine.agentByThread(threadId);
     if (agent?.status === "stopped") return { delivery: "held", why: "stopped by the orchestrator" };
     const t = await bb.sdk.threads.get({ threadId });
@@ -301,9 +315,14 @@ export default async function plugin(bb: BbPluginApi) {
     // 0.08 s direct). Steering adds it to the running turn, so the agent reads it at its next tool boundary; where
     // nothing can be steered bb starts a turn, or queues it (a provider that can't steer).
     // the owner's screenshots (2026-11-17) go as bb's own image inputs too, beside their paths in the text
-    const images = item.id && item.kind === "owner.message" ? engine.directImagesOf(item.id) : [];
-    const req = { threadId, mode: item.id?.startsWith("wake:") ? ("queue-if-active" as const) : ("steer-if-active" as const), ...(sender ? { senderThreadId: sender.threadId } : {}) };
-    const res = await sendWithImages(req, text, images, item.id ?? "");
+    const images = item.id && (item.kind === "owner.message" || item.kind === "owner.cos") ? engine.directImagesOf(item.id) : [];
+    // the owner's message to the CoS waits for its turn to end, as the CoS bar's always has: the feed shows it queued
+    const wake = !!item.id?.startsWith("wake:");
+    const queue = wake || item.kind === "owner.cos";
+    const req = { threadId, mode: queue ? ("queue-if-active" as const) : ("steer-if-active" as const), ...(sender ? { senderThreadId: sender.threadId } : {}) };
+    // a wake bb will queue behind a running turn goes bare: its digest would be stale by the time it is read
+    const busy = !["idle", "error"].includes(String((t as { status?: string }).status ?? "idle"));
+    const res = await sendWithImages(req, wake && busy && item.body ? item.body : text, images, item.id ?? "");
     if (res.delivery === "queued") return { delivery: "queued", queuedMessageId: res.queuedMessage.id };
     return { delivery: "sent" };
   }
@@ -319,6 +338,7 @@ export default async function plugin(bb: BbPluginApi) {
   const openPrs = registerOpenPrs(bb, engine, () => cfg);
   // after the engine, whose migrations made its tables; dry-run unless the setting is exactly false
   const reviewQueue = registerReviewQueue(bb, { db, dryRun: () => cfg.reviewQueueDryRun !== false });
+  const multiplayer = registerMultiplayer(bb, { db, engine, dir: join(dataDir, "multiplayer"), settings: () => cfg });
   // ---------------------------------------------------------------- notifyOnlyOrchestrator (core/notify-only.ts)
   const PN = "push-notifications";
   const notifyOnly = serialReconcile(
@@ -406,10 +426,8 @@ export default async function plugin(bb: BbPluginApi) {
       const l = memory;
       if (!l) return resolve({ exitCode: 2, stdout: "", stderr: `memory is off: ${memoryState}` });
       const configEnv = configEnvName(cfg.memoryConfigEnv);
-      execFile(l.search, argv, { timeout: timeoutMs, maxBuffer: 4 << 20, env: configEnv ? { ...process.env, [configEnv]: l.configPath } : process.env }, (err, stdout, stderr) => {
-        const code = err ? (typeof (err as { code?: unknown }).code === "number" ? ((err as { code: number }).code) : 1) : 0;
-        resolve({ exitCode: code, stdout: String(stdout), stderr: String(stderr) || (err && code === 1 ? err.message : "") });
-      });
+      void runGroup(l.search, argv, { timeoutMs, maxBuffer: 4 << 20, env: configEnv ? { ...process.env, [configEnv]: l.configPath } : process.env }).then((r) =>
+        resolve({ exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr }));
     });
   // A thread's folder in memory-search's worktree map, once per folder: its sessions then count for its project.
   const mapped = new Set<string>();
@@ -474,6 +492,14 @@ export default async function plugin(bb: BbPluginApi) {
     const a = threadId ? engine.agentByThread(threadId) : null;
     if (!a) throw new EngineError("forbidden", "this thread has no orchestrator role");
     return a;
+  };
+  /** A module's plain Error as the engine's "invalid", so tools, writes and the CLI word it alike. */
+  const guard = <T>(f: () => T): T => {
+    try {
+      return f();
+    } catch (e) {
+      throw e instanceof EngineError ? e : new EngineError("invalid", errText(e));
+    }
   };
   const run = async (threadId: string | undefined, fn: (a: Agent) => string) => {
     try {
@@ -704,6 +730,18 @@ export default async function plugin(bb: BbPluginApi) {
         }
         if (!p.note) throw new EngineError("invalid", `escalate needs a note: what ${O.name} should do`);
         return `${engine.escalateDead(a, p.id, p.note).id} is on ${O.name}'s board with your note.`;
+      }),
+  });
+
+  bb.agents.registerTool({
+    name: "orch_reply_owner",
+    description: `CoS only: answer ${O.name}'s message to you (an owner.cos item, i-…). Your reply shows under it in ${O.name}'s feed, nested under the post it was about, and the message counts as answered. It reaches no thread; it approves nothing.`,
+    presentation: { label: { pending: `Replying to ${O.name}`, completed: `Replied to ${O.name}` } },
+    parameters: z.object({ ref: z.string().describe(`The id of ${O.name}'s message, i-…`), text: z.string().min(1).max(4000).describe("Your answer, in plain words") }),
+    execute: (p, { threadId }) =>
+      run(threadId, (a) => {
+        const r = engine.replyOwner(a, p.ref, p.text);
+        return `Replied to ${p.ref} (${r.id}): it shows under it in ${O.name}'s feed.`;
       }),
   });
 
@@ -962,7 +1000,8 @@ export default async function plugin(bb: BbPluginApi) {
           title: p.title,
           ...selection,
           parentThreadId: a.threadId,
-          parentNotifications: "auto",
+          // bb wakes the lead only when the thread fails; reports, asks, prompts and failures wake it through us
+          parentNotifications: "stuck",
           pluginMetadata: { role: "thread", project: a.project, plan: p.plan, ...(task ? { scope_task: task.id } : {}) },
         } as Parameters<typeof bb.sdk.threads.spawn>[0]);
         engine.confirmSpawn(token, t.id);
@@ -972,7 +1011,7 @@ export default async function plugin(bb: BbPluginApi) {
         await bb.sdk.threads.updatePluginMetadata({ threadId: t.id, set: { address: reg.address, role: reg.role } });
         void flush();
         void placeSections();
-        return ok(`Started ${reg.address} (${t.id}${reg.mon ? `, ${reg.mon}` : ""}) from ${p.plan}${task ? `, the scoping thread for task ${task.id} ${JSON.stringify(task.name)}` : ""}. It reports to you; bb tells you when it finishes a turn.`);
+        return ok(`Started ${reg.address} (${t.id}${reg.mon ? `, ${reg.mon}` : ""}) from ${p.plan}${task ? `, the scoping thread for task ${task.id} ${JSON.stringify(task.name)}` : ""}. It reports to you; a report, a question, a failure or a prompt it waits on wakes you, and each finished turn is an INFO line in your next digest.`);
       } catch (e) {
         if (token) {
           // bb may have created the thread before the call failed (a timeout): then it takes the slot, not a stray flag
@@ -1318,6 +1357,24 @@ export default async function plugin(bb: BbPluginApi) {
     return { roots: roots.map((r) => r.path), hostId: roots.find((r) => r.hostId)?.hostId ?? null, hosts: roots };
   }
 
+  // an object, or the JSON-string form agents on an older schema send; parsed again in execute, where the host may pass it raw
+  const DELIVER_BOARD = z.preprocess(fromJson, z.object({ id: z.string().trim().min(1).max(500), record: z.string().trim().max(40).optional(), flag: z.string().trim().max(160).optional() }).strict());
+  const boardIn = (a: Agent, raw: unknown): { id: string; record?: string; flag?: string } | null => {
+    if (raw === undefined || raw === null || raw === "") return null;
+    const parsed = DELIVER_BOARD.safeParse(raw);
+    if (!parsed.success) throw new EngineError("invalid", `board: ${parsed.error.issues.map((i) => `${i.path.join(".") || "board"}: ${i.message}`).join("; ")}`);
+    const b = multiplayer.store.resolve(parsed.data.id);
+    if (!b) throw new EngineError("not_found", `no board ${JSON.stringify(parsed.data.id)}: ${ownerWords(cfg.ownerName).name} adds boards on the Multiplayer tab`);
+    const record = parsed.data.record || undefined;
+    if (record) {
+      const r = multiplayer.store.record(record);
+      if (!r || r.lead !== a.address) throw new EngineError("not_found", `${record} is not one of your review records`);
+      if (r.board !== b.id) throw new EngineError("invalid", `${record} is on another board`);
+    }
+    const flag = parsed.data.flag ? oneLine(parsed.data.flag, 160, "board.flag") : undefined;
+    return { id: b.id, ...(record ? { record } : {}), ...(flag ? { flag } : {}) };
+  };
+
   bb.agents.registerTool({
     name: "orch_deliver",
     description:
@@ -1350,6 +1407,9 @@ export default async function plugin(bb: BbPluginApi) {
         .max(20),
       revises: z.string().optional().describe(`The id of your deliverable ${O.name} sent back with changes`),
       scope_task: SCOPE_TASK.optional().describe(`An open scoping task's id or name: ${O.name} reviews it in the Scope tab under that task, not on Deliverables; the CoS gets a read-only copy. A revision stays in its task while the task is open`),
+      board: DELIVER_BOARD.optional().describe(
+        `A review a Multiplayer board triggered: {id: the board (mb-…, its channel id or link), record: your review record (rr-…), flag: one line when it needs ${O.name} (couldn't verify, interview pending)}. ${O.Name} reviews it on that board, never on Deliverables; a flag also files a Needs you card. A revision keeps its board`,
+      ),
       blocks: deliverBlocks.describe(
         `Typed parts drawn as visuals, under the screenshots: verdicts (a PR review: one tile per PR with a short verdict), decisions (what was decided, proposed or needs ${O.name}, each with a one-line why), ` +
           "diagram (2-14 boxes and arrows, each marked added/changed/removed/same: what a PR changes, or where a bug sits), " +
@@ -1363,9 +1423,13 @@ export default async function plugin(bb: BbPluginApi) {
         if (a.role !== "lead") throw new EngineError("forbidden", `only a lead delivers to ${ownerWords(cfg.ownerName).name}`);
         const tooLong = lessTextRefusal(p) ?? deliverBudgetRefusal(p);
         if (tooLong) throw new EngineError("invalid", tooLong);
+        const board = boardIn(a, p.board);
         const place = p.proof.some((x) => x.path) ? await deliverPlace(a) : { roots: [] };
-        const d = engine.deliver(a, { title: p.title, summary: p.summary, points: p.points, proof: p.proof as ProofInput[], revises: p.revises ?? null, blocks: p.blocks, scopeTask: p.scope_task ?? null }, place);
+        const d = engine.deliver(a, { title: p.title, summary: p.summary, points: p.points, proof: p.proof as ProofInput[], revises: p.revises ?? null, blocks: p.blocks, scopeTask: p.scope_task ?? null, board }, place);
+        if (d.board?.record) multiplayer.store.linkDeliverable(d.board.record, a.address, d.id);
+        if (d.board) multiplayer.changed();
         void flush();
+        if (d.board) return ok(`Delivered ${d.id} rev ${d.rev}: on its board's review view on the Multiplayer tab, not Deliverables${d.board.card ? `; the flag filed Needs you card ${d.board.card}` : ""}. The approval or requested changes come as a message.`);
         return ok(`Delivered ${d.id} rev ${d.rev}: in ${ownerWords(cfg.ownerName).name}'s review${d.scope ? ` in the Scope tab (${scopeWhere(d.project, d.scope_task)}; the CoS gets a read-only copy)` : ""}. The approval or requested changes come as a message.`);
       } catch (e) {
         return fail(errText(e));
@@ -1379,6 +1443,25 @@ export default async function plugin(bb: BbPluginApi) {
     presentation: { label: { pending: "Withdrawing a deliverable", completed: "Withdrew a deliverable" } },
     parameters: z.object({ id: z.string(), reason: z.string().max(2000).optional() }),
     execute: (p, { threadId }) => run(threadId, (a) => `Withdrew ${engine.withdrawDeliverable(a, p.id, p.reason ?? null).id}.`),
+  });
+
+  bb.agents.registerTool({
+    name: "orch_review_record",
+    description:
+      `Lead only: the review record behind a review request on one of ${O.name}'s Multiplayer boards, drawn on that board's Now, Timeline and review views. ` +
+      "File one per request (no id: give board, wake, request and prs) and update it by id at each step: the thread, each GitHub review URL, the Slack reply's link, the deliverable, and state (reviewing, replying, waits, done). " +
+      "Each step's time is recorded when it first appears. Store ids and links only, never Slack text. Returns the record's id.",
+    presentation: { label: { pending: "Recording a review", completed: "Recorded a review" } },
+    parameters: recordParams,
+    execute: (p, { threadId }) =>
+      run(threadId, (a) => {
+        if (a.role !== "lead") throw new EngineError("forbidden", "only a lead files review records");
+        // parsed again: JSON-string arguments must decode even where the host passed them raw
+        const parsed = recordParams.safeParse(p);
+        if (!parsed.success) throw new EngineError("invalid", parsed.error.issues.map((i) => `${i.path.join(".") || "record"}: ${i.message}`).join("; "));
+        const { record: r, created } = guard(() => multiplayer.file({ address: a.address, project: a.project }, parsed.data));
+        return `${created ? "Filed" : "Updated"} ${r.id} on board ${r.board}: ${r.state}, ${r.prs.length} PR(s), ${r.reviews.length} review(s)${r.deliverable ? `, deliverable ${r.deliverable}` : ""}.`;
+      }),
   });
 
   bb.agents.registerTool({
@@ -1495,7 +1578,7 @@ export default async function plugin(bb: BbPluginApi) {
     name: TOOL_SEARCH,
     description:
       "Search the memory: the vault (project pages, decisions), each project's notes and, with transcripts, past Claude " +
-      "sessions. Hybrid search. Each hit is `path:line [project]` and a snippet; read one with memory_page. It can take minutes.",
+      "sessions. Keyword search (ripgrep, BM25): seconds. Each hit is `path:line [project]` and a snippet; read one with memory_page. It stops after 45 s.",
     presentation: { label: { pending: "Searching memory", completed: "Searched memory" } },
     parameters: z.object({
       query: z.string().min(1).max(QUERY_MAX).describe("What to look for, in words"),
@@ -1506,7 +1589,7 @@ export default async function plugin(bb: BbPluginApi) {
     execute: async (p, { threadId }) => {
       try {
         memoryCaller(threadId);
-        return toolResult(await memoryRun(searchArgv(p), 10 * 60_000));
+        return toolResult(await memoryRun(searchArgv(p), 45_000));
       } catch (e) {
         return fail(errText(e));
       }
@@ -1558,7 +1641,7 @@ export default async function plugin(bb: BbPluginApi) {
     const a = threadId ? engine.agentByThread(threadId) : null;
     if (!a) return null;
     if (!engine.settings.batchInbox) return `[orchestrator] Your current inbox (as of ${new Date().toISOString()}):\n${engine.inbox(a).text}`;
-    const delivery = "Batch inbox: on a debounced wake, orch_inbox reads ALL unread oldest first. Handle it, then orch_ack(through=<cursor>). Replies do not ack unread. INFO stays quiet unless needs_reply or due. Decision outcomes still use orch_ack(id,outcome). ";
+    const delivery = "Batch inbox: a debounced wake carries your unread mail and its cursor. Handle it, then orch_ack(through=<cursor>). Replies do not ack unread. INFO stays quiet unless needs_reply or due. Decision outcomes still use orch_ack(id,outcome). ";
     return `[orchestrator] ${delivery}Your current recovery view (not a digest read; as of ${new Date().toISOString()}):\n${engine.inbox(a).text}`;
   });
 
@@ -1598,7 +1681,7 @@ export default async function plugin(bb: BbPluginApi) {
     if (!a) return;
     engine.setStatus(thread.id, "error");
     if (!engine.bbTellsSupervisor(a, bbParent(thread), bbNotify(thread), "failure"))
-      engine.notifySupervisor(a, `failed: ${error ?? "unknown error"}`);
+      engine.notifySupervisor(a, `failed: ${error ?? "unknown error"}`, a.role === "thread");
     void flush();
   });
   bb.events.on("turn.failed", (ev) => {
@@ -1611,8 +1694,15 @@ export default async function plugin(bb: BbPluginApi) {
   bb.events.on("thread.archived", ({ thread }) => {
     if (engine.agentByThread(thread.id)) engine.setStatus(thread.id, "archived");
   });
-  bb.events.on("interaction.pending", ({ thread }) => {
-    if (engine.agentByThread(thread.id)) changed();
+  bb.events.on("interaction.pending", ({ thread, interaction }) => {
+    const a = engine.agentByThread(thread.id);
+    if (!a) return;
+    // a thread bb doesn't report on every turn (spawned "stuck") can sit blocked on a prompt: its lead is woken once
+    if (a.role === "thread" && !engine.bbTellsSupervisor(a, bbParent(thread), bbNotify(thread), "turn")) {
+      engine.notifySupervisor(a, "is waiting on a prompt in its bb thread (a permission or a question); it can't go on until it is answered.", true, `pending:${interaction.id}`);
+      void flush();
+    }
+    changed();
   });
   bb.events.on("message.dispatched", ({ entry }) => engine.dispatched(entry.id));
   bb.events.on("message.cancelled", ({ entry }) => engine.cancelled(entry.id));
@@ -2005,7 +2095,11 @@ export default async function plugin(bb: BbPluginApi) {
       renameSync(`${file}.tmp`, file);
     },
   });
+  let feedPrompts: FeedPrompt[] = [];
   bb.rpc.register(rpcContract, {
+    async howItWorks() {
+      return { markdown: readFileSync(join(import.meta.dirname, "USAGE.md"), "utf8") };
+    },
     async config() {
       return {
         ownerName: cfg.ownerName.trim(),
@@ -2013,6 +2107,7 @@ export default async function plugin(bb: BbPluginApi) {
         linearWorkspace: cfg.linearWorkspace.trim(),
         linearTeams: cfg.linearTeams.split(",").map((t) => t.trim()).filter(Boolean),
         hiddenTabs: cfg.hiddenTabs.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean),
+        shown: shownUntilUsed({ boards: multiplayer.store.boards().length, queueSetUp: queueSetUp(reviewQueue.store.get(), cfg.reviewQueueDryRun !== false), gameboy: cfg.showGameBoy === true, cloud: cfg.showCloud === true }),
       };
     },
     async needsYou({ zone }) {
@@ -2046,6 +2141,8 @@ export default async function plugin(bb: BbPluginApi) {
         }),
       );
       const interactions: NeedsYou["interactions"] = perAgent.flat();
+      // the feed reuses this read's prompts (the CoS's, the Steward's and the leads'), never asking bb again itself
+      feedPrompts = interactions.filter((i) => !i.address.startsWith("thread:")).map((i) => ({ id: i.id, threadId: i.threadId, address: i.address, title: i.title, since: i.since }));
       return {
         cards: v.cards.map((d) => card(d, v.held)),
         deferred: v.deferred.map((d) => card(d)),
@@ -2333,6 +2430,15 @@ export default async function plugin(bb: BbPluginApi) {
       const linearKey = `linear:${linearProjectId}:${linearMapIssue ?? ""}`;
       return pathwaysSnapshots.view(slug, refresh ?? false, read, linearKey);
     },
+    feed({ cursor, filter }) {
+      return engine.feed({ cursor, filter }, feedPrompts);
+    },
+    feedThread({ about, before }) {
+      return engine.feedThread(about, before);
+    },
+    cosLine({ before }) {
+      return engine.cosLine(before);
+    },
     directHistory({ slug, before, limit }) {
       return engine.directHistory(slug, before ?? null, limit ?? 30);
     },
@@ -2372,7 +2478,9 @@ export default async function plugin(bb: BbPluginApi) {
         const a = engine.agentByAddress(address);
         return a ? engine.personaOf(a, assigned) : null;
       };
-      return engine.deliverables().map((d) => ({
+      // each its own 200, so a busy board never pushes past deliverables off the Deliverables tab
+      const all = [...engine.deliverables(200, false), ...engine.deliverables(200, true)].sort((a, b) => b.updatedAt - a.updatedAt || (a.id < b.id ? 1 : -1));
+      return all.map((d) => ({
         id: d.id,
         project: d.project,
         lead: d.lead,
@@ -2406,6 +2514,7 @@ export default async function plugin(bb: BbPluginApi) {
         ...(d.scope ? { scope: true } : {}),
         ...(d.scope_task ? { scopeTask: d.scope_task } : {}),
         ...(d.folder ? { folder: d.folder } : {}),
+        ...(d.board ? { board: { id: d.board.id, record: d.board.record ?? null, flag: d.board.flag ?? null } } : {}),
       }));
     },
   });
@@ -2498,11 +2607,15 @@ export default async function plugin(bb: BbPluginApi) {
   write(OPEN_PRS_POST, openPrsPostBody, (b) => openPrs.post(b.key)); // Open PRs' Post: the prepared message, once
   write(OPEN_PRS_COPIED, openPrsCopiedBody, (b) => openPrs.copied(b)); // Open PRs' Copy: that section's baseline (2026-11-18)
   write(REVIEW_QUEUE_WRITE, queueActionSchema, (b) => reviewQueue.act(b)); // the review queue's actions: the owner's only
+  write(MULTIPLAYER_WRITES.add, boardAddBody, (b) => guard(() => multiplayer.addBoard(b)));
+  write(MULTIPLAYER_WRITES.remove, boardRemoveBody, (b) => guard(() => multiplayer.removeBoard(b.id)));
   write(WRITES.resend, resendBody, (b) => engine.resend(b.id).id);
   write(WRITES.priority, priorityBody, (b) => engine.setPriority(b.slug, b.priority));
   write(WRITES.hold, holdBody, (b) => engine.setHold(b.slug, b.held));
   // the owner's direct line to a lead (PLAN 3): an item, never a push; the CoS gets a copy
-  write(WRITES.directMessage, directMessageBody, (b) => engine.ownerMessage(b.slug, b.text, b.followUp ?? null, b.images ?? []).id);
+  write(WRITES.directMessage, directMessageBody, (b) => engine.ownerMessage(b.slug, b.text, b.followUp ?? null, b.images ?? [], b.about ?? null).id);
+  write(WRITES.feedSeen, feedSeenBody, (b) => engine.markFeedSeen(b.upTo));
+  write(WRITES.feedResend, feedResendBody, (b) => engine.resendOwner(b.id).id);
   // a screenshot for a message to a lead (2026-11-17), one per write: checked by its bytes, then kept where the lead can
   // open it. bb's own attachments first (the lead's bb project, so the lead's thread takes it as an image input); else
   // the plugin's own folder. Only the branch and the size are logged, never the bytes.
@@ -2541,15 +2654,11 @@ export default async function plugin(bb: BbPluginApi) {
     if (!lead) throw new EngineError("bad_state", `${b.slug} has no live lead: start it first`);
     return engine.addDirectImage(b.slug, await keepImage(b.slug, lead.threadId, b));
   });
-  // the CoS bar's images (2026-11-17): its send is bb's own message to the CoS's thread, not a tracked item, so they wait
-  // here by id until the bar's send names them (a restart in between: attach them again)
-  const cosImages = new Map<string, DirectImage>();
+  // the images for the owner's next message to the CoS: kept with the tracked message, so a resend carries them too
   write(WRITES.cosImage, cosImageBody, async (b) => {
     const cos = engine.liveAt("cos");
     if (!cos) throw new EngineError("not_found", "No Chief of Staff is running: start it from the Projects tab");
-    const id = `img-${randomUUID().slice(0, 12)}`;
-    cosImages.set(id, { id, ...(await keepImage("cos", cos.threadId, b)) });
-    return id;
+    return engine.addCosImage(await keepImage("cos", cos.threadId, b));
   });
   write(WRITES.directSeen, directSeenBody, (b) => engine.markDirectSeen(b.slug, b.upTo));
   write(WRITES.outputRemove, outputRemoveBody, (b) => engine.removeOutput(b.id));
@@ -2732,18 +2841,10 @@ export default async function plugin(bb: BbPluginApi) {
       }
     });
 
-  // Requested 2026-11-13: a quick message to the CoS from the Orchestrator page. It lands in the CoS's chat as their own
-  // message (no sender thread), queued if the CoS is mid-turn.
-  // 2026-11-17: with the images the bar staged (cosImage), their paths end the text and each goes as bb's image input
-  startRoute(WRITES.cosMessage, cosMessageBody, async ({ text, images = [] }) => {
-    const cos = engine.liveAt("cos");
-    if (!cos) throw new EngineError("not_found", "No Chief of Staff is running: start it from the Projects tab");
-    const imgs = images.map((id) => cosImages.get(id));
-    if (imgs.some((i) => !i)) throw new EngineError("invalid", "an image isn't one sent for this message: attach it again");
-    const kept = imgs as DirectImage[];
-    const res = await sendWithImages({ threadId: cos.threadId, mode: "queue-if-active" }, withImages(text, kept), kept, "the CoS bar's message");
-    for (const id of images) cosImages.delete(id);
-    return { threadId: cos.threadId, delivery: res.delivery };
+  // The owner's message to the CoS (D3): a tracked item the flush delivers, answered with orch_reply_owner.
+  write(WRITES.cosMessage, cosMessageBody, ({ text, images = [], about }) => {
+    const it = engine.ownerCosMessage(text, images, about ?? null);
+    return { id: it.id, threadId: engine.liveAt("cos")?.threadId ?? null };
   });
 
   // The owner answers an agent's own question (AskUserQuestion) from its card: checked against what was asked, then sent
@@ -2907,7 +3008,7 @@ export default async function plugin(bb: BbPluginApi) {
   // ---------------------------------------------------------------- CLI
   const usage = [
     "bb orchestrator status",
-    "bb orchestrator integration import <json-file> | integration receipts <source> [after-sequence] [limit]",
+    "bb orchestrator integration import <json-file> | integration receipts <source> [after-sequence] [limit] | integration heartbeat <source> [--every <minutes>]",
     "bb orchestrator adopt <threadId> <role> --approval <reference> [--project <slug>] [--parent <threadId>]",
     "bb orchestrator role set <threadId> <cos|steward|lead|thread> [<project>]",
     "bb orchestrator role clear <threadId>",
@@ -2971,7 +3072,11 @@ export default async function plugin(bb: BbPluginApi) {
             if (rest[0] === "receipts" && rest[1]) {
               return out(JSON.stringify(engine.externalReceipts(rest[1], Number(rest[2] ?? 0), Number(rest[3] ?? 100))));
             }
-            throw new EngineError("invalid", "integration import <json-file> | integration receipts <source> [after-sequence] [limit]");
+            if (rest[0] === "heartbeat" && rest[1] && !rest[1].startsWith("--")) {
+              const b = guard(() => multiplayer.heartbeat(rest[1]!, everyArg(rest)));
+              return out(JSON.stringify({ source: b.source, lastAt: b.lastAt, everyMs: b.everyMs, reads: b.reads }));
+            }
+            throw new EngineError("invalid", "integration import <json-file> | integration receipts <source> [after-sequence] [limit] | integration heartbeat <source> [--every <minutes>]");
           }
           case "adopt": {
             if (ctx.threadId) throw new EngineError("forbidden", "agents cannot adopt role threads");

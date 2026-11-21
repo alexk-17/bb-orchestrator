@@ -2,7 +2,8 @@
 // left, the selected project on the right, the message box under its name, no top strip. A list row is the project's
 // lead, its name, one state chip (kit.ts STATE_CHIP), the one number that matters as a chip, and the status's age; quiet
 // projects are one dim line. The detail (project-book.tsx) is section cards: Pinned, the goal, Needs | Blocked, then
-// Now | PRs + Record. Under 1200 px the same rows make one column and a tapped row opens its detail in place.
+// Now | PRs + Record, then Timeline, Flow, Dependencies and Pathways (2026-11-20). Under 1200 px the same rows make one
+// column and a tapped row opens the project's page, with a Back row. Scoping entries are a group on top (Scope folded in).
 // Priority, Hold, Archive and "Pin a document…" are in the ⋯ menu; archived projects sit behind a toggle. Above them, the
 // standing agents on one line. The writes go through the page gate (store.ts), like every other.
 //
@@ -11,25 +12,26 @@
 // 2026-11-17 (the shadcn pass): the rows are Items, the filters a ToggleGroup (32 px), the ⋯ app/ui's DropdownMenu with a
 // priority submenu, Archive's confirm an AlertDialog, and every button a Button.
 import { styleHref } from "./style-href.ts";
-import { useElementWidth } from "./panes.tsx";
-import { useEffect, useState, type MouseEvent } from "react";
+import { useElementWidth, usePaneFits } from "./panes.tsx";
+import { usePaneId } from "./key-state.ts";
+import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import type { z } from "zod";
 import { useBbNavigate } from "@get-bb/plugin-sdk/app";
-import { WRITES, type Agents, type Board, type NeedsYou, type Projects, type archiveProjectBody, type directMessageBody, type holdBody, type priorityBody, type projectModeBody, type roleStartBody, type startLeadBody } from "../contract.ts";
+import { WRITES, type Agents, type Board, type Deliverables, type NeedsYou, type Projects, type Scope, type archiveProjectBody, type directMessageBody, type holdBody, type priorityBody, type projectModeBody, type roleStartBody, type startLeadBody } from "../contract.ts";
 import { ASK_STATUS_TEXT, FILTERS, FILTER_WORD, attentionOrder, isQuiet, leadHead, matches, statusStale, waitLine, type Filter } from "./command-center.ts";
 import { ccCss } from "./cc-lines.tsx";
 import { INLINE_LINK, ProjectRefs, RefsContext, refCss, type SharedRefs } from "./ref-text.tsx";
 import { ChatCard, ChatLog, Composer, directCss, markSeen } from "./direct-line.tsx";
+import { useHeadFit } from "./head-fit.ts";
 import { useMinute } from "./status-bar.tsx";
-import { PANEL_PATH } from "./open-proof.ts";
-import { ChevronDown, ChevronRight, Crosshair, Ellipsis, Pin } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight, Crosshair, Ellipsis, Pin } from "lucide-react";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "./ui/alert-dialog.tsx";
 import { Button } from "./ui/button.tsx";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from "./ui/dropdown-menu.tsx";
 import { Item } from "./ui/item.tsx";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group.tsx";
 import { cn } from "./ui/utils.ts";
-import { AgentFace, ProfileCard, StandingFace } from "./face.tsx";
+import { AgentFace, ProfileCard, StandingFace, type Face as FaceOf } from "./face.tsx";
 import { partyOf } from "./faces.ts";
 import { PRIORITIES, PRIORITY_TONES, css, type Priority } from "./palette.ts";
 import { accentText, accentVars } from "./accent.ts";
@@ -38,9 +40,12 @@ import { Btn, EmptyState, PageError, ReadState, cx, when } from "./ui.tsx";
 import { useIdentity } from "./identity.ts";
 import { buildLanes, type Lane } from "./lanes.ts";
 import { ownerOnScreen } from "../core/owner.ts";
-import { ProjectDetail } from "./project-detail.tsx";
+import { PathwaysPart, ProjectDetail, ProjectSections } from "./project-detail.tsx";
+import { ScopeView, ScopingRows } from "./scope.tsx";
+import { PANEL_PATH } from "./open-proof.ts";
+import { useTouchPhone } from "./phone.ts";
 import { ProjectBook, bookCss } from "./project-book.tsx";
-import { SearchBox, SearchHits, searchCss } from "./search.tsx";
+import { SearchBox, SearchHits, searchCss, useSettled } from "./search.tsx";
 import { filterHides, isWide, searchLoaded, searchedProjects } from "./source.ts";
 import { listRow, needCount, projectScopeAction, projectState, STATE_CHIP, tasksScoping } from "./kit.ts";
 import { Chip, Icon, kitCss } from "./kit-ui.tsx";
@@ -205,14 +210,27 @@ function Face({ project, size }: { project: Project; size: 24 | 32 }) {
   );
 }
 
+/** Pathways on the project's page (web: the opened project's head; it no longer sits on the rows, where it covered the name). */
 function PathwaysLink({ slug }: { slug: string }) {
   const navigate = useBbNavigate();
   return <Button variant="outline" size="sm" data-open-pathways={slug} onClick={() => navigate.toPluginPanel(PANEL_PATH, { subPath: `pathways/${encodeURIComponent(slug)}` })}>Pathways →</Button>;
 }
 
+/** A page's Back row (card-390): the way back to the list, at the gutter, and the page's ⋯ at the right. */
+function BackRow({ onBack, children }: { onBack: () => void; children?: ReactNode }) {
+  return (
+    <div className="flex min-w-0 items-center justify-between" data-page-back="">
+      <Button variant="ghost" size="sm" className="-ml-2 gap-1 px-2 font-normal text-muted-foreground has-[>svg]:px-2" data-detail-back="" aria-label="Back to Projects" onClick={onBack}>
+        <ChevronLeft aria-hidden />
+        Projects
+      </Button>
+      {children}
+    </div>
+  );
+}
+
 /** An archived project: one line, its name and when it was archived; Start lead brings it back. */
 function ArchivedRow({ project, busy, refetchAll, onOpen }: { project: Project; busy: boolean; refetchAll: () => void; onOpen: (slug: string) => void }) {
-  const head = leadHead(project);
   const startLead = () => {
     const body: z.input<typeof startLeadBody> = { slug: project.slug };
     void write(WRITES.startLead, body, { kind: "other", where: `lead:${project.slug}`, after: refetchAll });
@@ -227,11 +245,9 @@ function ArchivedRow({ project, busy, refetchAll, onOpen }: { project: Project; 
             <Button variant="link" className={cn("name", INLINE_LINK, "no-underline hover:underline")} data-open-project={project.slug} onClick={() => onOpen(project.slug)}>
               {project.slug}
             </Button>
-            {head.shown ? <span className="who">{head.name}</span> : null}
             <span className="now">archived {when(project.archivedAt)}</span>
           </span>
           <span className="acts">
-            <PathwaysLink slug={project.slug} />
             {project.lead ? null : (
               <Btn size="sm" data-start-lead={project.slug} disabled={busy || project.heldAt !== null} title={`Bring ${project.slug} back with a new lead`} onClick={startLead}>
                 Start lead
@@ -257,7 +273,7 @@ function StandingAgents({ agents, full, busy, refetchAll }: { agents: Board["age
   return (
     <div data-standing="" className="bar standing">
       <span>
-        Standing agents:{" "}
+        <span data-standing-label="">Standing agents: </span>
         {STANDING.map(({ role, label: fixed }, i) => {
           const label = fixed ?? cosTitle;
           const a = agents?.find((x) => x.address === role && x.status !== "archived");
@@ -300,7 +316,9 @@ function StandingAgents({ agents, full, busy, refetchAll }: { agents: Board["age
 
 /** Layout B: the wide tab's own CSS and the list row (proposal 2). Selection is a tint, never a coloured edge. */
 const layoutCss = /* css */ `
-[data-orch] .orch-cc .b-body { display: grid; grid-template-columns: minmax(360px, 480px) minmax(0, 1fr); gap: 32px; align-items: start; }
+[data-orch] .orch-cc .b-body { display: grid; grid-template-columns: minmax(280px, min(480px, 40%)) minmax(0, 1fr); gap: 32px; align-items: start; }
+/* the detail beside the list lays its cards out from its own width (a 720 px pane gives it about 400) */
+[data-orch] .orch-cc .b-body > .detail { container: orchcc / inline-size; }
 [data-orch] .orch-cc .k-plist { display: flex; flex-direction: column; gap: 4px; }
 [data-orch] .orch-cc .k-prow { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; column-gap: 12px; align-items: center; min-height: 56px; padding: 8px 12px; border-radius: 8px; cursor: pointer; }
 [data-orch] .orch-cc .k-prow:hover { background: var(--accent); }
@@ -333,18 +351,53 @@ const layoutCss = /* css */ `
 [data-orch] [data-fits-pane] .b-body { flex: 1 1 0; min-height: 0; grid-template-rows: minmax(0, 1fr); align-items: stretch; }
 [data-orch] [data-fits-pane] .b-body > .k-listpane { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding-bottom: 32px; }
 [data-orch] [data-fits-pane] .b-body > .detail { min-height: 0; }
-/* the fixed head takes at most half the detail's height, so the cards keep at least the other half (2026-11-17, the
-   lead): an open chat gives up the room, its transcript scrolling inside the card, while the name row and the message
-   box stay whole. Past that (a very short pane) the head scrolls inside itself. It keeps the cards' scrollbar room, so
-   its right edge lines up with theirs */
-[data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed { flex: 0 1 auto; min-height: 0; max-height: 50%; overflow-y: auto; scrollbar-gutter: stable; margin: -2px; padding: 2px; }
-[data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed > .k-chatcard, [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed .k-chat, [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed .k-chat > :is(.k-leadthread, .k-chat__log) { flex: 0 1 auto; min-height: 0; }
+/* the fixed head (2026-11-20, 1.36.1, the lead: "the message box must be whole without scrolling"): it is never cut below
+   its own height while the cards keep 48 px, so a closed chat's head shows whole. Nothing in it shrinks (a flex box's
+   minimum is its children's flex bases, so a shrinking chat card let its row slide under the message box in 1.36.0).
+   An open transcript's height is measured instead (head-fit.ts): what two thirds of the detail leave after the rest of
+   the head, so the cards keep at least a third. When even that can't fit (a short window), the head scrolls inside
+   itself and the message box stays stuck to the bottom of what shows, over what scrolls under it. It keeps the cards'
+   scrollbar room, so its right edge lines up with theirs */
+[data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed { flex: none; min-height: 0; max-height: calc(100% - 48px); overflow-y: auto; scrollbar-gutter: stable; margin: -2px; padding: 2px; }
+[data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed > .k-chatcard, [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed .k-chat, [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed .k-chat > * { flex: none; }
+[data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed > .k-chatcard { overflow: clip; }
+[data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed .k-composer { position: sticky; bottom: 0; z-index: 1; background: var(--card); }
+/* the measured height, in either layout (on its own page the room is the pane's visible height below the head) */
+[data-orch] .orch-cc .k-dfixed .k-chat > .k-leadthread { height: var(--k-transcript-h, var(--k-leadthread-h, 480px)); }
+[data-orch] .orch-cc .k-dfixed .k-chat > .k-chat__log { max-height: var(--k-transcript-h, 480px); }
 [data-orch] [data-fits-pane] .b-body > .detail > .k-dcards { flex: 1 1 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding-bottom: 32px; }
+/* a phone (2026-11-20, the owner: "way too much empty space"): one compact row per project on the 16 px gutter (face,
+   name, state, working, one count, age), rows split by a line; the standing agents and the filters one line each. Only in
+   bb's phone layout (phone.ts): a narrow desktop pane keeps the web rows */
+[data-orch] .orch-cc[data-phone] .k-plist { gap: 0; }
+[data-orch] .orch-cc[data-phone] .k-prow { align-items: start; min-height: 0; padding: 10px 0; border-radius: 0; border-width: 0 0 1px; border-color: var(--border); }
+[data-orch] .orch-cc[data-phone] .k-prow:hover { background: none; }
+[data-orch] .orch-cc[data-phone] .k-prow .face { align-self: center; }
+[data-orch] .orch-cc[data-phone] .k-prow .k-main { gap: 2px; }
+[data-orch] .orch-cc[data-phone] .k-prow .k-name .name { min-height: 20px; height: 20px; }
+[data-orch] .orch-cc[data-phone] .k-prow [data-list-scoping] { display: none; }
+/* the working count wraps under the state chip rather than being cut by the side column */
+[data-orch] .orch-cc[data-phone] .k-prow .k-sub { flex-wrap: wrap; row-gap: 2px; overflow: visible; }
+[data-orch] .orch-cc[data-phone] .k-prow .k-sub > * { white-space: nowrap; }
+[data-orch] .orch-cc[data-phone] .k-prow .k-side { gap: 2px; }
+[data-orch] .orch-cc[data-phone] .k-prow .k-side .k-age { order: -1; line-height: 20px; }
+[data-orch] .orch-cc[data-phone] .k-prow[data-quiet="true"] { padding: 6px 0; }
+[data-orch] .orch-cc[data-phone] .k-list-h { padding: 0; margin-top: 16px; }
+[data-orch] .orch-cc[data-phone] .standing { flex-wrap: nowrap; white-space: nowrap; margin-bottom: 12px; }
+[data-orch] .orch-cc[data-phone] .standing > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+[data-orch] .orch-cc[data-phone] .standing .right { flex: none; flex-basis: auto; margin-left: auto; }
+[data-orch] .orch-cc[data-phone] .standing [data-standing-label] { display: none; }
+[data-orch] .orch-cc[data-phone] .top { margin-bottom: 8px; }
+[data-orch] .orch-cc[data-phone] .top .filters { width: 100%; }
+[data-orch] .orch-cc[data-phone] .top .filters > * { flex: 1 1 auto; padding-inline: 6px; }
+[data-orch] .orch-cc[data-phone] .k-dhead :is(.k-mon, .k-type) { display: none; }
 `;
 
-/** A project in the list: its lead, name (and its Pokémon and type, when on); one state chip and how many work; the one number, and the status's age. */
+/**
+ * A project in the list: its lead's face, name; one state chip and how many work; the one number, and the status's age.
+ * No lead title or type (2026-11-20, the owner: "it doesn't really help and just adds clutter"); the opened project has them.
+ */
 function ListRow({ project, lanes, now, selected, quiet, onSelect }: { project: Project; lanes: Lane[] | undefined; now: number; selected: boolean; quiet: boolean; onSelect: () => void }) {
-  const head = leadHead(project);
   const r = listRow(project, lanes, now, quiet);
   return (
     <Item asChild>
@@ -366,23 +419,16 @@ function ListRow({ project, lanes, now, selected, quiet, onSelect }: { project: 
             {project.slug}
           </Button>
           {project.direct?.unread ? <i className="unread" role="img" aria-label="a new note from the lead" data-list-unread={project.slug} title="a new note from the lead: select the project to read it" /> : null}
-          {head.shown ? <span className="k-mon">{head.name}</span> : null}
-          {head.shown && head.type ? (
-            <span className="k-type" data-type={head.accent ?? ""} style={{ color: accentText(head.accent) }}>
-              {head.type}
-            </span>
-          ) : null}
         </div>
         {quiet ? null : (
           <div className="k-sub" data-list-state={r.state}>
             <Chip spec={r.chip} />
             {tasksScoping(project) ? <Chip spec={STATE_CHIP.scoping} data-list-scoping={project.slug} title={tasksScoping(project)!} /> : null}
-            {r.working ? <span>{r.working}</span> : null}
+            {r.working ? <span data-list-working="">{r.working}</span> : null}
           </div>
         )}
       </div>
       <div className="k-side">
-        <PathwaysLink slug={project.slug} />
         {r.number ? <Chip spec={r.number} data-list-number={r.number.tone} /> : null}
         <span className="k-age" data-old={r.age.old ? "true" : "false"} title={r.age.title}>
           {r.age.old ? <Icon name="wait" label="status old" /> : null}
@@ -395,12 +441,11 @@ function ListRow({ project, lanes, now, selected, quiet, onSelect }: { project: 
 }
 
 /**
- * The selected project: its head (name, state chip, what is for the owner; Timeline and ⋯), the one-line message box,
- * then the sections (project-book.tsx), the Pinned strip first. Focusing the message box pins the selection: the list's
+ * The selected project: its head (name, state chip, what is for the owner; ⋯), the one-line message box, then the
+ * sections (project-book.tsx), the Pinned strip first, and its history and Pathways. Focusing the message box pins the selection: the list's
  * order can change under a draft, and the default selection (the first project) must not swap while the owner types.
- * `inPlace`: opened under its row in one column, where the row already shows its face and name.
  */
-function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPick, now, narrow, needs, inPlace = false }: { project: Project; lanes: Lane[] | undefined; busy: boolean; refetchAll: () => void; openCard: OpenCard; onOpen: (slug: string) => void; onPick: () => void; now: number; narrow: boolean; needs: NeedsYou | undefined; inPlace?: boolean }) {
+function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPick, now, narrow, needs, inPlace = false, onBack }: { project: Project; lanes: Lane[] | undefined; busy: boolean; refetchAll: () => void; openCard: OpenCard; onOpen: (slug: string) => void; onPick: () => void; now: number; narrow: boolean; needs: NeedsYou | undefined; inPlace?: boolean; onBack?: () => void }) {
   const { cosTitle, ownerName } = useIdentity();
   const [confirming, setConfirming] = useState(false);
   const [pinning, setPinning] = useState(false);
@@ -416,11 +461,16 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
     void write(WRITES.startLead, body, { kind: "other", where: `lead:${project.slug}`, after: refetchAll });
   };
   const held = project.heldAt !== null;
+  // the open transcript gets what the head's room leaves (head-fit.ts), so the message box is whole without scrolling
+  const headFit = useHeadFit<HTMLDivElement>();
+  const more = <MoreMenu project={project} busy={busy} refetchAll={refetchAll} narrow={narrow} onArchive={() => setConfirming(true)} askStatus={askStatus} askInMenu onPin={() => setPinning(true)} />;
   return (
     <div className="detail" data-project={project.slug} data-detail-panel={project.slug} data-held={held ? "true" : "false"} style={accentVars(project.monType)}>
       <ProjectRefs.Provider value={{ project: project.slug, prs: project.prs ?? [] }}>
         {/* the head: stays put above the cards in the wide layout (layoutCss) */}
-        <div className="k-dfixed" data-detail-head={project.slug}>
+        <div className="k-dfixed" ref={headFit} data-detail-head={project.slug}>
+          {/* a phone's project page: the Back row holds the ⋯, so the head is one line */}
+          {onBack ? <BackRow onBack={onBack}>{more}</BackRow> : null}
           <div className="k-dhead">
             {inPlace ? null : (
               <>
@@ -443,11 +493,15 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
                   Start lead
                 </Btn>
               )}
-              <Btn size="sm" data-open-project={project.slug} title="The timeline, the flow and the dependencies" onClick={() => onOpen(project.slug)}>
-                Timeline
-              </Btn>
-              <PathwaysLink slug={project.slug} />
-              <MoreMenu project={project} busy={busy} refetchAll={refetchAll} narrow={narrow} onArchive={() => setConfirming(true)} askStatus={askStatus} askInMenu onPin={() => setPinning(true)} />
+              {onBack ? null : (
+                <>
+                  <Btn size="sm" data-open-project={project.slug} title="The timeline, the flow and the dependencies" onClick={() => onOpen(project.slug)}>
+                    Timeline
+                  </Btn>
+                  <PathwaysLink slug={project.slug} />
+                  {more}
+                </>
+              )}
             </span>
           </div>
           {/* 2026-11-18: the lead's profile card, compact, right under the header (with a personas pack only). It holds the
@@ -495,11 +549,19 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
             busy={busy}
             refetchAll={refetchAll}
           />
+          {/* a phone's project page holds its history and Pathways; on web they are the Timeline page */}
+          {onBack ? <ProjectSections project={project} lanes={lanes} openCard={openCard} ownerName={ownerOnScreen(ownerName).name} /> : null}
+          {onBack ? <PathwaysPart slug={project.slug} narrow /> : null}
         </div>
       </ProjectRefs.Provider>
     </div>
   );
 }
+
+/** On a phone the filter row fits the screen with the shorter word (2026-11-20: "With waits" ran off the edge). */
+const SHORT_FILTER_WORD: Partial<Record<Filter, string>> = { waits: "Waits" };
+
+type ScopeQuery = { data: Scope | undefined; error: { message: string } | null; refetch: () => Promise<void> };
 
 export function ProjectsView({
   q,
@@ -510,7 +572,16 @@ export function ProjectsView({
   openCard,
   detail,
   onDetail,
+  picked,
+  onPick,
   refs,
+  scope,
+  scopeOpen,
+  onScope,
+  pathwaysOpen = false,
+  deliverables,
+  mons,
+  accents,
 }: {
   q: Query;
   refetchAll: () => void;
@@ -520,10 +591,22 @@ export function ProjectsView({
   openCard: OpenCard;
   /** The open project page (projects/<slug>), null for the list. The panel keeps it, so pane focus can't close it. */
   detail: string | null;
+  /** The selected project (the pane's route): beside the list when wide, its own page with Back when narrow. */
+  picked: string | null;
+  onPick: (slug: string | null) => void;
   /** Opening or leaving a project's page: the URL follows, so a link or the browser's back button works. */
   onDetail: (slug: string | null) => void;
   /** What the references in a row's text resolve against (refs.ts); null: plain text. */
   refs: SharedRefs | null;
+  /** Scope, folded in as the Scoping group (2026-11-20): its read, the open entry (scope/<key>) and how to open one. */
+  scope: ScopeQuery;
+  scopeOpen: string | null;
+  onScope: (key: string | null) => void;
+  /** An old pathways/<slug> link: the project's page opens with Pathways open. */
+  pathwaysOpen?: boolean;
+  deliverables: Deliverables | undefined;
+  mons: ReadonlyMap<string, FaceOf>;
+  accents: ReadonlyMap<string, string | null>;
 }) {
   useGate();
   const { ownerName, cosTitle } = useIdentity();
@@ -531,120 +614,65 @@ export function ProjectsView({
   const [filter, setFilter] = useState<Filter>("all");
   const [showArchived, setShowArchived] = useState(false);
   const [query, setQuery] = useState("");
-  const [picked, setPicked] = useState<string | null>(null);
-  const [opened, setOpened] = useState<ReadonlySet<string>>(new Set());
+  // what the results follow: the box's words once typing pauses (search.tsx useSettled)
+  const found = useSettled(query);
   const [width, root] = useElementWidth();
+  // this pane's own elements: a second Projects pane must not scroll with this one
+  const pane = usePaneId();
+  const here = pane ? `[data-pane="${CSS.escape(pane)}"]` : "[data-orch]";
+  // bb's phone layout (not a pane width; the lead, 2026-11-20): there a project opens as its own page with a Back row
+  const phone = useTouchPhone();
   const narrow = width > 0 && width <= 640;
   const wide = isWide(width);
+  usePaneFits(wide);
   const now = useMinute();
-  const open = onDetail;
   const busy = gate.lock !== null;
+  // a page opens from the top, as a new page does
+  useEffect(() => {
+    if (phone || scopeOpen || (picked && !wide)) document.querySelector(`${here} [data-projects-width]`)?.closest(".orch-pane__scroll")?.scrollTo({ top: 0 });
+  }, [detail, scopeOpen, phone, picked]);
   const all = q.data;
   if (!all) return <ReadState q={q} what="the projects" />;
   const lanes = buildLanes(lanesFrom, needs);
-  const shownProject = detail ? all.find((p) => p.slug === detail) : undefined;
-  if (shownProject) return <ProjectDetail project={shownProject} lanes={lanes.get(shownProject.slug)} onBack={() => open(null)} openCard={openCard} ownerName={you.name} />;
+  const open = (slug: string | null) => {
+    const p = slug ? all.find((x) => x.slug === slug) : undefined;
+    if (p && phone) markSeen(p, refetchAll); // a phone's page shows the lead's chat, so its notes are seen
+    onDetail(slug);
+  };
+  const linked = detail ? all.find((p) => p.slug === detail) : undefined;
+  // web: a project's page is its history and Pathways, as before the phone pass
+  if (linked && !phone) return <ProjectDetail project={linked} lanes={lanes.get(linked.slug)} onBack={() => open(null)} openCard={openCard} ownerName={you.name} pathwaysOpen={pathwaysOpen} />;
   const cards = needs?.cards ?? [];
   const live = all.filter((p) => p.archivedAt === null);
   const count = (f: Filter) => live.filter((p) => matches(f, p, lanes.get(p.slug))).length;
-  const hits = query.trim() ? searchLoaded(live, lanes, cards, query, (w) => waitLine(w, now, cosTitle).text) : [];
+  const hits = found.trim() ? searchLoaded(live, lanes, cards, found, (w) => waitLine(w, now, cosTitle).text) : [];
   const filtered = live.filter((p) => matches(filter, p, lanes.get(p.slug)));
-  const shown = searchedProjects(filtered, hits, query).sort(attentionOrder(lanes, now));
+  const shown = searchedProjects(filtered, hits, found).sort(attentionOrder(lanes, now));
   const main = shown.filter((p) => !isQuiet(p, lanes.get(p.slug), now));
   const quiet = shown.filter((p) => isQuiet(p, lanes.get(p.slug), now));
-  const archived = filter === "all" && !query.trim() ? all.filter((p) => p.archivedAt !== null).sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0)) : [];
-  // one column: a tapped row opens its detail in place (its lead's notes are drawn under the message box)
-  const toggle = (p: Project) => {
-    if (!opened.has(p.slug)) markSeen(p, refetchAll);
-    setOpened((o) => (o.has(p.slug) ? new Set([...o].filter((x) => x !== p.slug)) : new Set([...o, p.slug])));
-  };
-  // a click in the wide list: the detail shows the project's direct line, so its notes are seen
+  const archived = filter === "all" && !found.trim() ? all.filter((p) => p.archivedAt !== null).sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0)) : [];
+  // a click in the list: the detail beside it, or its own page in a narrow pane, shows the project's direct line, so its notes are seen
   const pick = (p: Project) => {
-    setPicked(p.slug);
+    onPick(p.slug);
     markSeen(p, refetchAll);
   };
-  // a click on a project's name in the hits: select it beside the list, or open its row in place
+  // a click on a project's name in the hits: its page on a phone, else select it beside the list or open its row in place
   const reach = (slug: string) => {
     if (filterHides(slug, filtered)) setFilter("all");
     const p = live.find((x) => x.slug === slug);
+    if (phone) return open(slug);
     if (p) markSeen(p, refetchAll);
-    if (wide) setPicked(slug);
-    else {
-      setOpened((o) => new Set([...o, slug]));
-      requestAnimationFrame(() => document.querySelector(`[data-group] [data-project="${CSS.escape(slug)}"]`)?.scrollIntoView({ block: "start", behavior: "smooth" }));
-    }
+    onPick(slug);
   };
   const ordered = [...main, ...quiet];
-  const selected = ordered.find((p) => p.slug === picked) ?? ordered[0];
-  const top = (
-    <div className="top">
-      <ToggleGroup type="single" variant="outline" size="sm" aria-label="Filter" className="filters" data-needs-me-filter={filter} value={filter} onValueChange={(f) => f && setFilter(f as Filter)}>
-        {FILTERS.map((f) => (
-          <ToggleGroupItem key={f} value={f} data-filter={f}>
-            {FILTER_WORD[f]} <span className="text-muted-foreground tabular-nums">{f === "all" ? live.length : count(f)}</span>
-          </ToggleGroupItem>
-        ))}
-      </ToggleGroup>
-      <SearchBox value={query} onChange={setQuery} />
-    </div>
-  );
-  const empty = (
+  const selected = scopeOpen ? undefined : (ordered.find((p) => p.slug === picked) ?? ordered[0]);
+  const pickedPage = picked ? live.find((p) => p.slug === picked) : undefined;
+  // `page`: the project is already the page (a phone's projects/<slug>). Picking it there would route to projects/@<slug>,
+  // which a phone draws as the list: a tap in the message box threw the owner out of the project (2026-11-20).
+  const detailPanel = (p: Project, o: { onBack?: () => void; inPlace?: boolean; page?: boolean } = {}) => <DetailPanel key={p.slug} project={p} lanes={lanes.get(p.slug)} busy={busy} refetchAll={refetchAll} openCard={openCard} onOpen={open} onPick={o.page ? () => {} : () => onPick(p.slug)} now={now} narrow={narrow} needs={needs} onBack={o.onBack} inPlace={o.inPlace} />;
+  const scopePage = scopeOpen ? <ScopeView q={scope} projects={all} deliverables={deliverables} refetchAll={refetchAll} mons={mons} accents={accents} focus={scopeOpen} entryOnly fits={wide} /> : null;
+  const styles = (
     <>
-      {all.length === 0 ? <EmptyState title="No projects yet" text="A project shows up here once a lead registers for it." icon={null} /> : null}
-      {filter !== "all" && !query.trim() && shown.length === 0 ? <EmptyState data-needs-me-empty="" title={filter === "you" ? `Nothing waits on ${you.name}` : `No project is ${filter === "blocked" ? "blocked" : "waiting on anything"}`} text="" icon={null} /> : null}
-    </>
-  );
-  const archivedGroup = archived.length ? (
-    <div className="quiet" data-group="archived">
-      <h3 className="group-h">
-        <Btn tone="ghost" size="sm" className="-ml-2 h-7 px-2 text-xs font-normal text-muted-foreground" data-archived-toggle="" aria-expanded={showArchived} onClick={() => setShowArchived((x) => !x)}>
-          Archived · {archived.length}
-          {showArchived ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />}
-        </Btn>
-      </h3>
-      {showArchived ? (
-        <ul>
-          {archived.map((p) => (
-            <ArchivedRow key={p.slug} project={p} busy={busy} refetchAll={refetchAll} onOpen={open} />
-          ))}
-        </ul>
-      ) : null}
-    </div>
-  ) : null;
-  // the rows, wide (select beside the list) or one column (open in place under the row)
-  const rows = (ps: Project[], isQuietGroup: boolean) =>
-    ps.map((p) =>
-      wide ? (
-        <ListRow key={p.slug} project={p} lanes={lanes.get(p.slug)} now={now} selected={p === selected} quiet={isQuietGroup} onSelect={() => pick(p)} />
-      ) : (
-        <ListRowInPlace key={p.slug} project={p} lanes={lanes.get(p.slug)} now={now} quiet={isQuietGroup} open={opened.has(p.slug)} onToggle={() => toggle(p)}>
-          <DetailPanel project={p} lanes={lanes.get(p.slug)} busy={busy} refetchAll={refetchAll} openCard={openCard} onOpen={open} onPick={() => undefined} now={now} narrow={narrow} needs={needs} inPlace />
-        </ListRowInPlace>
-      ),
-    );
-  const list = (
-    <div className={wide ? "k-listpane" : undefined} data-projects-list="">
-      {main.length ? (
-        <ul className="k-plist" role="list" aria-label="Projects" data-group="led">
-          {rows(main, false)}
-        </ul>
-      ) : null}
-      {quiet.length ? (
-        <div data-group="quiet">
-          <h3 className="k-list-h">Quiet · {quiet.length}</h3>
-          <ul className="k-plist" role="list" aria-label="Quiet projects">
-            {rows(quiet, true)}
-          </ul>
-        </div>
-      ) : null}
-      {archivedGroup}
-    </div>
-  );
-  return (
-    <RefsContext.Provider value={refs}>
-    {/* measured at the pane's full width; one column keeps the reading column's width (max-w-3xl less its padding) */}
-    <div ref={root} data-projects-width={width} data-fits-pane={wide || undefined}>
-    <div className={cx("orch-cc tab pb-8", !wide && "narrow-book")} data-projects-tab="" data-layout={wide ? "list-detail" : "column"} style={wide ? undefined : { maxWidth: 1000, marginInline: "auto" }}>
       {/* a changed block gets a new href: React keeps a style by its href, so a window open across an update would keep the old rules */}
       <style href={styleHref("orch-cc", ccCss)} precedence="default">
         {ccCss}
@@ -673,19 +701,110 @@ export function ProjectsView({
       <style href={styleHref("orch-cc-layout", layoutCss)} precedence="default">
         {layoutCss}
       </style>
-      <StandingAgents agents={agents} full={lanesFrom} busy={busy} refetchAll={refetchAll} />
-      {top}
-      {query.trim() ? <SearchHits q={query} hits={hits} projects={live} now={now} onOpen={reach} /> : null}
-      <ReadState q={q} what="the projects" />
-      <PageError where="projects" />
-      {empty}
-      {wide ? (
-        <div className="b-body">
-          {list}
-          {selected ? <DetailPanel key={selected.slug} project={selected} lanes={lanes.get(selected.slug)} busy={busy} refetchAll={refetchAll} openCard={openCard} onOpen={open} onPick={() => setPicked(selected.slug)} now={now} narrow={narrow} needs={needs} /> : <div />}
+    </>
+  );
+  // one column: a scoping entry opens as its own page, with a way back (card-390); on a phone a project does too
+  const page = wide ? null : scopePage ? (
+    <>
+      <BackRow onBack={() => onScope(null)} />
+      {scopePage}
+    </>
+  ) : linked && phone ? (
+    detailPanel(linked, { onBack: () => open(null), page: true })
+  ) : pickedPage && !phone ? (
+    detailPanel(pickedPage, { onBack: () => onPick(null) })
+  ) : null;
+  const top = (
+    <div className="top">
+      <ToggleGroup type="single" variant="outline" size="sm" aria-label="Filter" className="filters" data-needs-me-filter={filter} value={filter} onValueChange={(f) => f && setFilter(f as Filter)}>
+        {FILTERS.map((f) => (
+          <ToggleGroupItem key={f} value={f} data-filter={f}>
+            {phone ? (SHORT_FILTER_WORD[f] ?? FILTER_WORD[f]) : FILTER_WORD[f]} <span className="text-muted-foreground tabular-nums">{f === "all" ? live.length : count(f)}</span>
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
+      <SearchBox value={query} onChange={setQuery} />
+    </div>
+  );
+  const empty = (
+    <>
+      {all.length === 0 ? <EmptyState title="No projects yet" text="A project shows up here once a lead registers for it." icon={null} /> : null}
+      {filter !== "all" && !found.trim() && shown.length === 0 ? <EmptyState data-needs-me-empty="" title={filter === "you" ? `Nothing waits on ${you.name}` : `No project is ${filter === "blocked" ? "blocked" : "waiting on anything"}`} text="" icon={null} /> : null}
+    </>
+  );
+  const archivedGroup = archived.length ? (
+    <div className="quiet" data-group="archived">
+      <h3 className="group-h">
+        <Btn tone="ghost" size="sm" className="-ml-2 h-7 px-2 text-xs font-normal text-muted-foreground" data-archived-toggle="" aria-expanded={showArchived} onClick={() => setShowArchived((x) => !x)}>
+          Archived · {archived.length}
+          {showArchived ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />}
+        </Btn>
+      </h3>
+      {showArchived ? (
+        <ul>
+          {archived.map((p) => (
+            <ArchivedRow key={p.slug} project={p} busy={busy} refetchAll={refetchAll} onOpen={open} />
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  ) : null;
+  const rows = (ps: Project[], isQuietGroup: boolean) =>
+    ps.map((p) =>
+      wide ? (
+        <ListRow key={p.slug} project={p} lanes={lanes.get(p.slug)} now={now} selected={p === selected} quiet={isQuietGroup} onSelect={() => pick(p)} />
+      ) : phone ? (
+        <ListRow key={p.slug} project={p} lanes={lanes.get(p.slug)} now={now} selected={false} quiet={isQuietGroup} onSelect={() => open(p.slug)} />
+      ) : (
+        <ListRow key={p.slug} project={p} lanes={lanes.get(p.slug)} now={now} selected={false} quiet={isQuietGroup} onSelect={() => pick(p)} />
+      ),
+    );
+  const list = (
+    <div className={wide ? "k-listpane" : undefined} data-projects-list="">
+      {filter === "all" && !found.trim() ? <ScopingRows q={scope} projects={all} deliverables={deliverables} mons={mons} selected={wide ? scopeOpen : null} onOpen={(k) => onScope(k)} /> : null}
+      {main.length ? (
+        <ul className="k-plist" role="list" aria-label="Projects" data-group="led">
+          {rows(main, false)}
+        </ul>
+      ) : null}
+      {quiet.length ? (
+        <div data-group="quiet">
+          <h3 className="k-list-h">Quiet · {quiet.length}</h3>
+          <ul className="k-plist" role="list" aria-label="Quiet projects">
+            {rows(quiet, true)}
+          </ul>
+        </div>
+      ) : null}
+      {archivedGroup}
+    </div>
+  );
+  return (
+    <RefsContext.Provider value={refs}>
+    {/* measured at the pane's full width; one column keeps the reading column's width (max-w-3xl less its padding) */}
+    <div ref={root} data-projects-width={width} data-fits-pane={wide || undefined}>
+    <div className={cx("orch-cc tab pb-8", !wide && "narrow-book")} data-phone={phone || undefined} data-projects-tab="" data-layout={wide ? "list-detail" : "column"} data-page={page ? (scopeOpen ? "scope" : "project") : undefined} style={wide ? undefined : { maxWidth: 1000, marginInline: "auto" }}>
+      {styles}
+      {page ? (
+        <div className="flex min-w-0 flex-col gap-2" data-project-page={scopeOpen ?? linked?.slug ?? pickedPage?.slug}>
+          {page}
         </div>
       ) : (
-        list
+        <>
+          <StandingAgents agents={agents} full={lanesFrom} busy={busy} refetchAll={refetchAll} />
+          {top}
+          {found.trim() ? <SearchHits q={found} hits={hits} projects={live} now={now} onOpen={reach} /> : null}
+          <ReadState q={q} what="the projects" />
+          <PageError where="projects" />
+          {empty}
+          {wide ? (
+            <div className="b-body">
+              {list}
+              {scopePage ?? (selected ? detailPanel(selected) : <div />)}
+            </div>
+          ) : (
+            list
+          )}
+        </>
       )}
     </div>
     </div>
@@ -693,16 +812,3 @@ export function ProjectsView({
   );
 }
 
-/** One column: the list row, and under it (once tapped) its detail. */
-function ListRowInPlace({ project, lanes, now, quiet, open, onToggle, children }: { project: Project; lanes: Lane[] | undefined; now: number; quiet: boolean; open: boolean; onToggle: () => void; children: React.ReactNode }) {
-  return (
-    <>
-      <ListRow project={project} lanes={lanes} now={now} selected={open} quiet={quiet} onSelect={onToggle} />
-      {open ? (
-        <li className="k-inplace" data-in-place={project.slug} data-expanded="true">
-          {children}
-        </li>
-      ) : null}
-    </>
-  );
-}

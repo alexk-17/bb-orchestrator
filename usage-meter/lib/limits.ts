@@ -33,12 +33,25 @@ export function ringOf(label: string): "outer" | "inner" | null {
 /**
  * Colour thresholds. The neighbouring server-status plugin has its own (80%
  * and 90%): that is RAM, worth worrying about only near the ceiling, while
- * this is a limit that was paid for and is worth noticing at 60%. Both
- * surfaces name the thresholds in words so one colour cannot be read as one
- * alarm.
+ * this is a limit that was paid for and is worth noticing at 60%.
  */
 export const WARN = 60;
 export const DANGER = 85;
+
+/** How alarming a percentage is: amber from WARN, red from DANGER. */
+export type Tone = "normal" | "warn" | "danger";
+
+/**
+ * The one tone rule for the rings, the popover bars and the Usage page. It
+ * reads the rounded figure the user sees, so "85%" is never drawn amber.
+ */
+export function toneOf(percent: number | null): Tone {
+  if (percent === null || !Number.isFinite(percent)) return "normal";
+  const shown = Math.round(percent);
+  if (shown >= DANGER) return "danger";
+  if (shown >= WARN) return "warn";
+  return "normal";
+}
 
 /**
  * The API's own window labels are long for a narrow panel. Model names
@@ -135,6 +148,78 @@ export function resetText(iso: string | null): string {
   // that rolls past midnight resets in the small hours, and "resets 4 Sep" reads
   // as a whole day away. The clock stays, the day is what gets added.
   return isToday(at) ? `resets at ${time}` : `resets ${dayText(at)} at ${time}`;
+}
+
+const WEEKDAY_FORMAT = new Intl.DateTimeFormat("en-GB", { weekday: "short" });
+const DAY_MS = 86_400_000;
+
+/** Midnight at the start of the local day. */
+function dayStart(at: Date): number {
+  return new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime();
+}
+
+/**
+ * The popover bar's reset time: "resets 21:20" today, "resets Tue 02:00" within
+ * the coming week, "resets 3 Dec 02:00" further out (a weekday a week away would
+ * read as today). Rounded to the minute, like `resetText`.
+ */
+export function resetShort(iso: string | null, now: Date = new Date()): string {
+  if (!iso) return "";
+  const exact = new Date(iso);
+  if (Number.isNaN(exact.getTime())) return "";
+  const at = new Date(Math.round(exact.getTime() / 60_000) * 60_000);
+  const time = TIME_FORMAT.format(at);
+  const days = Math.round((dayStart(at) - dayStart(now)) / DAY_MS);
+  if (days === 0) return `resets ${time}`;
+  if (days > 0 && days < 7) return `resets ${WEEKDAY_FORMAT.format(at)} ${time}`;
+  return `resets ${dayText(at)} ${time}`;
+}
+
+/** One popover bar: a limit window as label, rounded percent, tone and reset. */
+export interface Bar {
+  label: string;
+  /** The API's full window label, for the hover title. */
+  title: string;
+  /** 0–100, rounded: the number shown and the bar fill. */
+  percent: number;
+  tone: Tone;
+  reset: string;
+}
+
+export function barOf(limit: UsageWindow, now: Date = new Date()): Bar {
+  const percent = Math.round(percentOf(limit) ?? 0);
+  return {
+    label: SHORT_LABEL[labelKey(limit.label)] ?? limit.label,
+    title: limit.label,
+    percent,
+    tone: toneOf(percent),
+    reset: resetShort(limit.resetsAt, now),
+  };
+}
+
+/** The pool fields the routing order reads. */
+export interface Routed {
+  enabled: boolean;
+  /** Lower runs first; null when the pooler did not say. */
+  priority: number | null;
+}
+
+/**
+ * The Account Pooler's routing order, as `bb pool account list` shows it:
+ * enabled accounts by priority (lower first, ties in the order given, which is
+ * the order added), then disabled accounts the same way, at the end.
+ */
+export function routingOrder<T extends Routed>(accounts: readonly T[]): T[] {
+  const rank = (p: number | null) => (p === null ? Number.POSITIVE_INFINITY : p);
+  return accounts
+    .map((account, index) => ({ account, index }))
+    .sort(
+      (a, b) =>
+        Number(!a.account.enabled) - Number(!b.account.enabled) ||
+        rank(a.account.priority) - rank(b.account.priority) ||
+        a.index - b.index,
+    )
+    .map(({ account }) => account);
 }
 
 /** "Figures as of 16:48" — the age of the last successful snapshot. */

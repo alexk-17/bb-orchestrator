@@ -11,7 +11,7 @@ import { ChevronRight } from "lucide-react";
 import { Markdown } from "@get-bb/plugin-sdk/app";
 import { Badge } from "./ui/badge.tsx";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collapsible.tsx";
-import { Textarea } from "./ui/textarea.tsx";
+import { ReplyButton, ReplyComposer, ReplyField } from "./reply-composer.tsx";
 import { cn } from "./ui/utils.ts";
 import { Btn } from "./ui.tsx";
 import { pickedClass, reservesBadgeRow } from "./option-tiles.ts";
@@ -42,7 +42,7 @@ export function Options({ options, disabled, label = "Options" }: { options: Opt
         {sorted.map((o) => {
           const primary = o.pressed ?? o.recommended;
           return (
-            <Btn key={o.key} tone={primary ? "primary" : "outline"} className={cn("border", primary && "border-transparent")} aria-pressed={o.pressed} disabled={disabled} onClick={o.onPick} {...o.data}>
+            <Btn key={o.key} tone={primary ? "primary" : "outline"} className={cn("h-auto min-h-9 max-w-full border text-start whitespace-normal [overflow-wrap:anywhere]", primary && "border-transparent")} aria-pressed={o.pressed} disabled={disabled} onClick={o.onPick} {...o.data}>
               {o.label}
             </Btn>
           );
@@ -112,9 +112,10 @@ export function Fold({ label, className, children, ...data }: { label: ReactNode
   return (
     <Collapsible open={open} onOpenChange={setOpen} className={className} {...data}>
       <CollapsibleTrigger asChild>
-        <Btn tone="ghost" size="sm" className="-ml-2 h-7 gap-1 px-2 text-xs font-normal text-muted-foreground" data-fold-toggle="">
-          <ChevronRight className={cn("size-3.5 transition-transform", open && "rotate-90")} aria-hidden />
-          {label}
+        {/* the label wraps (2026-11-21): one long "Details: …" line pushed the phone's whole page sideways */}
+        <Btn tone="ghost" size="sm" className="-ml-2 h-auto min-h-7 max-w-full items-start justify-start gap-1 px-2 py-1.5 text-start text-xs font-normal whitespace-normal text-muted-foreground" data-fold-toggle="">
+          <ChevronRight className={cn("mt-px size-3.5 transition-transform", open && "rotate-90")} aria-hidden />
+          <span className="min-w-0 [overflow-wrap:anywhere]">{label}</span>
         </Btn>
       </CollapsibleTrigger>
       <CollapsibleContent forceMount className="data-[state=closed]:hidden">
@@ -124,31 +125,37 @@ export function Fold({ label, className, children, ...data }: { label: ReactNode
   );
 }
 
-/** "Other": always open. ⌘/Ctrl+Enter sends from inside it; the Send button is for phones. */
+/**
+ * "Other": always open, as the reply box (reply-composer.tsx, 2026-11-20). ⌘/Ctrl+Enter sends from inside it; the
+ * Send pill is for phones. It grows with the text now (the owner's model, X's reply box): the fixed height it had so
+ * typing never moved the cards below gave way to it.
+ */
 export function OtherBox({ value, onChange, onSend, disabled, placeholder, sendLabel = "Send" }: { value: string; onChange: (v: string) => void; onSend: () => void; disabled: boolean; placeholder: string; sendLabel?: string }) {
   return (
-    <div className="relative mt-3">
-      <Textarea
-        data-note=""
-        aria-label="Your own answer"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-            e.preventDefault();
-            if (!disabled && value.trim() !== "") onSend();
-          }
-        }}
-        // a fixed height: typing never grows the card and moves the ones below
-        className="field-sizing-fixed h-16 min-h-16 resize-none pr-20"
-        rows={2}
-        maxLength={4000}
-        placeholder={placeholder}
-      />
-      <Btn size="sm" className="absolute right-2 bottom-2 h-7" data-note-send="" disabled={disabled || value.trim() === ""} onClick={onSend}>
-        {sendLabel}
-      </Btn>
-    </div>
+    <ReplyComposer
+      className="mt-3"
+      field={
+        <ReplyField
+          data-note=""
+          aria-label="Your own answer"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+              e.preventDefault();
+              if (!disabled && value.trim() !== "") onSend();
+            }
+          }}
+          maxLength={4000}
+          placeholder={placeholder}
+        />
+      }
+      actions={
+        <ReplyButton data-note-send="" disabled={disabled || value.trim() === ""} onClick={onSend}>
+          {sendLabel}
+        </ReplyButton>
+      }
+    />
   );
 }
 

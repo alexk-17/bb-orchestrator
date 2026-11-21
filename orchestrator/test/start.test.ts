@@ -85,6 +85,10 @@ test("the CoS and Steward briefs name only tools their role holds", () => {
   const st = loadBrief(BRIEF_DIR, "steward", { pokemon: "", folder: "/s/steward", owner: "the owner" });
   assert.match(st, /orch_cleanup/);
   assert.ok(!/memory_search|orch_spawn_thread/.test(st));
+  // the owner's Go on the Steward's own cleanup card runs that card's commands, never more, and only after the re-checks
+  assert.match(st, /answers the Go option on a cleanup card you filed, run exactly the commands that card listed/);
+  assert.match(st, /0 processes[\s\S]*0 dirty[\s\S]*0 unpushed/);
+  assert.match(st, /Remove a worktree, except as above/);
 });
 
 test("a missing brief file is refused with its path", () => {

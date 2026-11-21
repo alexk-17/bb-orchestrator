@@ -24,7 +24,7 @@ function setup() {
     changed: () => {},
     cardUp: (d) => up.push(d.id),
     log: () => {},
-  });
+  }, { batchInbox: false });
   const cos = e.register("T-cos", "cos", null);
   const qa = e.register("T-lq", "lead", "qa");
   const other = e.register("T-lo", "lead", "other");

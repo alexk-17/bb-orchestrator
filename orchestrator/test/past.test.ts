@@ -340,7 +340,7 @@ test("no filter, kind or search drops an item that matches it", () => {
         const v = { ...START, filter: f.id, project, query };
         const tab = deliverablesTab(ds, os, v, order("alpha", "beta", "gamma"));
         const inP = (p: string | null) => project === ALL_PROJECTS || (p ?? "") === project;
-        const wantDs = f.id === "files" ? [] : ds.filter((d) => (f.id === "all" || d.state === f.id) && inP(d.project) && hit(text(d), query));
+        const wantDs = f.id === "files" ? [] : ds.filter((d) => (f.id === "all" || d.state === f.id || (f.id === "decided" && (d.state === "approved" || d.state === "changes"))) && inP(d.project) && hit(text(d), query));
         const why = JSON.stringify(v);
         assert.deepEqual(tab.past.map((d) => d.id).sort(), wantDs.map((d) => d.id).sort(), why);
         const wantOs = os.filter((o) => inP(o.project) && hit(otext(o), query));
@@ -442,11 +442,10 @@ test("the sidebar order is bb's section order, mapped to projects; unsectioned p
   assert.deepEqual(manualSectionOrder(null), []);
 });
 
-test("a saved pane on the old Outputs tab opens Deliverables instead of throwing the owner's layout away", () => {
+test("a saved pane on the old Outputs tab opens Home (Delivered, step 3) instead of throwing the owner's layout away", () => {
   const saved = { root: { kind: "split", id: "s", dir: "row", sizes: [0.5, 0.5], children: [{ kind: "pane", id: "a", view: "outputs" }, { kind: "pane", id: "b", view: "board" }] }, focus: "a" };
-  const views = ["deliverables", "projects", "board"];
-  assert.equal(parse(saved, views), null, "without the rename the split is lost");
-  assert.deepEqual(panes(parse(saved, views, RENAMED_VIEWS)!.root).map((p) => p.view), ["deliverables", "board"]);
+  const views = [{ id: "home", subPath: "" }, { id: "projects", subPath: "projects" }, { id: "board", subPath: "board" }];
+  assert.deepEqual(panes(parse(saved, views)!.root).map((p) => p.route), [{ view: "home", path: [], params: { filter: "delivered", files: "1" } }, { view: "board", path: [], params: {} }], "on its Files filter, as an Outputs link opens");
   assert.equal(RENAMED_VIEWS.agents, "projects", "the earlier rename still holds");
 });
 
@@ -481,4 +480,12 @@ test("a deliverable's files lead with its shown revision's proof, in the lead's 
   const d = del({ id: "v-r", proof: [{ path: f.files[2]!.path, stored: "copied" }, { path: f.files[1]!.path, stored: "copied" }] });
   const files = deliverablesTab([d], [], START, [], { "v-r": f }).filesBy.get("v-r")!;
   assert.deepEqual(files.map((x) => x.name), ["dashboard.png", "before.png", "a-note.md"]);
+});
+
+test("Delivered's Decided (step 3) holds the approved and the sent back, not the withdrawn; its count says the same", () => {
+  const ds = [del({ id: "v-a", state: "approved" }), del({ id: "v-c", state: "changes" }), del({ id: "v-w", state: "withdrawn" }), del({ id: "v-r", state: "review" })];
+  const tab = deliverablesTab(ds, [], { ...START, filter: "decided" });
+  assert.deepEqual(tab.past.map((d) => d.id).sort(), ["v-a", "v-c"]);
+  assert.equal(tab.counts.decided, 2);
+  assert.equal(tab.counts.withdrawn, 1, "the withdrawn one waits on the Files and withdrawn page");
 });

@@ -56,7 +56,7 @@ async function host() {
   const root = mkdtempSync(join(scratch, "h-"));
   const file = join(root, "data.db");
   const raw = new DatabaseSync(file);
-  const pre = new Engine(raw as never, { now: Date.now, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} });
+  const pre = new Engine(raw as never, { now: Date.now, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} }, { batchInbox: false });
   pre.register("T-cos", "cos", null);
   pre.register("T-lead", "lead", "otter");
   pre.setStatus("T-lead", "idle");
@@ -82,7 +82,7 @@ async function host() {
           return {
             define: (schema: Record<string, { default: unknown }>) => {
               const v: any = Object.fromEntries(Object.entries(schema).map(([key, d]) => [key, d.default]));
-              Object.assign(v, { stateDir: join(root, "state"), projectsDir: join(root, "projects"), memoryConfig: "", prPollMinutes: 0, dreamsEnabled: false, cloudConfigPath: join(root, "no-cloud.json") });
+              Object.assign(v, { batchInbox: false, stateDir: join(root, "state"), projectsDir: join(root, "projects"), memoryConfig: "", prPollMinutes: 0, dreamsEnabled: false, cloudConfigPath: join(root, "no-cloud.json") });
               return { get: async () => v, onChange: () => {} };
             },
           };
