@@ -1,6 +1,6 @@
 # bb-orchestrator
 
-Two plugins for [bb](https://getbb.app), the agent orchestration app:
+Three plugins for [bb](https://getbb.app), the agent orchestration app:
 
 - **Orchestrator** (`orchestrator/`) gives bb threads roles and runs them as a team. A Chief of Staff (CoS) triages, a
   Steward watches the host, each project has a lead, and the leads start threads. Questions come to you as cards with
@@ -11,31 +11,37 @@ Two plugins for [bb](https://getbb.app), the agent orchestration app:
   [orchestrator/gameboy/README.md](orchestrator/gameboy/README.md)).
 - **Usage Meter** (`usage-meter/`) shows your Claude subscription limits as two rings on a sidebar button, plus a
   Usage page that breaks down where the usage went. See [usage-meter/README.md](usage-meter/README.md).
+- **codex-lb** (`codex-lb/`) runs bb's Codex threads through a [codex-lb](https://github.com/Soju06/codex-lb) load
+  balancer. The base URL, API key variable, codex binary, `CODEX_HOME` and model are plugin settings, not wrapper
+  scripts. `bb codex-lb status` reports health, usage and reset credits, and the pool's limits show in bb's Provider
+  usage card. See [codex-lb/README.md](codex-lb/README.md).
 
 Each plugin installs and updates on its own.
 
 ## Requirements
 
-- bb 0.49 or newer for the Orchestrator, 0.39 or newer for Usage Meter.
+- bb 0.49 or newer for the Orchestrator and codex-lb, 0.39 or newer for Usage Meter.
 - `git` on the machine running the bb server (bb clones and builds the plugin on install).
 - The Orchestrator's agents run on bb's Claude Code provider, so you need a Claude account signed in to bb.
 
 ## Install
 
-Add this repository as a bb marketplace, then install either plugin from it:
+Add this repository as a bb marketplace, then install any of the plugins from it:
 
 ```sh
 bb marketplace add git:github.com/alexk-17/bb-orchestrator@main
 bb plugin install orchestrator@bb-orchestrator
 bb plugin install usage-meter@bb-orchestrator
+bb plugin install codex-lb@bb-orchestrator
 ```
 
 Or install straight from git, without the marketplace. Each plugin has its own release tags (`orchestrator-vX.Y.Z`,
-`usage-meter-vX.Y.Z`), so give the plugin's folder and tag prefix:
+`usage-meter-vX.Y.Z`, `codex-lb-vX.Y.Z`), so give the plugin's folder and tag prefix:
 
 ```sh
 bb plugin install git:https://github.com/alexk-17/bb-orchestrator.git@^1.0.0 --subdirectory orchestrator --tag-prefix orchestrator-
 bb plugin install git:https://github.com/alexk-17/bb-orchestrator.git@^0.3.0 --subdirectory usage-meter --tag-prefix usage-meter-
+bb plugin install git:https://github.com/alexk-17/bb-orchestrator.git@^0.1.0 --subdirectory codex-lb --tag-prefix codex-lb-
 ```
 
 bb shows the exact tag and commit it resolved and asks you to confirm. Plugins run with full trust on your machine, so
@@ -238,6 +244,7 @@ when you confirm. Agents can read the queue but can't change it.
 ```sh
 (cd orchestrator && npm install && npm test && npm run typecheck)
 (cd usage-meter && npm install)
+(cd codex-lb && npm install && npm test && npm run typecheck)
 bb plugin install path:$PWD/orchestrator   # run your checkout in bb; bb plugin reload orchestrator after a change
 ```
 

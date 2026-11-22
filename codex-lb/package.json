@@ -1,0 +1,38 @@
+{
+  "name": "bb-plugin-codex-lb",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Run bb's Codex threads through a codex-lb load balancer, configured in plugin settings.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alexk-17/bb-orchestrator",
+    "directory": "codex-lb"
+  },
+  "engines": {
+    "bb": ">=0.49",
+    "bbPluginSdk": ">=0.6.132"
+  },
+  "bb": {
+    "name": "codex-lb",
+    "description": "Run bb's Codex threads through a codex-lb load balancer: base URL, API key variable, codex binary, CODEX_HOME and model in plugin settings, `bb codex-lb status` for health, usage and reset credits, and the pool's limits in the Provider usage card.",
+    "branding": {
+      "icon": "./icon.svg"
+    },
+    "server": "./server.ts"
+  },
+  "scripts": {
+    "test": "node --test --disable-warning=ExperimentalWarning test/*.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "bb plugin build"
+  },
+  "dependencies": {
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.132",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

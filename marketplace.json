@@ -3,7 +3,7 @@
   "schemaVersion": 2,
   "name": "bb-orchestrator",
   "displayName": "bb-orchestrator",
-  "description": "The Orchestrator and Usage Meter plugins for bb.",
+  "description": "The Orchestrator, Usage Meter and codex-lb plugins for bb.",
   "plugins": [
     {
       "id": "orchestrator",
@@ -34,6 +34,22 @@
           "subdir": "usage-meter",
           "range": "^0.3.0",
           "tagPrefix": "usage-meter-"
+        }
+      }
+    },
+    {
+      "id": "codex-lb",
+      "displayName": "codex-lb",
+      "description": "Run bb's Codex threads through a codex-lb load balancer, configured in plugin settings, with the pool's health, usage and reset credits.",
+      "icon": { "url": "./codex-lb/icon.svg" },
+      "tags": ["codex", "usage", "providers"],
+      "author": { "name": "alexk-17", "github": "alexk-17" },
+      "source": {
+        "git": {
+          "url": "https://github.com/alexk-17/bb-orchestrator.git",
+          "subdir": "codex-lb",
+          "range": "^0.1.0",
+          "tagPrefix": "codex-lb-"
         }
       }
     }

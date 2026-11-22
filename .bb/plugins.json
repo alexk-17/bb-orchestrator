@@ -4,6 +4,7 @@
   "name": "bb-orchestrator",
   "plugins": [
     { "name": "orchestrator", "source": "./orchestrator" },
-    { "name": "usage-meter", "source": "./usage-meter" }
+    { "name": "usage-meter", "source": "./usage-meter" },
+    { "name": "codex-lb", "source": "./codex-lb" }
   ]
 }
