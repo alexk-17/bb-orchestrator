@@ -145,7 +145,8 @@ function fakeSdk(opts: { wait?: () => Promise<unknown>; output?: string; models?
         log.push("spawn");
         return { id: "t1" };
       },
-      wait: async (a: { timeoutMs: number }) => {
+      wait: async (a: { timeoutMs: number; status?: string }) => {
+        assert.equal(a.status, "idle");
         log.push(`wait ${a.timeoutMs}`);
         return opts.wait ? opts.wait() : { matched: true };
       },

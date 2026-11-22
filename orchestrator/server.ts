@@ -16,7 +16,7 @@ import { projectIssues, pathwaysMap, linkPathwaysDecisions, attachPathwaysPrefli
 import { collectPathwaysProofRecords, reducePathwaysPr, reducePathwaysProof, reducePathwaysWaitLane } from "./core/pathways-pr.ts";
 import { createPathwaysSnapshots, type PathwaysSnapshot, type PathwaysView } from "./core/pathways-snapshot.ts";
 import { localPathwaysMap } from "./core/pathways-local.ts";
-import { GUIDE_DEFAULTS, GUIDE_MS, guideCacheKey, runGuide, type GuideSdk } from "./core/pathways-guide.ts";
+import { GUIDE_DEFAULTS, GUIDE_MS, guideCacheKey, runGuide } from "./core/pathways-guide.ts";
 import type { FeedPrompt } from "./core/feed.ts";
 import { type DeliverPlace, type OutputPlace, type ProofInput, SCOPING_SUMMARY_MAX, SCOPING_TASK_NAME_MAX, SECRET_TTL_MS } from "./core/engine.ts";
 import { deliverBlocks, deliverPoints, fromJson, inputBlocksSchema, lessTextRefusal, looksLikeCode } from "./blocks.ts";
@@ -2624,12 +2624,12 @@ export default async function plugin(bb: BbPluginApi) {
     try {
       let target: { projectId: string; hostId: string };
       try {
-        target = await homeProject();
+        target = await guideTarget();
       } catch {
-        return fail("Pathways Guide needs a connected bb host and project.");
+        return fail("Pathways Guide needs a connected bb host and personal project.");
       }
       const res = await runGuide(
-        bb.sdk as unknown as GuideSdk,
+        bb.sdk,
         ticket,
         snapshotMap,
         { provider, model, hostId: target.hostId, projectId: target.projectId, timeoutMs: GUIDE_MS },
@@ -2644,8 +2644,9 @@ export default async function plugin(bb: BbPluginApi) {
       return { guide: res.guide, error: null, provider, model, cached: false };
     } catch (e) {
       const message = errText(e);
+      bb.log.warn(`pathways guide failed for ${b.slug}/${b.ticketId}: ${message}`);
       const timedOut = (e instanceof DOMException && e.name === "TimeoutError") || /timed out/i.test(message);
-      const safeProviderErr = /^(provider |model |could not list |Pathways Guide needs )/i.test(message);
+      const safeProviderErr = /^(provider |model |cannot load |could not list |Pathways Guide needs )/i.test(message);
       return fail(
         timedOut
           ? "The guide timed out. Try Ask again."
@@ -2844,6 +2845,21 @@ export default async function plugin(bb: BbPluginApi) {
     } catch (e) {
       throw new EngineError("bad_state", `no bb project has ${path} as its folder, and bb refused to create one: ${errText(e)}`);
     }
+  }
+
+  async function guideTarget(): Promise<{ projectId: string; hostId: string }> {
+    const projects = await bb.sdk.projects.list({ includePersonal: true });
+    const personal = projects.find((project) => project.kind === "personal");
+    if (!personal) throw new EngineError("bad_state", "Pathways Guide needs bb's personal project.");
+    const hosts = (await bb.sdk.hosts.list()).filter((host) => host.status === "connected" && host.lifecycle.phase === "active");
+    if (hosts.length === 0) throw new EngineError("bad_state", "Pathways Guide needs a connected bb host.");
+    if (hosts.length === 1) return { projectId: personal.id, hostId: hosts[0]!.id };
+    try {
+      const home = await homeProject();
+      if (hosts.some((host) => host.id === home.hostId)) return { projectId: personal.id, hostId: home.hostId };
+    } catch {}
+    const persistent = hosts.find((host) => host.type === "persistent") ?? hosts[0]!;
+    return { projectId: personal.id, hostId: persistent.id };
   }
 
   /** The CoS's and the Steward's bb project: the homeProjectId setting, else the bb project of the mirror folder. */

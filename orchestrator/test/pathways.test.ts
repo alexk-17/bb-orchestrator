@@ -132,13 +132,23 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
               if (args[0]?.threadId === "T-thr-3") return Promise.resolve({ title: "Stopped worker", status: "stopped" });
               return Promise.resolve({ title: null, status: "idle" });
             }
-            if (key === "projects.list") return Promise.resolve([{ id: "bb-proj-1", name: "state", sources: [{ hostId: "h-1", path: join(root, "state"), isDefault: true }] }]);
+            if (key === "hosts.list") return Promise.resolve([{ id: "h-1", status: "connected", type: "persistent", lifecycle: { phase: "active" } }]);
+            if (key === "projects.list") {
+              const standard = { id: "bb-proj-1", kind: "standard", name: "state", sources: [{ hostId: "h-1", path: join(root, "state"), isDefault: true }] };
+              return Promise.resolve(args[0]?.includePersonal ? [{ id: "proj_personal", kind: "personal", name: "Personal", sources: [] }, standard] : [standard]);
+            }
             if (key === "providers.models") return Promise.resolve({ modelLoadError: null, providers: [{ id: "claude-code", available: true }], models: [{ id: "claude-opus-5-5", model: "claude-opus-5-5" }] });
             if (key === "threads.spawn") {
+              if (args[0]?.environment?.workspace?.type === "personal" && args[0]?.projectId !== "proj_personal") {
+                return Promise.reject(new Error("Personal workspaces are only supported for the personal project"));
+              }
               guideSpawns++;
               return Promise.resolve({ id: `g-${guideSpawns}` });
             }
-            if (key === "threads.wait") return Promise.resolve({ matched: true });
+            if (key === "threads.wait") {
+              if (args[0]?.status !== "idle") return Promise.reject(new Error("wait requires status=idle"));
+              return Promise.resolve({ matched: true });
+            }
             if (key === "threads.output") return Promise.resolve({ output: guideOutput ?? "" });
             return Promise.resolve({});
           },

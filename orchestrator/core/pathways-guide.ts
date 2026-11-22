@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { guideDecisionOptions, guideSchema, type PathwaysGuide } from "../contract.ts";
 import type { PathwaysDecisionDraft, PathwaysMap, PathwaysTicket } from "./pathways.ts";
 import { DEFAULT_PROVIDER, spawnSelection } from "./provider.ts";
@@ -58,25 +59,8 @@ const GUIDE_SCHEMA_SPEC = `Schema (JSON object only, no markdown prose, no extra
 }`;
 
 export type GuideSdk = {
-  providers: Parameters<typeof spawnSelection>[0];
-  threads: {
-    spawn(input: {
-      title?: string;
-      projectId: string;
-      environment: { type: "host"; hostId: string; workspace: { type: "personal" } };
-      providerId: string;
-      model?: string;
-      reasoningLevel?: string;
-      permissionMode: "accept-edits";
-      parentNotifications: "off";
-      prompt: string;
-      pluginMetadata: Record<string, unknown>;
-    }): Promise<{ id: string }>;
-    wait(input: { threadId: string; state: "idle"; timeoutMs: number }): Promise<{ matched: boolean }>;
-    output(input: { threadId: string }): Promise<{ output: string }>;
-    stop(input: { threadId: string }): Promise<unknown>;
-    archive(input: { threadId: string }): Promise<unknown>;
-  };
+  providers: BbPluginApi["sdk"]["providers"];
+  threads: Pick<BbPluginApi["sdk"]["threads"], "spawn" | "wait" | "output" | "stop" | "archive">;
 };
 
 type GuideRunOptions = {
@@ -234,10 +218,10 @@ export async function runGuide(
     throw error;
   });
   try {
-    const waited = await bounded(sdk.threads.wait({ threadId: thread.id, state: "idle", timeoutMs: opts.timeoutMs ?? GUIDE_MS }));
-    if (!waited.matched) throw new DOMException("Pathways Guide timed out", "TimeoutError");
-    const { output } = await bounded(sdk.threads.output({ threadId: thread.id }));
-    const guide = parseGuide(output);
+    const waited = await bounded(sdk.threads.wait({ threadId: thread.id, status: "idle", timeoutMs: opts.timeoutMs ?? GUIDE_MS, signal }));
+    if (!waited?.matched) throw new DOMException("Pathways Guide timed out", "TimeoutError");
+    const { output } = await bounded(sdk.threads.output({ threadId: thread.id, signal }));
+    const guide = parseGuide(output ?? "");
     return guide ? { guide, error: null } : { guide: null, error: GUIDE_PARSE_ERROR };
   } finally {
     await close(thread.id);
