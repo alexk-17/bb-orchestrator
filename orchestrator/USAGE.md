@@ -41,8 +41,9 @@ pick from (Esc cancels it); the view button at the left of a pane's header chang
 - **Chat**: the CoS's own chat.
 - **Projects**: each project's lead chat, goal, what needs you, what blocks it, its threads, PRs and record. Its page
   shows the Timeline, the Flow and the Dependencies on one scroll.
-  - **Scope**: projects and tasks being scoped with their lead. It shows only while something waits there.
-  - **Pathways**: a project's Linear ticket map, once `linearApiKey` is set.
+  - **Scoping**: a project or task being scoped with its lead sits under its project's row (the chevron shows or hides
+    it; open while something waits there). Click one to open its cards and the lead's chat.
+  - **Pathways**: a project's dependency and what's-next map, built locally from its plan, threads, PRs and cards (or from Linear once `linearApiKey` and `linearProjectId` are set).
 - **Reviews**: your open PRs and the review ask to paste (once `githubLogin` is set), then your team boards and the
   CodeRabbit queue once each is in use. A board's card opens it.
 - **Tools**: **Rules** (standing answers), **Activity** (mail, dead letters, agents, decisions) and this page.
@@ -78,7 +79,7 @@ Press **?** on the page for the full list.
 | `pushNeedsYou` | on | A desktop or web push when a card enters Needs you. |
 | `hiddenTabs` | empty | Tabs to hide, by id or label, comma-separated. |
 | `showGameBoy`, `showCloud` | off | Turn on Game Boy or Cloud (Tools). |
-| `linearApiKey`, `linearWorkspace` | empty | Pathways, and Linear ids that link. |
+| `linearApiKey`, `linearWorkspace` | empty | Optional Linear maps in Pathways, and Linear ids that link. |
 | `githubLogin`, `reviewChannel` | empty | Open PRs and its review ask. |
 | `reviewQueueDryRun` | on | CodeRabbit's queue shows what it would post, and posts nothing. |
 | `pokemon` | off | A Pokémon per agent that evolves as it levels. |

@@ -10,7 +10,7 @@ import { DeliverableCard, inReview, proofSrc } from "./deliverables.tsx";
 import { gate, stage, useGate, write } from "./store.ts";
 import { admit, canSend, imageFiles } from "./lead-images.ts";
 import { AttachButton, ImageThumbs, attached, base64, useDrop, type Attached } from "./image-attach.tsx";
-import { ReplyAction, ReplyButton, ReplyComposer, ReplyField, ReplyHint } from "./reply-composer.tsx";
+import { CompactBar, ReplyField, ReplyHint } from "./reply-composer.tsx";
 import { useIdentity } from "./identity.ts";
 import { Button } from "./ui/button.tsx";
 import { Kbd } from "./ui/kbd.tsx";
@@ -20,6 +20,8 @@ import { styleHref } from "./style-href.ts";
 import { answerCss } from "./answer-ui.tsx";
 import { VoiceMic } from "../voice/app/voice-mic.tsx";
 import { StartHere } from "./start-here.tsx";
+import { ImagePopout } from "./image-popout.tsx";
+import { openInBb } from "./open-proof.ts";
 
 export type FeedFilter = "all" | "needs" | "delivered" | "alerts";
 const FILTERS: { id: FeedFilter; label: string }[] = [
@@ -66,9 +68,18 @@ const css = /* css */ `
 [data-orch] [data-feed] .k-post[data-opened] { background: var(--accent); }
 [data-orch] [data-feed] .k-post__dot { position: absolute; left: 8px; top: 26px; width: 6px; height: 6px; border-radius: 9999px; background: var(--primary); }
 [data-orch] [data-feed] .k-post[data-read] { opacity: 0.88; }
-/* a phone: the face on the pane's 16 px gutter, the new dot in it */
-[data-orch][data-phone] [data-feed] .k-post { padding: 12px 16px 8px; }
-[data-orch][data-phone] [data-feed] .k-post__dot { left: 5px; }
+/* a phone: the face on the pane's 16 px gutter, the new dot in it. Denser since 2026-11-21 (the owner: "too much wasted
+   space and it's very cluttered"; the feed is "just a quick scroll to see status updates"): a 24 px face, one meta
+   line, the title and its text clamped, the shot a small square beside the title, and the post opens on a tap */
+[data-orch][data-phone] [data-feed] .k-post { grid-template-columns: 24px minmax(0, 1fr); column-gap: 10px; padding: 8px 16px; }
+[data-orch][data-phone] [data-feed] .k-post__dot { left: 5px; top: 18px; }
+[data-orch][data-phone] [data-feed] .k-thumb { width: 56px; height: 56px; margin-top: 4px; overflow: hidden; border: 1px solid var(--border); border-radius: calc(var(--radius, 8px)); }
+[data-orch][data-phone] [data-feed] .k-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* Needs you and Delivered drawn in Home: 8 px under the header row and between cards, not 16 and 12 */
+[data-orch][data-phone] [data-feed] [data-home-body] { padding-top: 8px; }
+[data-orch][data-phone] [data-feed] [data-home-body] [data-list] { gap: 8px; }
+[data-orch][data-phone] [data-feed] [data-earlier] { padding: 8px 16px 4px; }
+[data-orch][data-phone] [data-feed] .k-newbar { display: flex; width: 100%; min-height: 44px; align-items: center; justify-content: center; gap: 6px; border-bottom: 1px solid var(--border); background: var(--accent); font-size: 13px; }
 [data-orch] [data-feed] .k-thread { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
 [data-orch] [data-feed] .k-reply { display: grid; grid-template-columns: 28px minmax(0, 1fr); column-gap: 10px; }
 [data-orch] [data-feed] .k-poll { display: flex; width: 100%; min-height: 44px; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid var(--border); border-radius: calc(var(--radius, 8px)); padding: 8px 12px; text-align: left; background: var(--background); }
@@ -132,6 +143,8 @@ export function FeedView({ q, filter, item, onItem, body, onItemOpen, width, age
   const opened = item;
   const [replying, setReplying] = useState<string | null>(null);
   const phone = width > 0 && width < PHONE;
+  // bb's touch phone, never a pane's width: what only a phone draws (the new bar) keeps a narrow desktop pane as it was
+  const touch = useTouchPhone();
   const filtered = experimental_useRpcQuery({ contract: rpcContract, method: "feed", input: { cursor: null, filter }, enabled: filter !== "all" && !body });
   const live = filter === "all" ? q.data : filtered.data;
   // no reflow under a pressed pointer or while a write holds the page: draw what was drawn last
@@ -233,7 +246,7 @@ export function FeedView({ q, filter, item, onItem, body, onItemOpen, width, age
       <style href={styleHref("orch-answer", answerCss)} precedence="default">
         {answerCss}
       </style>
-      {waiting > 0 ? (
+      {waiting > 0 && !touch ? (
         <div className="k-pill">
           <Btn
             tone="primary"
@@ -317,6 +330,22 @@ export function FeedView({ q, filter, item, onItem, body, onItemOpen, width, age
         {css}
       </style>
       {header}
+      {/* a phone: the new posts' bar sits under the header row, in the flow, so it never covers a post */}
+      {touch && waiting > 0 && !body && view ? (
+        <Button
+          type="button"
+          variant="ghost"
+          className="k-newbar h-11 rounded-none font-normal"
+          data-feed-pill={String(waiting)}
+          onClick={() => {
+            adopt();
+            scroller.current?.scrollTo({ top: 0 });
+          }}
+        >
+          <ArrowUp className="size-4" aria-hidden />
+          {waiting} new
+        </Button>
+      ) : null}
       <div className="flex min-h-0 flex-1">
         {/* never sideways (2026-11-21): wide content scrolls in its own box (diagrams, code); the page itself only up and down */}
         <div ref={scroller} className={cx("min-h-0 overflow-x-hidden overflow-y-auto", !phone && pane ? "w-[456px] shrink-0 border-r" : "min-w-0 flex-1")} data-feed-scroll="">
@@ -357,6 +386,21 @@ function Head({ p, now, cosTitle }: { p: { author: string; at: number; to?: stri
   );
 }
 
+/** Head on a phone's one meta line: the name, then its project or recipient, then the age, cut rather than wrapped. */
+function MetaWho({ p, now, cosTitle }: { p: { author: string; at: number; to?: string | null; kind?: string }; now: number; cosTitle: string }) {
+  const who = nameOf(p.author, cosTitle);
+  const to = p.to ? nameOf(p.to, cosTitle) : null;
+  const sub = to ? `→ ${to.name}${to.sub ? ` · ${to.sub}` : ""}` : who.sub ? (p.kind === "dead" ? "escalated" : who.sub) : null;
+  // the name and age never cut; the project cuts before them, and the step text after it (shrink 3) cuts first
+  return (
+    <>
+      <span className="shrink-0 font-semibold" data-meta-who="">{who.name}</span>
+      {sub ? <span className="min-w-[4ch] truncate text-muted-foreground">{sub}</span> : null}
+      <span className="shrink-0 text-muted-foreground">· {ago(p.at, now)}</span>
+    </>
+  );
+}
+
 function PostView({ p, now, faces, cosTitle, opened, armed, check, after, onOpen, onOpenProject, replying, setReplying }: {
   p: FeedPost;
   now: number;
@@ -375,8 +419,12 @@ function PostView({ p, now, faces, cosTitle, opened, armed, check, after, onOpen
   const busy = gate.lock !== null;
   const chip = chipOf(p);
   const phone = useTouchPhone();
+  const navigate = useBbNavigate();
   // nothing on the actions row but Open: no reply line, no review, no note
   const onlyOpen = !p.line && p.deliverable?.state !== "review" && !p.held;
+  // a phone keeps the actions row only for what can't live on the meta line: review buttons, or a note about the line
+  const noLive = !!p.line && !p.lineLive && p.line.startsWith("lead:");
+  const phoneRow = p.deliverable?.state === "review" || noLive || (p.held && !!p.line);
   const answer = (option: string) => {
     if (!p.card || busy || !check()) return;
     const body: z.input<typeof answerBody> = { id: p.card.id, rev: p.card.rev, option, text: null, via: via() };
@@ -401,10 +449,30 @@ function PostView({ p, now, faces, cosTitle, opened, armed, check, after, onOpen
       if (answers.length) mark(WRITES.directSeen, { slug: p.line.slice(5), upTo: Math.max(...answers) } satisfies z.input<typeof directSeenBody>);
     }
   };
+  // on a phone the reply count sits on the meta line (a 44 px target that adds no height) and the post opens on a tap
+  const reply = p.line ? (
+    <Btn tone="ghost" size="sm" className={phone ? "relative z-10 -mt-2 -mb-4 -mr-2 size-11 shrink-0 gap-1 px-0 text-muted-foreground" : "px-2"} data-reply-count={String(p.replies)} aria-expanded={expanded} aria-label={phone ? "Replies" : undefined} onClick={expand} icon={<MessageCircle />}>
+      {p.replies > 0 ? String(p.replies) : ""}
+    </Btn>
+  ) : null;
+  const tone = p.needsOwner || p.kind === "alarm" || p.kind === "dead" ? "border-(--orch-danger)/30 bg-(--orch-danger)/10 text-(--orch-danger)" : "bg-muted text-muted-foreground";
+  const title = p.title ? (
+    <Button type="button" variant="link" className={phone ? cx("h-auto p-0 font-normal whitespace-normal mt-1 block w-full text-left text-sm leading-snug font-semibold text-foreground", p.text ? "line-clamp-1" : "line-clamp-2") : "h-auto p-0 font-normal whitespace-normal mt-1 block w-full text-left text-[15px] leading-snug font-semibold text-foreground"} onClick={onOpen} data-open-post={p.key}>
+      {p.title}
+    </Button>
+  ) : null;
+  // a phone clamps harder, as a mail list does: with a text line, the title and the text one line each; alone, either
+  // takes two (a message keeps three); the post opens on a tap
+  const clamp = phone ? (p.kind === "message" ? "line-clamp-3" : p.title ? "line-clamp-1" : "line-clamp-2") : p.kind === "message" ? "" : "line-clamp-3";
+  const text = p.text ? (
+    <p className={cx("m-0 mt-0.5", phone ? "text-sm text-muted-foreground" : "text-[15px]", "leading-snug [overflow-wrap:anywhere]", clamp)} onClick={p.kind === "message" ? undefined : onOpen}>
+      {p.kind === "merge" ? <a href={p.url ?? undefined} target="_blank" rel="noreferrer" className="underline">{p.text}</a> : p.text}
+    </p>
+  ) : null;
   return (
     <article
       className="k-post"
-      onClick={phone && onlyOpen ? (e) => ((e.target as HTMLElement).closest("button, a, input, textarea") ? undefined : onOpen()) : undefined}
+      onClick={phone && (onlyOpen || !phoneRow) ? (e) => ((e.target as HTMLElement).closest("button, a, input, textarea") ? undefined : onOpen()) : undefined}
       data-post={p.key}
       data-kind={p.kind}
       data-card={p.card?.id ?? p.deliverable?.id ?? p.key}
@@ -414,36 +482,68 @@ function PostView({ p, now, faces, cosTitle, opened, armed, check, after, onOpen
     >
       {p.isNew ? <span className="k-post__dot" aria-label="new" data-new="" /> : null}
       <div className="pt-0.5">
-        <AgentFace face={faces.get(p.author) ?? null} address={p.author} size={32} />
+        <AgentFace face={faces.get(p.author) ?? null} address={p.author} size={phone ? 24 : 32} />
       </div>
       <div className="min-w-0">
-        <Head p={p} now={now} cosTitle={cosTitle} />
-        {chip || p.outcome || (p.deliverable && p.deliverable.rev > 1) ? (
-          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
-            {chip ? <span className={cx("rounded-full border px-2 py-px", p.needsOwner || p.kind === "alarm" || p.kind === "dead" ? "border-(--orch-danger)/30 bg-(--orch-danger)/10 text-(--orch-danger)" : "bg-muted text-muted-foreground")} data-chip="">{chip}</span> : null}
-            {p.deliverable && p.deliverable.rev > 1 ? <span className="rounded border bg-muted px-1.5 text-muted-foreground">rev {p.deliverable.rev}</span> : null}
-            {p.outcome ? <span className="text-muted-foreground" data-outcome="">{p.outcome}{p.held ? " · on hold" : ""}</span> : null}
-          </div>
-        ) : null}
-        {p.status ? <Steps steps={p.status.steps} /> : null}
-        {p.title ? (
-          <Button type="button" variant="link" className="h-auto p-0 font-normal whitespace-normal mt-1 block w-full text-left text-[15px] leading-snug font-semibold text-foreground" onClick={onOpen} data-open-post={p.key}>
-            {p.title}
-          </Button>
-        ) : null}
-        {p.text ? (
-          <p className={cx("m-0 mt-0.5 text-[15px] leading-snug [overflow-wrap:anywhere]", p.kind === "message" ? "" : "line-clamp-3")} onClick={p.kind === "message" ? undefined : onOpen}>
-            {p.kind === "merge" ? <a href={p.url ?? undefined} target="_blank" rel="noreferrer" className="underline">{p.text}</a> : p.text}
-          </p>
-        ) : null}
-        {p.self ? <MsgState m={p.self} after={after} /> : null}
-        {p.deliverable?.thumb ? (
-          <Button type="button" variant="ghost" className="k-media block h-auto w-full p-0 text-left font-normal whitespace-normal" onClick={onOpen} data-thumb={p.deliverable.thumb}>
-            <img src={proofSrc(p.deliverable.thumb)} alt="" loading="lazy" decoding="async" />
-            <span className="flex items-center gap-1.5 px-3 py-2 text-xs text-muted-foreground">
-              <ImageIcon className="size-3.5" aria-hidden />1 of {p.deliverable.shots} screenshot{p.deliverable.shots === 1 ? "" : "s"}
+        {phone ? (
+          // one meta line: who, where, when, then the chip and the step; the rest is cut, never wrapped
+          // the words clip inside their own box, so the reply button beside it keeps its whole 44 px to the touch
+          <div className="flex min-h-5 min-w-0 items-center gap-1.5 text-sm whitespace-nowrap" data-meta-line="">
+            <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+              <MetaWho p={p} now={now} cosTitle={cosTitle} />
+              {chip ? <span className={cx("shrink-0 rounded-full border px-1.5 text-xs leading-4", tone)} data-chip="">{chip}</span> : null}
+              {p.deliverable && p.deliverable.rev > 1 ? <span className="shrink-0 text-xs text-muted-foreground">rev {p.deliverable.rev}</span> : null}
+              {p.outcome ? <span className="min-w-0 shrink-[3] truncate text-xs text-muted-foreground" data-outcome="">{p.outcome}{p.held ? " · on hold" : ""}</span> : null}
             </span>
-          </Button>
+            {reply}
+          </div>
+        ) : (
+          <>
+            <Head p={p} now={now} cosTitle={cosTitle} />
+            {chip || p.outcome || (p.deliverable && p.deliverable.rev > 1) ? (
+              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
+                {chip ? <span className={cx("rounded-full border px-2 py-px", tone)} data-chip="">{chip}</span> : null}
+                {p.deliverable && p.deliverable.rev > 1 ? <span className="rounded border bg-muted px-1.5 text-muted-foreground">rev {p.deliverable.rev}</span> : null}
+                {p.outcome ? <span className="text-muted-foreground" data-outcome="">{p.outcome}{p.held ? " · on hold" : ""}</span> : null}
+              </div>
+            ) : null}
+          </>
+        )}
+        {/* the step bar: on a phone only when no "step N of M" already says where it is */}
+        {p.status && !(phone && p.outcome) ? <Steps steps={p.status.steps} /> : null}
+        {phone ? (
+          <div className="flex min-w-0 gap-2.5" data-post-body="">
+            <div className="min-w-0 flex-1">
+              {title}
+              {text}
+            </div>
+            {p.deliverable?.thumb ? (
+              // one tap on the shot pops it out full size, as on the web (public PR #17); the title, the text and the
+              // rest of the post still open it
+              <div className="k-thumb h-14 shrink-0" data-thumb={p.deliverable.thumb}>
+                <ImagePopout src={proofSrc(p.deliverable.thumb)} caption={p.title ?? "Screenshot"} className="block size-full" sidePanel={p.deliverable.thumbFile ? () => openInBb(navigate, p.deliverable!.thumbFile!) : undefined}>
+                  <img src={proofSrc(p.deliverable.thumb)} alt={p.title ?? "Screenshot"} loading="lazy" decoding="async" />
+                </ImagePopout>
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <>
+            {title}
+            {text}
+          </>
+        )}
+        {p.self ? <MsgState m={p.self} after={after} /> : null}
+        {p.deliverable?.thumb && !phone ? (
+          <div className="k-media" data-thumb={p.deliverable.thumb}>
+            {/* the picture pops out full size on one click (image-popout.tsx); the line under it opens the post */}
+            <ImagePopout src={proofSrc(p.deliverable.thumb)} caption={p.title ?? "Screenshot"} className="block" sidePanel={p.deliverable.thumbFile ? () => openInBb(navigate, p.deliverable!.thumbFile!) : undefined}>
+              <img src={proofSrc(p.deliverable.thumb)} alt={p.title ?? "Screenshot"} loading="lazy" decoding="async" />
+            </ImagePopout>
+            <Button type="button" variant="ghost" className="flex h-auto w-full items-center justify-start gap-1.5 rounded-none px-3 py-2 text-left text-xs font-normal whitespace-normal text-muted-foreground" onClick={onOpen} data-thumb-open="">
+              <ImageIcon className="size-3.5" aria-hidden />1 of {p.deliverable.shots} screenshot{p.deliverable.shots === 1 ? "" : "s"}
+            </Button>
+          </div>
         ) : null}
         {p.card && p.card.options.length ? (
           <div className="mt-2.5 flex flex-col gap-2" data-poll="">
@@ -461,13 +561,9 @@ function PostView({ p, now, faces, cosTitle, opened, armed, check, after, onOpen
           </div>
         ) : null}
         {/* a phone: Open alone on a row of its own is dead space; the post itself opens on a tap */}
-        {!(phone && onlyOpen) ? (
+        {!(phone && (onlyOpen || !phoneRow)) ? (
         <div className="mt-2 flex flex-wrap items-center gap-1.5" data-actions="">
-          {p.line ? (
-            <Btn tone="ghost" size="sm" className="px-2" data-reply-count={String(p.replies)} aria-expanded={expanded} onClick={expand} icon={<MessageCircle />}>
-              {p.replies > 0 ? String(p.replies) : ""}
-            </Btn>
-          ) : null}
+          {phone ? null : reply}
           {p.deliverable?.state === "review" ? (
             <>
               <Btn tone="primary" size="sm" className="rounded-full" data-approve={p.deliverable.id} data-armed={String(armed)} disabled={busy} onClick={approve}>
@@ -504,9 +600,10 @@ function PostView({ p, now, faces, cosTitle, opened, armed, check, after, onOpen
               replying ? (
                 <ReplyBox p={p} cosTitle={cosTitle} after={after} onDone={() => setReplying(false)} focus />
               ) : (
-                <Button type="button" variant="outline" className="flex h-auto min-h-11 w-full items-center justify-start gap-2.5 rounded-full px-3 text-left text-sm font-normal text-muted-foreground" data-reply-open={p.key} onClick={() => setReplying(true)}>
-                  <AgentFace face={null} address="person" size={20} />
-                  {replyTo(p.line, cosTitle)}
+                // closed, the reply bar looks like the bar's own field (2026-11-21, the owner: every text bar like the box
+                // to a lead): bordered, rounded like the field, no avatar; a 44 px tap target on a phone
+                <Button type="button" variant="outline" className="flex h-auto min-h-11 w-full min-w-0 items-center justify-start rounded-md px-3 text-left text-base font-normal text-muted-foreground md:min-h-9 md:text-[15px]" data-reply-open={p.key} onClick={() => setReplying(true)}>
+                  <span className="truncate">{replyTo(p.line, cosTitle)}</span>
                 </Button>
               )
             ) : null}
@@ -616,7 +713,12 @@ const replyTo = (line: string, cosTitle: string) => {
 const LEAD_REPLY_RULES = "Goes straight to the lead; the CoS gets a copy. It doesn't answer a card, and merges, production changes and public pushes still need theirs. For 48 h it wins over a CoS instruction on its point.";
 const CHIEF_REPLY_RULES = "Tracked: the CoS answers it here, in this conversation.";
 
-/** The reply box under a post (D6): a direct message to its lead (the CoS copied), or a tracked one to the CoS. */
+/**
+ * The reply box under a post (D6): a direct message to its lead (the CoS copied), or a tracked one to the CoS.
+ * 2026-11-21 (the owner: every text bar "back to the same one that's there for the talk directly to lead"): the compact
+ * bar, a bordered field with attach and Reply beside it; under it, one muted line, always mounted: what it is about,
+ * the one hint, and Cancel.
+ */
 function ReplyBox({ p, cosTitle, after, onDone, focus = false }: { p: FeedPost; cosTitle: string; after: () => void; onDone?: () => void; focus?: boolean }) {
   const line = p.line!;
   const toLead = line.startsWith("lead:");
@@ -664,7 +766,7 @@ function ReplyBox({ p, cosTitle, after, onDone, focus = false }: { p: FeedPost; 
     onDone?.();
   };
   return (
-    <ReplyComposer
+    <CompactBar
       data-reply-box={p.key}
       data-line={line}
       {...drop}
@@ -691,30 +793,30 @@ function ReplyBox({ p, cosTitle, after, onDone, focus = false }: { p: FeedPost; 
           }}
         />
       }
-      tools={
-        <>
-          <AttachButton onFiles={attach} disabled={staging} data={{ "data-reply-attach": "" }} />
-          {p.deliverable ? <span className="rounded border bg-muted px-1.5 text-xs text-muted-foreground">about rev {p.deliverable.rev}</span> : null}
-        </>
-      }
-      // the one hint (D6): what the reply is; the rest of the rule is its detail
-      hint={
-        <ReplyHint data-reply-hint="" detail={toLead ? LEAD_REPLY_RULES : CHIEF_REPLY_RULES}>
-          {toLead ? "Not an approval" : "Tracked"}
-        </ReplyHint>
-      }
       actions={
         <>
-          {onDone ? <ReplyAction onClick={onDone}>Cancel</ReplyAction> : null}
-          <ReplyButton data-reply-send={p.key} disabled={busy || !canSend(text, images.length)} title="Reply (⌘/Ctrl+Enter)" onClick={() => void send()}>
+          <AttachButton onFiles={attach} disabled={staging} data={{ "data-reply-attach": "" }} />
+          <Btn tone="primary" data-reply-send={p.key} disabled={busy || !canSend(text, images.length)} title="Reply (⌘/Ctrl+Enter)" onClick={() => void send()}>
             {staging ? "Sending…" : "Reply"}
-          </ReplyButton>
+          </Btn>
         </>
       }
     >
       <ImageThumbs images={images} refused={refused} onRemove={(key) => setImages((cur) => cur.filter((i) => i.key !== key))} disabled={staging} data="feed" />
-      {error ? <p className="m-0 mt-1 text-xs text-(--orch-danger)" role="alert">{error}</p> : null}
-    </ReplyComposer>
+      {error ? <p className="m-0 text-xs text-(--orch-danger)" role="alert">{error}</p> : null}
+      <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground" data-reply-meta="">
+        {p.deliverable ? <span className="rounded border bg-muted px-1.5 text-xs text-muted-foreground">about rev {p.deliverable.rev}</span> : null}
+        {/* the one hint (D6): what the reply is; the rest of the rule is its detail */}
+        <ReplyHint data-reply-hint="" detail={toLead ? LEAD_REPLY_RULES : CHIEF_REPLY_RULES}>
+          {toLead ? "Not an approval" : "Tracked"}
+        </ReplyHint>
+        {onDone ? (
+          <Button type="button" variant="ghost" size="xs" className="ml-auto h-6 px-1.5 text-xs font-normal text-muted-foreground" data-reply-cancel="" onClick={onDone}>
+            Cancel
+          </Button>
+        ) : null}
+      </div>
+    </CompactBar>
   );
 }
 

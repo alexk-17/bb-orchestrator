@@ -145,10 +145,9 @@ test("The owner's request for changes reaches the lead in their words and needs 
   assert.throws(() => s.e.personRequestChanges(deliver(s).id, 1, "   "), /say what to change/);
 });
 
-test("only a deliverable the owner sent back can be revised; the revision bumps rev, goes back to review, and closes their request", async () => {
+test("a deliverable the owner sent back can be revised; the revision bumps rev, goes back to review, and closes their request", async () => {
   const s = setup();
   const d = deliver(s);
-  assert.throws(() => deliver(s, proof, d.id), /revise only a deliverable the owner sent back/, "a deliverable in review can't be swapped under the owner");
   s.e.personRequestChanges(d.id, 1, "Centre the button.");
   const other = s.e.register("T-lb", "lead", "beta");
   assert.throws(() => s.e.deliver(other, { title: "t", summary: "s", proof, revises: d.id }, place), /lead:alpha's deliverable/);

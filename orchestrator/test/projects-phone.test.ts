@@ -32,7 +32,7 @@ test("old Scope and Pathways links and saved panes open Projects, at the entry o
   for (const p of ["scope", "scope/kite", "pathways", "pathways/kite"]) assert.equal(fromPath(p, VIEWS).view, "projects", p);
   assert.deepEqual(fromPath("pathways/kite", VIEWS).path, ["kite"], "a Pathways link opens that project's page, which holds Pathways");
   assert.equal(fromPath("scope/kite%2Fst-1a2b", VIEWS).params.scope, "kite/st-1a2b", "a scoping task's entry");
-  assert.equal(fromPath("scope", VIEWS).params.scope, undefined, "bare Scope: the list, with its Scoping group on top");
+  assert.equal(fromPath("scope", VIEWS).params.scope, undefined, "bare Scope: the list, its scoping entries under their projects");
   assert.equal(fromPath("scope/%E0%A4%A", VIEWS).params.scope, undefined, "a broken escape opens the list, not an error");
   const entry = { view: "projects", path: [], params: { scope: "kite/st-1" } };
   assert.deepEqual(fromPath(toPath(entry, VIEWS), VIEWS), entry, "back on Projects, the same entry is open");
@@ -62,7 +62,9 @@ test("on a phone a tapped project opens its own page with a Back row; in a narro
   assert.match(p, /if \(linked && !phone\) return <ProjectDetail /, "web's project page is its history and Pathways, as before");
   assert.match(p, /\{onBack \? <BackRow onBack=\{onBack\}>\{more\}<\/BackRow> : null\}/, "the ⋯ shares the Back row, so no control sits alone on a line");
   assert.match(p, /\{onBack \? <ProjectSections /, "a phone's page holds Timeline, Flow and Dependencies");
-  assert.match(p, /<ScopingRows /, "the Scoping group sits in the list");
+  // 2026-11-22: no Scoping group on top; each project's scoping entries are children of its row, and there is no Open scope button
+  assert.doesNotMatch(p, /ScopingRows|Open scope<|data-group="scoping"/, "no separate Scoping group");
+  assert.match(p, /\{kids\?\.open \? <ScopeKids /, "a project's scoping children sit under its row");
   // Pathways reads Linear: it fetches only once opened
   assert.match(src("app/project-detail.tsx"), /<CollapsibleContent>\{open \? <PathwaysSection /);
   assert.doesNotMatch(src("app.tsx"), /focusedView === "projects" && \(detail/, "the bottom bar is left as it was (the nav-panes pause)");
@@ -82,10 +84,12 @@ test("a project row shows no lead title or type, on phone and web", () => {
 test("a phone's project row sits on the 16 px gutter: name and age over state, working and one count", () => {
   const p = src("app/projects.tsx");
   const phone = (sel: string) => new RegExp(`\\[data-orch\\] \\.orch-cc\\[data-phone\\] ${sel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\{([^}]*)\\}`).exec(p)?.[1] ?? "";
-  assert.match(phone(".k-prow"), /padding: 10px 0;/, "no inset of its own: the pane's 16 px is the gutter");
+  assert.match(phone(".k-prow"), /min-height: 44px; padding: 4px 0;/, "no inset of its own: the pane's 16 px is the gutter; 4 px over and under (2026-11-21, denser), never under the 44 px tap target");
   assert.match(phone(".k-prow .k-sub"), /flex-wrap: wrap;.*overflow: visible;/, "the working count wraps rather than being cut");
   assert.match(phone(".standing"), /flex-wrap: nowrap;/, "the standing agents take one line");
-  assert.match(phone(".top .filters"), /width: 100%;/, "the filter row fits the screen");
+  // 2026-11-21 (the lead's call, for the owner's "too much wasted space"): the filters scroll sideways in one row with the
+  // search behind a 44 px icon at its end, so the projects start higher
+  assert.match(p, /<ScrollRow className="flex-1">\{filters\}<\/ScrollRow>/, "the filter row fits the screen by scrolling");
   assert.match(p, /data-phone=\{phone \|\| undefined\}/, "only bb's phone layout gets them");
   assert.match(src("app/panes.tsx"), /"px-4 pt-4"/, "the pane's one gutter");
 });
@@ -101,4 +105,23 @@ test("on a phone's project page, focusing the message box keeps the owner on tha
   assert.ok(phonePage, "the phone's project page is a detail panel");
   assert.match(phonePage[1]!, /\bpage: true\b/, "marked as the page itself");
   assert.match(s, /onPick=\{o\.page \? \(\) => \{\} : \(\) => onPick\(p\.slug\)\}/, "the page's pick routes nowhere");
+});
+
+// 1.40.13 keeps every control a finger uses at 44 px on a phone; public PR #22's chevron was 32 px (size icon-sm)
+test("on a phone a project's scoping chevron and its child rows are 44 px targets", () => {
+  const p = src("app/projects.tsx");
+  assert.match(p, /\[data-orch\] \.orch-cc\[data-phone\] \.k-prow \.k-fold \{ width: 44px; height: 44px;/);
+  assert.match(p, /\[data-orch\] \.orch-cc\[data-phone\] \.k-plist\[data-folds\] > \.k-prow \{ grid-template-columns: 32px minmax\(0, 1fr\) auto 44px; \}/, "its column fits it");
+  assert.match(p, /\[data-orch\] \.orch-cc\[data-phone\] \.k-krow \{ min-height: 44px;/);
+});
+
+// public PR #22's chevron column narrowed the row's text, and the web's chip line cut its second chip mid-word ("Scc…").
+// Chips wrap whole onto a second line instead, on the web as on a phone; nothing in the line is clipped.
+test("a project row's chips wrap whole rather than being cut, on the web too", () => {
+  const p = src("app/projects.tsx");
+  const web = p.match(/^\[data-orch\] \.orch-cc \.k-prow \.k-sub \{[^}]*\}/m)?.[0] ?? "";
+  assert.match(web, /flex-wrap: wrap;/);
+  assert.match(web, /overflow: visible;/);
+  assert.doesNotMatch(web, /overflow: hidden/, "a clipped chip line cuts a chip mid-word");
+  assert.match(p, /^\[data-orch\] \.orch-cc \.k-prow \.k-sub > \* \{ white-space: nowrap; \}/m, "each chip stays one piece");
 });

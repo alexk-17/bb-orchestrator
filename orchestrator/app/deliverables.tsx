@@ -7,28 +7,32 @@
 // and videos inline at full width, the rest as rows) with Open folder; the Files filter lists every file (past-view.tsx).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Markdown, experimental_useRpcQuery, useBbNavigate, useRealtime, useSdk } from "@get-bb/plugin-sdk/app";
+import { X } from "lucide-react";
 import { manualSectionOrder, sidebarOrder } from "../core/project-order.ts";
 import { z } from "zod";
 import { CHANGED_CHANNEL, PROOF_ROUTE, WRITE_BASE, WRITES, rpcContract, type Deliverables, type Outputs, type ProjectOrder, type approveBody, type requestChangesBody } from "../contract.ts";
 import { ItemGroup } from "./ui/item.tsx";
+import { Button } from "./ui/button.tsx";
 import { Skeleton } from "./ui/skeleton.tsx";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card.tsx";
-import { ReplyAction, ReplyButton, ReplyComposer, ReplyField } from "./reply-composer.tsx";
+import { CompactBar, ReplyField } from "./reply-composer.tsx";
 import { cn } from "./ui/utils.ts";
 import { Fold } from "./answer-ui.tsx";
 import { AgentFace } from "./face.tsx";
 import { personaName } from "./faces.ts";
 import { Blocks } from "./blocks.tsx";
-import { lessText } from "./less-text.ts";
+import { lessText, plainSummary } from "./less-text.ts";
 import { GALLERY, Points, SHOT } from "./visual-blocks.tsx";
 import { prKind } from "./palette.ts";
 import { openInBb } from "./open-proof.ts";
 import { ProofLink } from "./proof-link.tsx";
+import { ImagePopout } from "./image-popout.tsx";
 import { gate, useGate, write } from "./store.ts";
 import { APPROVE_MS, pressApprove } from "./keys.ts";
 import { keyState, say, emitKeys } from "./key-state.ts";
 import { useViewKeys } from "./key-view.ts";
 import { age } from "./lanes.ts";
+import { useTouchPhone } from "./phone.ts";
 import { Btn, EmptyState, Kind, PageError, ReadState, Who, when } from "./ui.tsx";
 import { FileFull, FoldedOutputs, OpenFolder } from "./files.tsx";
 import { START, deliverablesTab, fold, offBoards, shownDeliverable, shownRevision, type FileItem, type View } from "./past.ts";
@@ -104,10 +108,10 @@ export function ProofView({ p }: { p: Proof }) {
   if (p.kind === "image")
     return (
       <figure className="m-0" data-proof={p.id}>
-        {/* full size in a bb pane */}
-        <ProofLink open={p} fallback={file} className={cn(SHOT, "inline-block max-w-full")}>
-          <img src={proofSrc(p.id)} alt={p.caption} loading="lazy" decoding="async" className="block h-auto max-h-80 w-auto max-w-full cursor-zoom-in" />
-        </ProofLink>
+        {/* one click pops it out full size (image-popout.tsx); a right-click opens it in bb's side panel or a new tab */}
+        <ImagePopout src={proofSrc(p.id)} caption={p.caption} sidePanel={() => openInBb(navigate, p)} className={cn(SHOT, "inline-block max-w-full")}>
+          <img src={proofSrc(p.id)} alt={p.caption} loading="lazy" decoding="async" className="block h-auto max-h-80 w-auto max-w-full" />
+        </ImagePopout>
         {caption}
       </figure>
     );
@@ -168,8 +172,11 @@ export function ProofView({ p }: { p: Proof }) {
  * next move: send this to someone"). Empty box: "Done, nothing more" approves and the lead does nothing further. Words
  * in it: "Send to lead" approves and hands the lead those words as an item they must act on and report back on.
  * Request changes opens its own field; the next box's words are never sent as a change request. Off while any write runs.
+ * 2026-11-21, the owner: "we need to fix the text bars for like the 'other' option or request changes back to the same
+ * one that's there for the talk directly to lead". So the change box is the compact bar (reply-composer.tsx): one
+ * bordered field, focused, with a 32 px Cancel (an X) and Send back beside it; in the full card and the phone's closed one.
  */
-function Review({ d, refetchAll }: { d: Deliverable; refetchAll: () => void }) {
+function Review({ d, refetchAll, compact = false }: { d: Deliverable; refetchAll: () => void; compact?: boolean }) {
   const [asking, setAsking] = useState(false);
   const [text, setText] = useState("");
   const [next, setNext] = useState("");
@@ -188,69 +195,92 @@ function Review({ d, refetchAll }: { d: Deliverable; refetchAll: () => void }) {
       setText("");
     }
   };
+  // compact (a phone's closed card): the two answers on one row with 44 px targets; a next move is written in the opened
+  // card. Request changes opens the same change box as the full card
+  if (compact && !asking)
+    return (
+      <div className="mt-2 grid gap-2">
+        <div className="grid grid-cols-2 gap-2" data-review-row="">
+          <Btn className="h-11 w-full px-2 text-[14px]" data-changes={d.id} disabled={busy} onClick={() => setAsking(true)}>
+            Request changes
+          </Btn>
+          <Btn tone="primary" className="h-11 w-full px-2 text-[14px]" data-approve={d.id} disabled={busy} onClick={() => void approve()}>
+            Done, nothing more
+          </Btn>
+        </div>
+        <PageError where={d.id} />
+      </div>
+    );
   return (
     <div className="mt-3 grid gap-2">
       {asking ? (
-        <ReplyComposer
+        <CompactBar
           field={
             <ReplyField
-              id={`changes-${d.id}`}
+              autoFocus
               aria-label="What to change"
               value={text}
               onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  if (!busy && text.trim()) void sendBack();
+                }
+              }}
               maxLength={4000}
-              placeholder="What to change? The lead gets these words and re-delivers"
+              placeholder="What to change?"
               data-changes-text={d.id}
             />
           }
           actions={
             <>
-              <ReplyAction disabled={busy} onClick={() => setAsking(false)}>
-                Cancel
-              </ReplyAction>
-              <ReplyButton data-changes-send={d.id} disabled={busy || !text.trim()} onClick={() => void sendBack()}>
+              <Btn tone="ghost" size="sm" className="text-muted-foreground" aria-label="Cancel" title="Cancel" disabled={busy} onClick={() => setAsking(false)} icon={<X aria-hidden />} />
+              <Btn tone="primary" data-changes-send={d.id} disabled={busy || !text.trim()} onClick={() => void sendBack()}>
                 Send back
-              </ReplyButton>
+              </Btn>
             </>
           }
         />
       ) : (
-        <ReplyComposer
-          field={
-            <ReplyField
-              aria-label="Next move"
-              value={next}
-              onChange={(e) => setNext(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-                  e.preventDefault();
-                  if (!busy && action) void approve();
-                }
-              }}
-              maxLength={4000}
-              // one line to start, growing as it fills
-              placeholder="Next move? e.g. forward this to the team"
-              data-next-text={d.id}
-            />
-          }
-          // said in the row, not only in the button's tooltip: a phone has no hover
-          hint={
-            <span data-approve-hint="" className="text-xs text-muted-foreground">
-              {action ? "Approves it; the lead does this and reports back" : "Closes it; the lead does nothing further"}
-            </span>
-          }
-          actions={
-            <>
-              <ReplyAction variant="outline" data-changes={d.id} disabled={busy} onClick={() => setAsking(true)}>
-                Request changes
-              </ReplyAction>
-              {/* enabled while empty: "Done, nothing more" closes it with no next move */}
-              <ReplyButton data-approve={d.id} data-next-send={action ? d.id : undefined} title={action ? "Approve, and the lead does this next" : "Closes it; the lead does nothing further"} disabled={busy} onClick={() => void approve()}>
-                {action ? "Send to lead" : "Done, nothing more"}
-              </ReplyButton>
-            </>
-          }
-        />
+        <>
+          <ReplyField
+            aria-label="Next move"
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                if (!busy && action) void approve();
+              }
+            }}
+            maxLength={4000}
+            // one line to start, up to about four as it fills. The placeholder fits one line on a 360 px phone: the field
+            // sizes to it, and the longer "Next move? e.g. forward this to the team" made the empty box two lines tall
+            className="max-h-28"
+            placeholder="Next move? (optional)"
+            data-next-text={d.id}
+          />
+          <div className="flex flex-wrap justify-end gap-2">
+            <Btn data-changes={d.id} disabled={busy} onClick={() => setAsking(true)}>
+              Request changes
+            </Btn>
+            {/* enabled while empty: "Done, nothing more" closes it with no next move */}
+            <Btn
+              tone="primary"
+              data-approve={d.id}
+              data-next-send={action ? d.id : undefined}
+              title={action ? "Approve, and the lead does this next" : "Closes it; the lead does nothing further"}
+              disabled={busy}
+              onClick={() => void approve()}
+            >
+              {action ? "Send to lead" : "Done, nothing more"}
+            </Btn>
+          </div>
+          {/* the one muted line, besides the button's title: a phone has no hover. Mounted always; only its words change */}
+          <p data-approve-hint="" className="m-0 text-right text-xs text-muted-foreground">
+            {action ? "Approves it; the lead does this and reports back" : "Closes it; the lead does nothing further"}
+          </p>
+        </>
       )}
       <PageError where={d.id} />
     </div>
@@ -354,12 +384,17 @@ function Settled({ d }: { d: Deliverable }) {
   );
 }
 
-export function DeliverableCard({ d, refetchAll, outputs, outputsAfter }: { d: Deliverable; refetchAll: () => void; outputs: Output[]; outputsAfter: () => void }) {
+export function DeliverableCard({ d, refetchAll, outputs, outputsAfter, closed = false }: { d: Deliverable; refetchAll: () => void; outputs: Output[]; outputsAfter: () => void; closed?: boolean }) {
   const latest = d.revisions.find((r) => r.rev === d.rev) ?? d.revisions[d.revisions.length - 1];
   const proof = latest?.proof ?? [];
   const media = proof.filter((p) => p.kind === "image" || p.kind === "video");
   const rest = proof.filter((p) => p.kind !== "image" && p.kind !== "video");
   const short = latest ? lessText(latest) : null;
+  // `closed`: Delivered's own list on a phone starts each card closed (2026-11-21, the owner: one card filled the whole
+  // screen); a tap opens it. Where a deliverable is already the opened item (the feed's item, Scope, a past one) it is whole
+  const phone = useTouchPhone();
+  const [opened, setOpened] = useState(false);
+  if (closed && phone && !opened) return <CompactCard d={d} summary={latest?.summary ?? d.summary} shot={media.find((m) => m.kind === "image") ?? null} refetchAll={refetchAll} onOpen={() => setOpened(true)} />;
   if (short && latest) return <ShortCard d={d} rev={latest} layout={short} media={media} rest={rest} refetchAll={refetchAll} outputs={outputs} outputsAfter={outputsAfter} />;
   return (
     <Card role="article" data-deliverable={d.state === "review" ? d.id : undefined} data-shown={d.id} className="gap-4 py-5">
@@ -393,6 +428,36 @@ export function DeliverableCard({ d, refetchAll, outputs, outputsAfter }: { d: D
         <History d={d} />
         <FoldedOutputs outputs={outputs} after={outputsAfter} />
       </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * A deliverable closed on a phone: the title (two lines at most) beside a small square of its first screenshot, one
+ * meta line, the summary in two lines, and the two answers. The title, the shot and the summary open the full card.
+ */
+function CompactCard({ d, summary, shot, refetchAll, onOpen }: { d: Deliverable; summary: string; shot: Proof | null; refetchAll: () => void; onOpen: () => void }) {
+  return (
+    <Card role="article" data-deliverable={d.state === "review" ? d.id : undefined} data-shown={d.id} data-layout="compact" className="gap-0 p-3">
+      <div className="flex min-w-0 items-start gap-3">
+        <Button type="button" variant="ghost" className="block h-auto min-h-11 min-w-0 flex-1 p-0 text-left font-normal whitespace-normal hover:bg-transparent" onClick={onOpen} data-open-deliverable={d.id}>
+          <span role="heading" aria-level={3} className="line-clamp-2 text-sm leading-5 font-semibold [overflow-wrap:anywhere]">
+            {d.title}
+          </span>
+          <span className="mt-0.5 block truncate text-xs text-muted-foreground" data-meta-line="">
+            {d.project ?? "No project"} · <span data-compact-state={d.state}>{d.state === "review" ? (d.rev > 1 ? `in review · rev ${d.rev}` : "in review") : STATE_WORD[d.state]}</span> · {age(d.updatedAt, Date.now())} ago
+          </span>
+        </Button>
+        {shot ? (
+          <Button type="button" variant="ghost" className="size-14 shrink-0 overflow-hidden rounded-md border p-0" aria-label={`Open: ${shot.caption}`} onClick={onOpen} data-thumb={shot.id}>
+            <img src={proofSrc(shot.id)} alt="" loading="lazy" decoding="async" className="size-full object-cover object-top" />
+          </Button>
+        ) : null}
+      </div>
+      <p className="m-0 mt-1 line-clamp-2 cursor-pointer text-sm text-muted-foreground [overflow-wrap:anywhere]" onClick={onOpen} data-summary-line="">
+        {plainSummary(summary)}
+      </p>
+      {d.state === "review" ? <Review d={d} refetchAll={refetchAll} compact /> : <Settled d={d} />}
     </Card>
   );
 }
@@ -644,7 +709,7 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
       <div ref={setRoot} data-deliverables-width={width}>
         <div className="flex flex-col gap-4 pb-8" data-layout="column" style={{ maxWidth: 768, marginInline: "auto" }}>
           <ReadState q={q} what="the deliverables" />
-          {off ? null : review.length === 0 ? empty : review.map((r) => <DeliverableCard key={r.d.id} d={r.d} refetchAll={refetchAll} outputs={r.outputs} outputsAfter={refetchOutputs} />)}
+          {off ? null : review.length === 0 ? empty : review.map((r) => <DeliverableCard key={r.d.id} d={r.d} refetchAll={refetchAll} outputs={r.outputs} outputsAfter={refetchOutputs} closed />)}
           <h2 className="m-0 text-base leading-6 font-semibold">{heading}</h2>
           <PastControls tab={tab} view={view} setView={setView} />
           {rows()}

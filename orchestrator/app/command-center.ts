@@ -143,11 +143,14 @@ export const longestWait = (p: Project, now: number) => Math.max(0, ...(p.summar
 const ATTENTION: Record<RowState, number> = { you: 0, blocked: 1, waiting: 2, moving: 3, held: 4, nolead: 5, quiet: 6 };
 const RANK = { urgent: 0, high: 1, normal: 2, low: 3 } as const;
 
-/** By attention: needs you, blocked, the longest wait, moving, then the rest; then priority, then name. */
-export function attentionOrder(lanes: Map<string, Lane[]>, now: number) {
+/**
+ * By attention: needs you, blocked, the longest wait, moving, then the rest; then priority, then name. `forYou`: a
+ * project with more for the owner than its own state says (its scoping children, Projects 2026-11-22) sorts as "you".
+ */
+export function attentionOrder(lanes: Map<string, Lane[]>, now: number, forYou: (p: Project) => number = () => 0) {
   return (a: Project, b: Project) => {
-    const sa = stateOf(a, lanes.get(a.slug));
-    const sb = stateOf(b, lanes.get(b.slug));
+    const sa = forYou(a) > 0 ? "you" : stateOf(a, lanes.get(a.slug));
+    const sb = forYou(b) > 0 ? "you" : stateOf(b, lanes.get(b.slug));
     const wa = longestWait(a, now);
     const wb = longestWait(b, now);
     // a moving project that also waits on something outside sorts with the waiting ones, by how long

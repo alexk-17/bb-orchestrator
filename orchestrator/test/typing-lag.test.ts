@@ -79,3 +79,92 @@ test("no Tailwind class in the plugin compiles to a :has() rule anchored above w
   }
   assert.deepEqual(offenders, [], "a group-has-* or child-styling has-* class makes the whole page restyle on every DOM insert");
 });
+
+// Public PR #22 brought one back by hand (2026-11-22): `.k-plist:has(> .k-prow[data-fold]) > .k-prow`, the same
+// ancestor-anchored :has() as a group-has class, written in a CSS string instead. So the check reads the plugin's own
+// CSS too: a :has() may pick the element it is on, never something under or beside it.
+/**
+ * Each selector in the CSS text whose :has() anchor sits above what it styles: after the :has(...) comes a combinator.
+ * It reads whole rules, not lines (review of public PR #22's landing): a selector runs from the end of the previous
+ * block, declaration or template string to its "{", across line breaks and after other rules on the same line, with CSS
+ * comments taken out first, and each selector of a list judged on its own. A stretch that holds code, a line comment or
+ * a string (";", "}", "/", a backtick, a quote outside an attribute's [ ]) is not a selector, so prose, code and class
+ * strings never match.
+ */
+function ancestorHas(text: string): string[] {
+  const out: string[] = [];
+  // CSS comments go first: a comment inside a selector ("a:has(b) /* x */ c") is still that selector
+  const css = text.replace(/\/\*[\s\S]*?\*\//g, " ");
+  for (let at = css.indexOf(":has("); at >= 0; at = css.indexOf(":has(", at + 5)) {
+    const before = css.slice(0, at);
+    const start = Math.max(...["{", "}", ";", "`"].map((c) => before.lastIndexOf(c) + 1));
+    // the :has( ... ) itself, nested parens included
+    let depth = 0;
+    let end = at + 4;
+    for (; end < css.length; end++) {
+      if (css[end] === "(") depth++;
+      else if (css[end] === ")" && --depth === 0) break;
+    }
+    const brace = css.indexOf("{", end);
+    if (brace < 0) continue;
+    // the selector it sits in, on its own: the list's other selectors don't count either way
+    const lead = css.slice(start, at).split(",").pop()!;
+    let rest = css.slice(end + 1, brace);
+    // code, a line comment or a string is not a selector: a quote is only ever inside an attribute's [ ]
+    const bare = (x: string) => x.replace(/\[[^\]]*\]/g, "");
+    if (/[;{}`/"']/.test(bare(lead)) || /[;}`/"']/.test(bare(rest.split(",")[0]))) continue;
+    // the rest of this selector, up to the next top-level comma of its list
+    let d = 0;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === "(") d++;
+      else if (rest[i] === ")") d--;
+      else if (rest[i] === "," && d <= 0) {
+        rest = rest.slice(0, i);
+        break;
+      }
+    }
+    // closing parens of an enclosing :not( / :is( and more pseudo-classes on the same element are fine; a combinator
+    // followed by another element is not
+    if (/^[^\s>+~]*\s*[>+~\s]\s*[^\s>+~)]/.test(rest.replace(/\s+$/, ""))) out.push(`${lead}${css.slice(at, end + 1)}${rest}`.replace(/\s+/g, " ").trim());
+  }
+  return out;
+}
+
+test("the check catches an ancestor :has() written by hand, and lets a :has() that styles its own element through", () => {
+  assert.deepEqual(ancestorHas("[data-orch] .orch-cc .k-plist:has(> .k-prow[data-fold]) > .k-prow { grid-template-columns: 1fr; }"), ["[data-orch] .orch-cc .k-plist:has(> .k-prow[data-fold]) > .k-prow"]);
+  assert.equal(ancestorHas(".a:hover:not(:has(button:hover)) .grip { color: red; }").length, 1, "inside :not() too");
+  assert.equal(ancestorHas(".a:has(.b) ~ .c { color: red; }").length, 1, "a sibling too");
+  assert.deepEqual(ancestorHas(".footer :has(> .composer) { max-width: 760px; }"), [], "styles the element it is on");
+  assert.deepEqual(ancestorHas(".a:has(.b):hover, .c > .d { color: red; }"), [], "a later selector in the list is not part of it");
+  assert.deepEqual(ancestorHas(".k-plist[data-folds] > .k-prow { color: red; }"), [], "an explicit attribute is fine");
+  assert.equal(ancestorHas(".a,\n.b:has(> .c) .d,\n.e {\n  color: red;\n}").length, 1, "a selector list split over lines");
+  // review of public PR #22's landing: both came back clean from the line-by-line reading
+  assert.equal(ancestorHas(".a:has(.b) .c\n{ color: red; }").length, 1, "the rule's { on the next line");
+  assert.deepEqual(ancestorHas(".a {} .b:has(.c) .d {}"), [".b:has(.c) .d"], "another rule before it on the same line");
+  assert.deepEqual(ancestorHas("// bb's own :has() rules, which restyle the page;\nconst x = () => { return 1; };"), [], "prose and code are not selectors");
+  // the review of 4f3de83: a comment inside the selector, or after the list's comma, hid the rule
+  assert.deepEqual(ancestorHas(".a:has(.b) /* scope */ .c {}"), [".a:has(.b) .c"], "a comment between the :has() and what it styles");
+  assert.deepEqual(ancestorHas(".a:has(.b) .c, /* unrelated */ .d {}"), [".a:has(.b) .c"], "a comment later in the selector list");
+  assert.deepEqual(ancestorHas(".x, .a:has(.b) .c {}"), [".a:has(.b) .c"], "the list's earlier selector doesn't hide it");
+  assert.deepEqual(ancestorHas(".a:has(.b), /* fine */ .c .d {}"), [], "a :has() on its own element, then an ordinary selector");
+  assert.deepEqual(ancestorHas('cn("p-2 [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]", className)} {...props}'), [], "a Tailwind class string is not a rule");
+  assert.deepEqual(ancestorHas('[data-a="x"]:has(.b) [data-c="y"] {}'), ['[data-a="x"]:has(.b) [data-c="y"]'], "quotes inside an attribute's [ ] are still a selector");
+});
+
+// One was in the plugin before this check read handwritten CSS. It is named, with why it stays for now; a new one fails.
+// The pane header's grip lights on hover only. (accent.ts colours bb's own sidebar group labels with one too, but it
+// builds the selector from parts in code, which a reading of the source can't see: a selector put together in code is
+// beyond this check, so review one by hand.)
+const KNOWN_ANCESTOR_HAS = [{ file: "../app/panes.tsx", has: "[data-orch] [data-pane-header]:hover:not(:has(button:hover)) [data-pane-grip]" }];
+
+test("no handwritten CSS in the plugin has a :has() anchored above what it styles", () => {
+  const files = (dir: string): string[] => readdirSync(new URL(dir, import.meta.url)).flatMap((n) => (statSync(new URL(dir + n, import.meta.url)).isDirectory() ? files(`${dir}${n}/`) : /\.(tsx?|css)$/.test(n) ? [`${dir}${n}`] : []));
+  const offenders: string[] = [];
+  for (const f of [...files("../app/"), "../app.tsx"]) {
+    const found = ancestorHas(readFileSync(new URL(f, import.meta.url), "utf8"));
+    for (const sel of found) if (!KNOWN_ANCESTOR_HAS.some((k) => k.file === f && sel.includes(k.has))) offenders.push(`${f}: ${sel}`);
+  }
+  assert.deepEqual(offenders, [], "an ancestor :has() makes every element added or removed on bb's page restyle; give the element an explicit class or attribute");
+  assert.match(projects, /\.k-plist\[data-folds\] > \.k-prow \{/, "the chevron's column follows the list's own attribute (public PR #22)");
+  assert.match(projects, /data-folds=\{folds\(main\)\}/);
+});

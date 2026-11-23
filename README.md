@@ -1,6 +1,6 @@
 # bb-orchestrator
 
-Two plugins for [bb](https://getbb.app), the agent orchestration app:
+Three plugins for [bb](https://getbb.app), the agent orchestration app:
 
 - **Orchestrator** (`orchestrator/`) gives bb threads roles and runs them as a team. A Chief of Staff (CoS) triages, a
   Steward watches the host, each project has a lead, and the leads start threads. Questions come to you as cards with
@@ -11,31 +11,37 @@ Two plugins for [bb](https://getbb.app), the agent orchestration app:
   [orchestrator/gameboy/README.md](orchestrator/gameboy/README.md)).
 - **Usage Meter** (`usage-meter/`) shows your Claude subscription limits as two rings on a sidebar button, plus a
   Usage page that breaks down where the usage went. See [usage-meter/README.md](usage-meter/README.md).
+- **codex-lb** (`codex-lb/`) runs bb's Codex threads through a [codex-lb](https://github.com/Soju06/codex-lb) load
+  balancer. The base URL, API key variable, codex binary, `CODEX_HOME` and model are plugin settings, not wrapper
+  scripts. `bb codex-lb status` reports health, usage and reset credits, and the pool's limits show in bb's Provider
+  usage card. See [codex-lb/README.md](codex-lb/README.md).
 
 Each plugin installs and updates on its own.
 
 ## Requirements
 
-- bb 0.49 or newer for the Orchestrator, 0.39 or newer for Usage Meter.
+- bb 0.49 or newer for the Orchestrator and codex-lb, 0.39 or newer for Usage Meter.
 - `git` on the machine running the bb server (bb clones and builds the plugin on install).
 - The Orchestrator's agents run on bb's Claude Code provider, so you need a Claude account signed in to bb.
 
 ## Install
 
-Add this repository as a bb marketplace, then install either plugin from it:
+Add this repository as a bb marketplace, then install any of the plugins from it:
 
 ```sh
 bb marketplace add git:github.com/alexk-17/bb-orchestrator@main
 bb plugin install orchestrator@bb-orchestrator
 bb plugin install usage-meter@bb-orchestrator
+bb plugin install codex-lb@bb-orchestrator
 ```
 
 Or install straight from git, without the marketplace. Each plugin has its own release tags (`orchestrator-vX.Y.Z`,
-`usage-meter-vX.Y.Z`), so give the plugin's folder and tag prefix:
+`usage-meter-vX.Y.Z`, `codex-lb-vX.Y.Z`), so give the plugin's folder and tag prefix:
 
 ```sh
 bb plugin install git:https://github.com/alexk-17/bb-orchestrator.git@^1.0.0 --subdirectory orchestrator --tag-prefix orchestrator-
 bb plugin install git:https://github.com/alexk-17/bb-orchestrator.git@^0.3.0 --subdirectory usage-meter --tag-prefix usage-meter-
+bb plugin install git:https://github.com/alexk-17/bb-orchestrator.git@^0.1.0 --subdirectory codex-lb --tag-prefix codex-lb-
 ```
 
 bb shows the exact tag and commit it resolved and asks you to confirm. Plugins run with full trust on your machine, so
@@ -139,14 +145,19 @@ so in Activity. Desktop and web then get only the CoS thread's notifications. To
 
 ### The Pathways tab
 
-Pathways shows a read-only Linear dependency map for one project at a time. Set the Orchestrator's `linearApiKey`, then
-set `linearProjectId` in that project's `project.json` to its Linear project ID. The project card opens its map in one
-click. Set `linearMapIssue` to an identifier such as `ENG-123` to use that issue and its direct sub-issues regardless
-of labels; otherwise Pathways uses the `wayfinder:map` label. Each ticket shows every open PR explicitly linked in its
-Linear attachments or description, with separate state, proof and wait lane. Merged and closed PRs leave the forward
-view. The page never writes to Linear; the included [pathways-linear skill](orchestrator/skills/pathways-linear/SKILL.md)
-tells agents how to build and update a map in Linear with a key you give them.
-Wheel or pinch to zoom the map, drag to pan, and use +, −, or Fit to reset its view.
+Pathways shows a read-only dependency and what's-next map for one project at a time. Every project works out of the box
+with a local map built from its lead status steps, active threads, open decision cards, and open PRs. To map a Linear
+project instead, set `linearApiKey` in Orchestrator plugin settings and add `linearProjectId` to
+`projects/<slug>/project.json` (if `linearProjectId` is set without `linearApiKey`, Pathways falls back to the local
+map with a notice). Optionally set `linearMapIssue` to an identifier such as `ENG-123` to use that issue and its
+direct sub-issues regardless of labels; otherwise Pathways looks for the `wayfinder:map` label.
+
+Each ticket shows every open PR explicitly linked in its Linear attachments or description, with separate state, proof,
+and wait lane; merged and closed PRs leave the forward view. Dependency cycles are highlighted with a warning banner and
+red back-edges. The page never writes to Linear; the included
+[pathways-linear skill](orchestrator/skills/pathways-linear/SKILL.md) tells agents how to build and update a map in
+Linear with a key you give them. Wheel or pinch to zoom, drag to pan, and use `+`, `−`, `Next`, or `Fit` to navigate
+the canvas.
 
 ### The Cloud tab
 
@@ -238,6 +249,7 @@ when you confirm. Agents can read the queue but can't change it.
 ```sh
 (cd orchestrator && npm install && npm test && npm run typecheck)
 (cd usage-meter && npm install)
+(cd codex-lb && npm install && npm test && npm run typecheck)
 bb plugin install path:$PWD/orchestrator   # run your checkout in bb; bb plugin reload orchestrator after a change
 ```
 
@@ -258,3 +270,9 @@ bb plugin install path:$PWD/orchestrator   # run your checkout in bb; bb plugin 
 Pokémon and the Pokémon character names are trademarks of Nintendo, Creatures Inc. and GAME FREAK inc. Game Boy and
 Game Boy Advance are trademarks of Nintendo. Other names belong to their owners. This project is not affiliated with,
 sponsored by or endorsed by any of them; the names are used only to identify the things they refer to.
+
+### Inbound Slack bot watchers
+
+Onboard a personal bot with `bb orchestrator slack-watch setup`, route allowed channels to local inboxes, and track
+full-scan heartbeats in Multiplayer. Setup starts paused and the watcher never posts. See the
+[setup and troubleshooting guide](orchestrator/slack-watch/README.md).

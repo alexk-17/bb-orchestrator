@@ -1,7 +1,8 @@
 // The answer parts of a Needs you card, on shadcn/ui (app/ui, 2026-11-17; before that affectUI's decision inbox).
 // Short answers are buttons in a row, the recommended one the primary button. Answers that explain themselves are tiles:
 // one outline button per answer, its words, a quiet line under them and a Recommended badge. Context waits behind a
-// quiet "More". "Other" is a text box that is always open; ⌘/Ctrl+Enter in it sends (2026-11-13).
+// quiet "More". "Other" is a text box that is always open; ⌘/Ctrl+Enter in it sends (2026-11-13). Since 2026-11-21 it is
+// the compact bar the box to a lead draws (reply-composer.tsx CompactBar).
 //
 // The double-tap guard (2026-11-17): every answer is the shared Btn, whose disabled state still takes the pointer, and no
 // state changes an answer's size. A primary and an outline button both carry a 1px border, a tile keeps its badge row
@@ -11,7 +12,7 @@ import { ChevronRight } from "lucide-react";
 import { Markdown } from "@get-bb/plugin-sdk/app";
 import { Badge } from "./ui/badge.tsx";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collapsible.tsx";
-import { ReplyButton, ReplyComposer, ReplyField } from "./reply-composer.tsx";
+import { CompactBar, ReplyField } from "./reply-composer.tsx";
 import { cn } from "./ui/utils.ts";
 import { Btn } from "./ui.tsx";
 import { pickedClass, reservesBadgeRow } from "./option-tiles.ts";
@@ -33,7 +34,8 @@ export type Opt = {
 };
 
 /** Tiles when any answer explains itself or is long; buttons otherwise. Recommended first. */
-export function Options({ options, disabled, label = "Options" }: { options: Opt[]; disabled: boolean; label?: string }) {
+/** `tall` (a phone): 44 px answers; `extra`: controls at the end of the row (a phone's Other and Defer). */
+export function Options({ options, disabled, label = "Options", tall = false, extra }: { options: Opt[]; disabled: boolean; label?: string; tall?: boolean; extra?: ReactNode }) {
   const sorted = [...options].sort((a, b) => Number(Boolean(b.recommended)) - Number(Boolean(a.recommended)));
   const tiles = sorted.some((o) => (o.detail && o.detail.trim() !== "") || o.label.length > 32);
   if (!tiles) {
@@ -42,11 +44,12 @@ export function Options({ options, disabled, label = "Options" }: { options: Opt
         {sorted.map((o) => {
           const primary = o.pressed ?? o.recommended;
           return (
-            <Btn key={o.key} tone={primary ? "primary" : "outline"} className={cn("h-auto min-h-9 max-w-full border text-start whitespace-normal [overflow-wrap:anywhere]", primary && "border-transparent")} aria-pressed={o.pressed} disabled={disabled} onClick={o.onPick} {...o.data}>
+            <Btn key={o.key} tone={primary ? "primary" : "outline"} className={cn("h-auto min-h-9 max-w-full border text-start whitespace-normal [overflow-wrap:anywhere]", primary && "border-transparent", tall && "min-h-11 px-3")} aria-pressed={o.pressed} disabled={disabled} onClick={o.onPick} {...o.data}>
               {o.label}
             </Btn>
           );
         })}
+        {extra ? <span className="ml-auto flex shrink-0 items-center gap-1">{extra}</span> : null}
       </div>
     );
   }
@@ -80,6 +83,17 @@ export function Options({ options, disabled, label = "Options" }: { options: Opt
           ) : null}
         </Btn>
       ))}
+      {extra ? <span className="col-span-full flex justify-end gap-1">{extra}</span> : null}
+    </div>
+  );
+}
+
+/** What More opens: the context as Markdown, then the parts that explain (Details, and a phone card's title tap). */
+export function MoreBody({ markdown, children }: { markdown: string; children?: ReactNode }) {
+  return (
+    <div className="orch-md mt-1 text-sm text-foreground [overflow-wrap:anywhere]">
+      {markdown ? <Markdown content={markdown} /> : null}
+      {children}
     </div>
   );
 }
@@ -93,12 +107,7 @@ export function Details({ markdown, children }: { markdown: string; children?: R
         <ChevronRight className={cn("size-3.5 transition-transform", open && "rotate-90")} aria-hidden />
         {open ? "Less" : "More"}
       </Btn>
-      {open ? (
-        <div className="orch-md mt-1 text-sm text-foreground [overflow-wrap:anywhere]">
-          {markdown ? <Markdown content={markdown} /> : null}
-          {children}
-        </div>
-      ) : null}
+      {open ? <MoreBody markdown={markdown}>{children}</MoreBody> : null}
     </div>
   );
 }
@@ -126,13 +135,13 @@ export function Fold({ label, className, children, ...data }: { label: ReactNode
 }
 
 /**
- * "Other": always open, as the reply box (reply-composer.tsx, 2026-11-20). ⌘/Ctrl+Enter sends from inside it; the
- * Send pill is for phones. It grows with the text now (the owner's model, X's reply box): the fixed height it had so
- * typing never moved the cards below gave way to it.
+ * "Other": always open (on a phone, a tap on Other opens it, focused). 2026-11-21, the owner: "we need to fix the text
+ * bars for like the 'other' option or request changes back to the same one that's there for the talk directly to lead":
+ * the compact bar, a bordered field that grows with the text and Send beside it. ⌘/Ctrl+Enter sends from inside it.
  */
 export function OtherBox({ value, onChange, onSend, disabled, placeholder, sendLabel = "Send" }: { value: string; onChange: (v: string) => void; onSend: () => void; disabled: boolean; placeholder: string; sendLabel?: string }) {
   return (
-    <ReplyComposer
+    <CompactBar
       className="mt-3"
       field={
         <ReplyField
@@ -151,9 +160,9 @@ export function OtherBox({ value, onChange, onSend, disabled, placeholder, sendL
         />
       }
       actions={
-        <ReplyButton data-note-send="" disabled={disabled || value.trim() === ""} onClick={onSend}>
+        <Btn tone="primary" data-note-send="" disabled={disabled || value.trim() === ""} onClick={onSend}>
           {sendLabel}
-        </ReplyButton>
+        </Btn>
       }
     />
   );

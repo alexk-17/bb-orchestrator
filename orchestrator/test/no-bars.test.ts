@@ -27,6 +27,9 @@ const EDGES: Record<string, string[]> = {
     `"mx-3.5 flex min-w-0 translate-x-px flex-col gap-1 border-l border-sidebar-border px-2.5 py-0.5",`,
   ],
   "ui/sheet.tsx": [`"inset-y-0 right-0 h-full w-3/4 border-l data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right sm:max-w-sm",`],
+  // 2026-11-22, the owner: a project's scoping children on a thin tree line, as bb's sidebar draws threads under their
+  // lead (the ui/sidebar.tsx sub-menu line above). A grey structural hairline, never a selection or a colour
+  "projects.tsx": [`[data-orch] .orch-cc .k-kids > ul::before { content: ""; position: absolute; top: 0; bottom: 0; left: 28px; z-index: 1; pointer-events: none; border-left: 1px solid var(--border); opacity: 0.7; }`],
 };
 
 for (const f of FILES) {

@@ -80,14 +80,43 @@ test("the plan gate holds against a held project and against another lead's plan
   assert.throws(() => s.e.reserveSpawn(s.lead, go), /on hold/);
 });
 
-test("a plan's go option survives the CoS rewording it, and a note alone can't approve it", () => {
+test("a plan's go option survives the CoS rewording it, and a note alone can't approve it", async () => {
   const s = setup();
   const d = s.e.ask(s.lead, { title: "Plan?", question: "Start?", options: [{ label: "Not now" }, { label: "Go", go: true }], kind: "plan" });
   s.e.triageAskPerson(s.cos, d.id, { question: "reworded", options: [{ label: "Yes" }, { label: "No" }], allowText: true });
   const card = s.e.needsYou().cards[0]!;
   assert.deepEqual(card.ask!.options.map((o) => o.label), ["Not now", "Go"], "the lead's options, not the CoS's");
-  assert.throws(() => s.e.personAnswer(d.id, card.rev, null, "sure", "desktop"), /needs an option/);
+  assert.equal(card.ask!.allow_text, true, "the owner may answer a plan in their own words");
+  s.e.personAnswer(d.id, card.rev, null, "use 1 thread, not 2", "desktop");
+  assert.throws(() => s.e.reserveSpawn(s.lead, d.id), /not its go option/, "a note alone is no go");
+  await s.e.flush();
+  const answer = s.sent.find((x) => x.threadId === "T-la" && x.item.kind === "decision.answer" && x.item.ref === d.id);
+  assert.match(answer!.item.body, /use 1 thread, not 2/, "the lead gets the owner's words, to re-file a corrected plan");
   assert.throws(() => s.e.ask(s.lead, { title: "Q", question: "Q?", options: [{ label: "a", go: true }, { label: "b" }] }), /only a plan/);
+});
+
+test("a plan answered with its go plus a note is a go, and the note reaches the lead with the answer", async () => {
+  const s = setup();
+  const d2 = s.e.ask(s.lead, { title: "Plan?", question: "Start these threads?", options: plan, kind: "plan", threads: 2 });
+  s.e.triageAskPerson(s.cos, d2.id, { question: "alpha wants 2 threads", options: [{ label: "x" }], allowText: true });
+  const c2 = s.e.needsYou().cards[0]!;
+  assert.equal(c2.ask!.allow_text, true);
+  s.e.personAnswer(d2.id, c2.rev, "1", "keep them read-only", "desktop");
+  s.e.confirmSpawn(s.e.reserveSpawn(s.lead, d2.id), "T-w1");
+  await s.e.flush();
+  const answer = s.sent.find((x) => x.item.kind === "decision.answer" && x.item.ref === d2.id)!;
+  assert.equal(answer.threadId, "T-la");
+  assert.match(answer.item.body, /option 1 "Go: 2 threads", note: "keep them read-only"/);
+});
+
+test("a plan the CoS didn't triage in time reaches the owner with the words box on", () => {
+  const s = setup();
+  const d = s.e.ask(s.lead, { title: "Plan?", question: "Start these threads?", options: plan, kind: "plan", threads: 2 });
+  s.advance(24 * 3600_000);
+  s.e.tick();
+  const card = s.e.needsYou().cards.find((c) => c.id === d.id)!;
+  assert.equal(card.ask!.allow_text, true);
+  assert.deepEqual(card.ask!.options.map((o) => o.label), ["Go: 2 threads", "Not now"]);
 });
 
 test("a thread no plan started is flagged once, to the Board and its lead, after a grace period", async () => {

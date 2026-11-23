@@ -16,9 +16,10 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObje
 import { Markdown, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { WRITES, type Card, type NeedsYou, type Preset, type answerBody, type deferBody, type interactionAnswerBody, type returnBody, type secretBody } from "../contract.ts";
 import { Blocks, untickedText } from "./blocks.tsx";
+import { type Picks, picksFor, togglePick } from "./unticked.ts";
 import { QuestionCard, ixKey } from "./question-card.tsx";
-import { Details, META, OtherBox, Options, WHEN, answerCss } from "./answer-ui.tsx";
-import { cardBlockOrder } from "./less-text.ts";
+import { Details, META, MoreBody, OtherBox, Options, WHEN, answerCss } from "./answer-ui.tsx";
+import { cardBlockOrder, sameText } from "./less-text.ts";
 import type { Answers } from "../interactions.ts";
 import type { z } from "zod";
 import { ARM_MS, armed, track, type Seen } from "./gate.ts";
@@ -27,7 +28,7 @@ import { useViewKeys } from "./key-view.ts";
 import { changed, gate, gone, pruneGone, useGate, write, type Hide, type WriteKind } from "./store.ts";
 import { KIND_TONES, css } from "./palette.ts";
 import { ACCENT, accentTone, accentVars } from "./accent.ts";
-import { ChevronDown, CircleAlert, CircleCheck } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, CircleCheck, Clock, PenLine } from "lucide-react";
 import { Card as Frame } from "./ui/card.tsx";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu.tsx";
 import { Item, ItemGroup } from "./ui/item.tsx";
@@ -135,16 +136,10 @@ export type Act = {
 export function CardView({ card, list, presets, isArmed, act, mon, monType = null }: { card: Card; list: List; presets: Preset[]; isArmed: boolean; act: Act; mon: Face | null; monType?: string | null }) {
   const phone = useTouchPhone();
   const [note, setNote] = useState("");
-  const [unticked, setUnticked] = useState<Map<number, Set<number>>>(() => new Map());
-  const toggle = (block: number, item: number) =>
-    setUnticked((m) => {
-      const next = new Map(m);
-      const off = new Set(next.get(block) ?? []);
-      if (off.has(item)) off.delete(item);
-      else off.add(item);
-      next.set(block, off);
-      return next;
-    });
+  // kept for the revision they were picked on (app/unticked.ts): a revision may reorder or replace the list's items
+  const [picks, setPicks] = useState<Picks>(() => ({ revised: card.revised ?? 0, off: new Map() }));
+  const unticked = picksFor(picks, card.revised);
+  const toggle = (block: number, item: number) => setPicks((p) => togglePick(p, card.revised, block, item));
   // an option's answer carries the lists' unticked items along with any note
   const withLists = (n: string) => [n.trim(), untickedText(card.blocks, unticked)].filter(Boolean).join("\n\n");
   const order = cardBlockOrder(card.blocks);
@@ -160,13 +155,66 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
   // notices change the card's height, so they show only while nothing holds the page
   const notice = busy ? null : (changed.get(card.id) ?? (gate.error?.where === card.id ? gate.error.message : null));
 
+  // Defer (or Bring back): its own row under the answers on the web. A phone: Defer is a 44 px clock in the header's
+  // corner, Bring back sits at the end of the answers row
+  const footer =
+    list === "deferred" ? (
+      <Btn data-return="" className={phone ? "h-11" : undefined} disabled={busy} onClick={() => act.bringBack(card)}>
+        Bring back
+      </Btn>
+    ) : presets.length > 0 ? (
+      // shadcn's menu, portaled and with no animation: opening it changes no card's height and moves nothing
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild>
+          {phone ? (
+            <Btn tone="ghost" className="relative z-10 -my-2.5 -mr-2 size-11 shrink-0 text-muted-foreground" data-defer="" aria-label="Defer" title="Defer" disabled={busy} icon={<Clock aria-hidden />} />
+          ) : (
+            <Btn tone="ghost" data-defer="" disabled={busy}>
+              Defer
+              <ChevronDown aria-hidden />
+            </Btn>
+          )}
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" aria-label="Defer until">
+          {presets.map((p) => (
+            <DropdownMenuItem key={p.id} disabled={busy} data-preset={p.id} onSelect={() => act.defer(card, p.id)}>
+              {p.label}
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    ) : null;
+
+  // a phone (2026-11-21, the owner: "too much wasted space"): More is the title (a tap on it, or its chevron, opens the
+  // context under the answers), and Other is a button at the end of the answers row that shows the usual box, focused
+  const [moreOpen, setMoreOpen] = useState(false);
+  const hasMore = !!card.context || order.more.length > 0;
+  const [otherOpen, setOtherOpen] = useState(false);
+  const otherWrap = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (otherOpen) otherWrap.current?.querySelector("textarea")?.focus();
+  }, [otherOpen]);
+  const showOther = card.allowText && (!phone || otherOpen || note !== "");
+  const time = (
+    // one fixed slot: the mark replaces the time, so marking moves nothing (on a phone, at the end of the meta line)
+    <span data-mark={mark ? "" : undefined} className={cn(WHEN, phone && "ml-auto w-20", mark && "font-medium")} style={{ color: markColor }}>
+      {mark ?? (phone ? ago(Date.parse(card.askedAt), Date.now()) : when(card.askedAt))}
+    </span>
+  );
+  const details =
+    hasMore ? (
+      <Details markdown={card.context ?? ""}>
+        <Blocks blocks={card.blocks} prs={card.prs} only={order.more} />
+      </Details>
+    ) : null;
+
   // A shadcn Card (it never folds or glides)
   return (
     <Frame role="article" data-card={card.id} data-rev={card.rev} data-asker={card.asker} data-state={state} data-accent={monType ?? undefined} aria-busy={busy || undefined} className={cn("gap-0 p-4", mine && "opacity-80")} style={accentVars(monType)}>
-          <header className="flex items-start gap-3">
+          <header className={cn("flex items-start", phone ? "gap-2" : "gap-3")}>
             {/* always drawn at its fixed size (the role avatar until the board names the mon), so the card never changes height */}
-            <AgentFace face={mon} address={card.origin} size={28} />
-            <div className="min-w-0 flex-1">
+            <AgentFace face={mon} address={card.origin} size={phone ? 20 : 28} />
+            <div className={cn("min-w-0 flex-1", phone && hasMore && "cursor-pointer")} onClick={phone && hasMore ? (e) => ((e.target as HTMLElement).closest("button, a") ? undefined : setMoreOpen((o) => !o)) : undefined}>
               <h4 className="m-0 text-sm leading-5 font-semibold [overflow-wrap:anywhere]">{card.title}</h4>
               {/* the quiet line: where it comes from, who asked, and any state */}
               <p className={META}>
@@ -190,15 +238,21 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
                     Merge
                   </Kind>
                 ) : null}
+                {card.revised ? (
+                  <span className="rounded border bg-muted px-1.5 text-muted-foreground" data-revised="" title="Its asker revised it">
+                    rev {card.revised + 1}
+                  </span>
+                ) : null}
                 {card.returnedAt ? <Tag>Back</Tag> : null}
                 {card.queued ? <Tag data-queued="">{`+${card.queued} next from ${card.asker}`}</Tag> : null}
                 {list === "deferred" ? <Tag>{card.deferredUntil ? `Deferred until ${when(card.deferredUntil)}` : "Deferred until you bring it back"}</Tag> : null}
+                {phone ? time : null}
+                {phone && hasMore ? (
+                  <Btn tone="ghost" size="sm" className="relative z-10 -my-3 -mr-2 size-11 shrink-0 text-muted-foreground" data-more="" aria-label={moreOpen ? "Less" : "More"} aria-expanded={moreOpen} onClick={() => setMoreOpen((o) => !o)} icon={<ChevronRight className={cn("transition-transform", moreOpen && "rotate-90")} aria-hidden />} />
+                ) : null}
               </p>
             </div>
-            {/* one fixed slot: the mark replaces the time, so marking moves nothing */}
-            <span data-mark={mark ? "" : undefined} className={cn(WHEN, mark && "font-medium")} style={{ color: markColor }}>
-              {mark ?? (phone ? ago(Date.parse(card.askedAt), Date.now()) : when(card.askedAt))}
-            </span>
+            {phone ? (list === "deferred" ? null : footer) : time}
           </header>
           {notice ? (
             <p role="status" data-notice="" className="orch-danger m-0 mt-2 text-xs">
@@ -207,9 +261,12 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
           ) : null}
           {/* a PR or merge card leads with its PR: the chip, its live state and the one-line verdict (2026-11-14) */}
           <Blocks blocks={card.blocks} prs={card.prs} only={order.lead} />
-          <p data-question-text="" className="m-0 mt-2 text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">
-            {card.question}
-          </p>
+          {/* a phone says the question once: not again under a title that already is it (2026-11-21, no duplicated headers) */}
+          {phone && sameText(card.question, card.title) ? null : (
+            <p data-question-text="" className="m-0 mt-2 text-sm whitespace-pre-wrap [overflow-wrap:anywhere]">
+              {card.question}
+            </p>
+          )}
           {/* "Scoping done?" (1.11.0): the lead's summary and the PROJECT.md it is written in, above the fixed options */}
           {card.scopingDone ? (
             <div data-scoping-done="" className="mt-2 rounded-md border p-3 text-sm">
@@ -227,11 +284,18 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
               {order.line}
             </p>
           ) : null}
-          {card.context || order.more.length > 0 ? (
-            <Details markdown={card.context ?? ""}>
-              <Blocks blocks={card.blocks} prs={card.prs} only={order.more} />
-            </Details>
-          ) : null}
+          {/* a phone's More opens here too, where the web's does: under the question, above the blocks and the answers */}
+          {phone ? (
+            hasMore && moreOpen ? (
+              <div className="mt-2" data-context="" data-open="">
+                <MoreBody markdown={card.context ?? ""}>
+                  <Blocks blocks={card.blocks} prs={card.prs} only={order.more} />
+                </MoreBody>
+              </div>
+            ) : null
+          ) : (
+            details
+          )}
           <Blocks blocks={card.blocks} prs={card.prs} busy={busy} onPaste={(v) => act.secret(card, list, v)} unticked={unticked} onToggle={toggle} only={order.after} />
 
           <Options
@@ -245,45 +309,45 @@ export function CardView({ card, list, presets, isArmed, act, mon, monType = nul
               data: { "data-option": o.id, "data-armed": isArmed ? "true" : "false", "data-recommended": o.recommended ? "true" : undefined },
               onPick: () => act.answer(card, list, o.id, withLists(note)),
             }))}
+            tall={phone}
+            extra={
+              phone && ((card.allowText && !showOther) || list === "deferred") ? (
+                <>
+                  {card.allowText && !showOther ? (
+                    <Btn tone="ghost" className="h-11 gap-1 px-1.5 text-muted-foreground has-[>svg]:px-1.5" data-other-open="" onClick={() => setOtherOpen(true)} icon={<PenLine aria-hidden />}>
+                      Other
+                    </Btn>
+                  ) : null}
+                  {list === "deferred" ? footer : null}
+                </>
+              ) : undefined
+            }
           />
 
           {/* Requested 2026-11-13: "other should just be an open text box and command enter should send it". Typed text
               also rides along with an option picked above. */}
-          {card.allowText ? (
-            <OtherBox
-              value={note}
-              onChange={setNote}
-              disabled={busy}
-              onSend={() => act.answer(card, list, null, withLists(note))}
-              placeholder="Other: your own answer, or a note to go with an option. ⌘↵ sends"
-            />
+          {showOther ? (
+            phone ? (
+              <div ref={otherWrap} data-other="">
+                <OtherBox value={note} onChange={setNote} disabled={busy} onSend={() => act.answer(card, list, null, withLists(note))} placeholder="Other: your own answer, or a note to go with an option. ⌘↵ sends" />
+              </div>
+            ) : (
+              <OtherBox
+                value={note}
+                onChange={setNote}
+                disabled={busy}
+                onSend={() => act.answer(card, list, null, withLists(note))}
+                placeholder="Other: your own answer, or a note to go with an option. ⌘↵ sends"
+              />
+            )
           ) : null}
 
-          <footer className="mt-2 flex items-center gap-2">
-            <span className="ml-auto" />
-            {list === "deferred" ? (
-              <Btn data-return="" disabled={busy} onClick={() => act.bringBack(card)}>
-                Bring back
-              </Btn>
-            ) : presets.length > 0 ? (
-              // shadcn's menu, portaled and with no animation: opening it changes no card's height and moves nothing
-              <DropdownMenu modal={false}>
-                <DropdownMenuTrigger asChild>
-                  <Btn tone="ghost" data-defer="" disabled={busy}>
-                    Defer
-                    <ChevronDown aria-hidden />
-                  </Btn>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" aria-label="Defer until">
-                  {presets.map((p) => (
-                    <DropdownMenuItem key={p.id} disabled={busy} data-preset={p.id} onSelect={() => act.defer(card, p.id)}>
-                      {p.label}
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ) : null}
-          </footer>
+          {phone ? null : (
+            <footer className="mt-2 flex items-center gap-2">
+              <span className="ml-auto" />
+              {footer}
+            </footer>
+          )}
     </Frame>
   );
 }
@@ -294,6 +358,7 @@ type Query = { data: NeedsYou | undefined; error: { message: string } | null; re
 export function NeedsYouView({ q, refetchAll, mons, threads, accents }: { q: Query; refetchAll: () => void; mons: ReadonlyMap<string, Face>; threads: ReadonlyMap<string, string>; accents?: ReadonlyMap<string, string | null> }) {
   useGate();
   const navigate = useBbNavigate();
+  const phone = useTouchPhone();
   const live = q.data;
   // no reflow under a pressed pointer or while a write holds the page: draw what was drawn last
   const frozen = gate.pointerDown || gate.lock !== null;
@@ -401,7 +466,8 @@ export function NeedsYouView({ q, refetchAll, mons, threads, accents }: { q: Que
       {/* the count, then one Card per decision; when none waits, shadcn's empty state */}
       <section className="flex flex-col gap-3" aria-label="Needs you">
         {n > 0 ? (
-          <h3 className="m-0 flex items-center gap-2 text-sm font-semibold">
+          // a phone: the header row above already says "Needs you N", so this says it to a screen reader only
+          <h3 className={phone && !q.error ? "sr-only" : "m-0 flex items-center gap-2 text-sm font-semibold"}>
             <CircleAlert className="size-4 text-(--warning-text)" aria-hidden />
             <span data-count={String(n)}>{`${n} ${n === 1 ? "needs" : "need"} your input`}</span>
             {q.error ? <span className="orch-danger ml-auto text-xs font-normal">Stale: {q.error.message}</span> : null}

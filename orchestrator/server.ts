@@ -11,10 +11,11 @@ import { cliRun, setupSidebar } from "./core/sidebar.ts";
 // deliverables
 import { chmodSync, closeSync, cpSync, createReadStream, openSync, readdirSync, readSync, rmSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
-import { approveBody, type DeliverableFolders, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody, type Pathways } from "./contract.ts";
+import { approveBody, type DeliverableFolders, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody, type Pathways, type PathwaysErrorKind } from "./contract.ts";
 import { projectIssues, pathwaysMap, linkPathwaysDecisions, attachPathwaysPreflight, draftPathwaysDecision, summarizePathwaysRetro, pathwaysDecisionKey, submitPathwaysDecision, mapPathwaysLimited, selectPathwaysMap, type PathwaysIssue } from "./core/pathways.ts";
 import { collectPathwaysProofRecords, reducePathwaysPr, reducePathwaysProof, reducePathwaysWaitLane } from "./core/pathways-pr.ts";
 import { createPathwaysSnapshots, type PathwaysSnapshot, type PathwaysView } from "./core/pathways-snapshot.ts";
+import { localPathwaysMap } from "./core/pathways-local.ts";
 import type { FeedPrompt } from "./core/feed.ts";
 import { type DeliverPlace, type OutputPlace, type ProofInput, SCOPING_SUMMARY_MAX, SCOPING_TASK_NAME_MAX, SECRET_TTL_MS } from "./core/engine.ts";
 import { deliverBlocks, deliverPoints, fromJson, inputBlocksSchema, lessTextRefusal, looksLikeCode } from "./blocks.ts";
@@ -102,6 +103,7 @@ import { OPEN_PRS_COPIED, OPEN_PRS_POST, openPrsCopiedBody, openPrsPostBody } fr
 import { registerReviewQueue } from "./review-queue/server.ts";
 import { queueSetUp } from "./core/review-queue.ts";
 import { shownUntilUsed } from "./app/hidden-tabs.ts";
+import { registerSlackWatch } from "./slack-watch/server.ts";
 import { registerMultiplayer } from "./multiplayer/server.ts";
 import { MULTIPLAYER_WRITES } from "./multiplayer/contract.ts";
 import { boardAddBody, boardRemoveBody } from "./multiplayer/core/boards.ts";
@@ -121,7 +123,7 @@ import { type ChildLevel, type NotifySaved, SAVED_KEY as NOTIFY_SAVED, serialRec
 const TOOLS_BY_ROLE: Record<Role, string[]> = {
   thread: ["orch_ask", "orch_ack", "orch_send", "orch_inbox", "orch_report", "orch_output"],
   lead: ["orch_ask", "orch_forward", "orch_answer", "orch_ack", "orch_send", "orch_inbox", "orch_report", "orch_stop_thread", "orch_spawn_thread", "orch_resolve", "orch_handoff", "orch_output", "orch_deliver", "orch_deliver_withdraw", "orch_status", "orch_scope_task", "orch_review_record"],
-  cos: ["orch_triage", "orch_ack", "orch_send", "orch_inbox", "orch_needs_you", "orch_moot", "orch_deliverables", "orch_dead_letters", "orch_start_lead", "orch_new_project", "orch_project_mode", "orch_watch", "orch_reply_owner"],
+  cos: ["orch_triage", "orch_propose_rule", "orch_ack", "orch_send", "orch_inbox", "orch_needs_you", "orch_moot", "orch_deliverables", "orch_dead_letters", "orch_start_lead", "orch_new_project", "orch_project_mode", "orch_watch", "orch_reply_owner"],
   steward: ["orch_ask", "orch_ack", "orch_send", "orch_inbox", "orch_host", "orch_cleanup", "orch_needs_you", "orch_deliverables"],
 };
 
@@ -326,10 +328,15 @@ export default async function plugin(bb: BbPluginApi) {
     return { delivery: "sent" };
   }
 
+  let slackWatch: ReturnType<typeof registerSlackWatch> | undefined;
+  const effectiveRoutes = () => {
+    const legacy = integrationRoutes(cfg.integrationRoutes), watched = slackWatch?.routes() ?? {};
+    return { ...legacy, ...Object.fromEntries(Object.entries(watched).map(([source, to]) => [source, Object.hasOwn(legacy, source) ? [] : to])) };
+  };
   const engine = new Engine(
     db,
     { now: () => Date.now(), externalEnabled: (source, to) => {
-      try { allowImport(integrationRoutes(cfg.integrationRoutes), source, to); return true; }
+      try { allowImport(effectiveRoutes(), source, to); return true; }
       catch { return false; }
     }, deliver, mirror, changed, log: (m) => bb.log.warn(m), cardUp: (d) => void pushCard(d), delivered: (d) => void pushDelivered(d), files: () => ({ dir: join(stateDir(), "deliverables"), kept: join(stateDir(), "threads") }) },
     { escalateMs: cfg.escalateMinutes * 60_000, resendMs: cfg.resendMinutes * 60_000, owner: cfg.ownerName, pokemon: cfg.pokemon, batchInbox: cfg.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, cfg.inboxDebounceMs || 2000)), personas: loadPack(cfg.personaPack) },
@@ -337,7 +344,15 @@ export default async function plugin(bb: BbPluginApi) {
   const openPrs = registerOpenPrs(bb, engine, () => cfg);
   // after the engine, whose migrations made its tables; dry-run unless the setting is exactly false
   const reviewQueue = registerReviewQueue(bb, { db, dryRun: () => cfg.reviewQueueDryRun !== false });
-  const multiplayer = registerMultiplayer(bb, { db, engine, dir: join(dataDir, "multiplayer"), settings: () => cfg });
+  const multiplayer = registerMultiplayer(bb, { db, engine, dir: join(dataDir, "multiplayer"), settings: () => cfg, routes: effectiveRoutes });
+  slackWatch = registerSlackWatch(bb, {
+    db, dir: join(dataDir, "slack-watch"), legacyRoutes: () => integrationRoutes(cfg.integrationRoutes),
+    routeEnabled: (source, to) => { try { return effectiveRoutes()[source]?.includes(to) ?? false; } catch { return false; } },
+    recipient: address => { const a = engine.agentByAddress(address); return !!a && a.status !== "stopped"; },
+    importMail: mail => { const item = engine.importMail(mail); void flush(); return item; },
+    heartbeat: (source, everyMs) => multiplayer.heartbeat(source, everyMs),
+    audit: action => { engine.boardAdd("notice", "orchestrator", null, `CLI: ${action}`, "Operator changed a Slack watcher. Credentials and arguments are omitted.", null); },
+  });
   // ---------------------------------------------------------------- notifyOnlyOrchestrator (core/notify-only.ts)
   const PN = "push-notifications";
   const notifyOnly = serialReconcile(
@@ -533,7 +548,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "orch_ask",
-    description: `File a question with 2-4 options, the recommended one FIRST. A thread's goes to its lead; a lead's or the Steward's to the CoS and on to ${O.name}. Returns the decision id at once; never blocks. The answer arrives later as an [orchestrator] message.`,
+    description: `File a question with 2-4 options, the recommended one FIRST. A thread's goes to its lead; a lead's or the Steward's to the CoS and on to ${O.name}. Returns the decision id at once; never blocks. The answer arrives later as an [orchestrator] message. When an answer or a direct message from ${O.name} makes your open card stale, revise it (revises=<its id>, why, and the full new card) instead of filing another.`,
     presentation: { label: { pending: "Filing a question", completed: "Filed a question" } },
     parameters: z.object({
       title: z.string().min(1).max(60).describe("Short label, ends in ? where natural"),
@@ -555,12 +570,16 @@ export default async function plugin(bb: BbPluginApi) {
       scope_task: SCOPE_TASK.optional().describe(
         `Lead only: an open scoping task's id (st-…) or name (orch_scope_task). The card goes only to ${O.name}'s Scope tab, under that task: no CoS triage, no standing rule; the CoS gets a read-only copy. Leave it out for the normal route. Refused for a task that is done, dropped or unknown`,
       ),
+      revises: z.string().optional().describe(`The id of your own unanswered card to replace with this title, question, context and options (same id, same place on ${O.name}'s Needs you; an answer to the old version is refused). A plan keeps exactly one go; threads may change`),
+      why: z.string().max(300).optional().describe("With revises: one line on what made the card stale (the CoS reads it)"),
     }),
     execute: (p, { threadId }) =>
       run(threadId, (a) => {
-        if (p.merge && !p.blocks?.some((b) => b.kind === "pr")) throw new EngineError("invalid", "a merge card needs a pr block (the PR's URL, and a one-line verdict as its note)");
+        // a revision may keep the merge card's blocks by leaving them out: the engine checks its result keeps a pr block
+        if (p.merge && !p.revises && !p.blocks?.some((b) => b.kind === "pr")) throw new EngineError("invalid", "a merge card needs a pr block (the PR's URL, and a one-line verdict as its note)");
         const done = p.scoping_done === undefined ? null : scopingDoneIn(p.scoping_done);
-        const d = engine.ask(a, { title: p.title, question: p.question, context: p.context, options: p.options, kind: p.kind, threads: p.threads, action: p.merge ? "merge" : null, key: p.key ?? null, blocks: p.blocks, scopingDone: done, scopeTask: p.scope_task ?? null });
+        const d = engine.ask(a, { title: p.title, question: p.question, context: p.context, options: p.options, kind: p.kind, threads: p.threads, action: p.merge ? "merge" : null, key: p.key ?? null, blocks: p.blocks, scopingDone: done, scopeTask: p.scope_task ?? null, revises: p.revises ?? null, why: p.why ?? null });
+        if (p.revises) return `Revised ${d.id} (revision ${d.orchestrator.revised?.count ?? 1}) in place${d.state === "asked" ? `: ${O.name} sees the new version` : ""}. The answer will come as a message; don't wait on it.`;
         if (d.orchestrator.scope) return `Filed ${d.id} in ${O.name}'s Scope pane (${scopeWhere(a.project, d.orchestrator.scope_task)}: no CoS triage, no standing rule; the CoS gets a read-only copy). The answer will come as a message; don't wait on it.`;
         return `Filed ${d.id} (${d.orchestrator.at_level === "lead" ? `with ${`lead:${a.project}`}` : "with the CoS"}). The answer will come as a message; don't wait on it.`;
       }),
@@ -614,8 +633,14 @@ export default async function plugin(bb: BbPluginApi) {
     name: "orch_answer",
     description: "Lead only: settle your own thread's question. Cite a standing rule that covers it (rule id from orch_inbox), or leave rule_id out (or empty) and give a note saying why: it is recorded as your own call.",
     presentation: { label: { pending: "Settling a question", completed: "Settled a question" } },
-    parameters: z.object({ id: z.string(), rule_id: z.string().optional(), option: z.string().describe("option id, e.g. \"1\""), note: z.string().max(2000).optional() }),
-    execute: (p, { threadId }) => run(threadId, (a) => `Settled ${engine.leadAnswer(a, p.id, p.rule_id ?? null, p.option, p.note ?? null).id}; the answer goes to the thread.`),
+    parameters: z.object({
+      id: z.string(),
+      rule_id: z.string().optional(),
+      option: z.string().describe("option id, e.g. \"1\""),
+      note: z.string().max(2000).optional(),
+      revision: z.number().int().min(0).optional().describe("The revision of the question you answer, from its thread's revision notice; leave out for one never revised. A newer revision is refused as stale"),
+    }),
+    execute: (p, { threadId }) => run(threadId, (a) => `Settled ${engine.leadAnswer(a, p.id, p.rule_id ?? null, p.option, p.note ?? null, p.revision ?? 0).id}; the answer goes to the thread.`),
   });
 
   bb.agents.registerTool({
@@ -634,6 +659,8 @@ export default async function plugin(bb: BbPluginApi) {
       options: optionsSchema.optional(),
       allow_text: z.boolean().optional(),
       into: z.string().optional(),
+      revision: z.number().int().min(0).optional().describe("settle, ask_person, merge, bounce: the revision of the card you triaged, from its asker's revision notice; leave out for a card never revised. A newer revision is refused as stale"),
+      into_revision: z.number().int().min(0).optional().describe("merge only: the revision of the card you merge into, as you read it; leave out for one never revised. A newer revision is refused as stale"),
       rule: z
         .preprocess(fromJson, z.object({ from: z.array(z.string()).optional(), words: z.array(z.string()).optional(), without: z.array(z.string()).optional(), key_prefix: z.string().optional(), option: z.array(z.string()).optional() }))
         .optional()
@@ -648,18 +675,18 @@ export default async function plugin(bb: BbPluginApi) {
         }
         if (p.action === "bounce") {
           if (!p.note) throw new EngineError("invalid", "bounce needs note: what the asker should fix");
-          return `Sent ${engine.triageBounce(a, p.id, p.note).id} back to its asker with your note; it never reaches ${O.name}.`;
+          return `Sent ${engine.triageBounce(a, p.id, p.note, p.revision).id} back to its asker with your note; it never reaches ${O.name}.`;
         }
         if (p.action === "settle") {
           if (!p.rule_id || !p.option) throw new EngineError("invalid", "settle needs rule_id and option");
-          return `Settled ${engine.triageSettle(a, p.id, p.rule_id, p.option, p.note ?? null).id} from ${p.rule_id}.`;
+          return `Settled ${engine.triageSettle(a, p.id, p.rule_id, p.option, p.note ?? null, p.revision).id} from ${p.rule_id}.`;
         }
         if (p.action === "merge") {
           if (!p.into) throw new EngineError("invalid", "merge needs into");
-          return `Merged ${engine.triageMerge(a, p.id, p.into).id} into ${p.into}.`;
+          return `Merged ${engine.triageMerge(a, p.id, p.into, p.revision, p.into_revision ?? 0).id} into ${p.into}.`;
         }
         if (!p.question || !p.options) throw new EngineError("invalid", "ask_person needs question and options");
-        return `${engine.triageAskPerson(a, p.id, { title: p.title, question: p.question, context: p.context, options: p.options, allowText: p.allow_text ?? true }).id} is in ${O.name}'s Needs you.`;
+        return `${engine.triageAskPerson(a, p.id, { title: p.title, question: p.question, context: p.context, options: p.options, allowText: p.allow_text ?? true, revision: p.revision }).id} is in ${O.name}'s Needs you.`;
       }),
   });
 
@@ -667,6 +694,22 @@ export default async function plugin(bb: BbPluginApi) {
   const cosOrSteward = (a: Agent) => {
     if (a.role !== "cos" && a.role !== "steward") throw new EngineError("forbidden", "CoS and Steward only");
   };
+  bb.agents.registerTool({
+    name: "orch_propose_rule",
+    description: `CoS only: propose a standing instruction from ${O.name}'s own words in chat or a card note. Give it in one line (at most 120 characters: the card shows it whole and a yes saves exactly that), quote the words, and optionally name a project. kind: practice (the default) for an instruction agents follow, such as "always use this tool"; it settles no card. plan only when it really settles plan decisions: a plan rule lets you approve the plan cards it covers without ${O.name}. ${O.name} gets one "Make this a practice?" or "Make this a rule?" card; only their yes adds it to Rules.`,
+    presentation: { label: { pending: "Proposing a standing rule", completed: "Proposed a standing rule" } },
+    parameters: z.object({
+      text: z.string().max(120),
+      quote: z.string().max(600),
+      project: z.string().nullable().optional(),
+      kind: z.enum(["practice", "plan"]).optional().describe("practice (default): followed, settles nothing; plan: lets you approve the plan cards it covers"),
+    }),
+    execute: (p, { threadId }) => run(threadId, (a) => {
+      const d = engine.proposeStatedRule(a, p.text, p.quote, p.project ?? null, p.kind ?? "practice");
+      return `${d.id} ${JSON.stringify(d.request.title)} is in ${O.name}'s Needs you. A yes adds it to Rules; the answer comes to you.`;
+    }),
+  });
+
   bb.agents.registerTool({
     name: "orch_needs_you",
     description: `CoS and Steward only: what is on ${O.name}'s Needs you now (each card's id, project, asker, title, how long it has waited; deferred ones; ones still with the CoS), and what ${O.name} answered (with the option chosen) or what went moot, in the last 24h and newest 20 by default (widen with \`since\` and \`limit\`).`,
@@ -1381,7 +1424,7 @@ export default async function plugin(bb: BbPluginApi) {
       "image, video or text (a file path), doc (a path or URL), pr or link (a URL). A file must be inside your worktree, one of your threads' worktrees, " +
       `${sharedRoots().join(" or ")}; text at most 256 KB; images png/jpg/gif/webp/avif, videos mp4/webm/mov. ` +
       `The summary, points and blocks together show at most ${DELIVER_BUDGET} characters. ` +
-      `${O.Name} approves it (maybe with a next action: deliverable.next, do it and ack with a note) or requests changes; on deliverable.changes, fix it and call this again with revises=<id>.`,
+      `${O.Name} approves it (maybe with a next action: deliverable.next, do it and ack with a note) or requests changes; on deliverable.changes, fix it and call this again with revises=<id>. When a new deliverable makes one of yours still in review out of date, deliver it with revises=<that id>; if it's a different topic that still makes the old one moot, withdraw the old one (orch_deliver_withdraw).`,
     presentation: { label: { pending: `Delivering to ${O.name}`, completed: `Delivered to ${O.name}` } },
     parameters: z.object({
       title: z.string().min(1).max(120),
@@ -1404,7 +1447,7 @@ export default async function plugin(bb: BbPluginApi) {
         )
         .min(1)
         .max(20),
-      revises: z.string().optional().describe(`The id of your deliverable ${O.name} sent back with changes`),
+      revises: z.string().optional().describe(`The id of your deliverable ${O.name} sent back with changes, or one still in review that this one replaces (same id, rev + 1)`),
       scope_task: SCOPE_TASK.optional().describe(`An open scoping task's id or name: ${O.name} reviews it in the Scope tab under that task, not on Deliverables; the CoS gets a read-only copy. A revision stays in its task while the task is open`),
       board: DELIVER_BOARD.optional().describe(
         `A review a Multiplayer board triggered: {id: the board (mb-…, its channel id or link), record: your review record (rr-…), flag: one line when it needs ${O.name} (couldn't verify, interview pending)}. ${O.Name} reviews it on that board, never on Deliverables; a flag also files a Needs you card. A revision keeps its board`,
@@ -2073,6 +2116,7 @@ export default async function plugin(bb: BbPluginApi) {
     // the file the summary is in: the project's PROJECT.md, or a scoping task's doc (1.12.0)
     scopingDone: d.orchestrator.scoping_done ? { summary: d.orchestrator.scoping_done.summary, projectMd: d.orchestrator.scoping_done.project_md ?? d.orchestrator.scoping_done.doc ?? "" } : null,
     scopeTask: d.orchestrator.scope_task ?? null,
+    revised: d.orchestrator.revised?.count ?? 0,
   });
 
   const providerOf = new Map<string, string | null>();
@@ -2265,32 +2309,112 @@ export default async function plugin(bb: BbPluginApi) {
       return { projects, badge: projects.reduce((n, p) => n + p.cards.length, 0) };
     },
     async pathways({ slug, refresh }): Promise<PathwaysView> {
-      const failure = (error: string): PathwaysView => ({ error, map: null, retro: null, fetchedAt: null, refreshing: false });
+      const failure = (error: string, errorKind: PathwaysErrorKind | null = null): PathwaysView => ({ error, errorKind, map: null, retro: null, fetchedAt: null, refreshing: false });
+      const recordRel = `projects/${slug}/${projectRecord()}`;
+      const retroDecisions = (list: ReturnType<typeof engine.decisions>) =>
+        list.map((decision) => ({ id: decision.id, title: decision.ask?.title ?? decision.request.title, state: decision.state }));
+      if (!engine.project(slug)) return failure("Pathways project not found.", "project-missing");
       const apiKey = cfg.linearApiKey?.trim();
-      if (!apiKey) return failure("Set the Pathways Linear API key in Orchestrator plugin settings.");
-      if (!engine.project(slug)) return failure("Pathways project not found.");
       let linearProjectId: string | undefined;
       let linearMapIssue: string | undefined;
-      try {
-        const record = JSON.parse(readFileSync(join(projectsDir(), slug, projectRecord()), "utf8")) as { linearProjectId?: unknown; linearMapIssue?: unknown };
-        linearProjectId = typeof record.linearProjectId === "string" ? record.linearProjectId.trim() : undefined;
-        linearMapIssue = typeof record.linearMapIssue === "string" ? record.linearMapIssue.trim() : undefined;
-      } catch {
-        return failure("Set the Pathways Linear project link in this project's record.");
+      const recordPath = join(projectsDir(), slug, projectRecord());
+      if (existsSync(recordPath)) {
+        try {
+          const parsed = JSON.parse(readFileSync(recordPath, "utf8")) as unknown;
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            return failure(`Invalid JSON in ${recordRel}: expected a JSON object. Fix the file, then click Refresh.`, "invalid-record");
+          }
+          const record = parsed as { linearProjectId?: unknown; linearMapIssue?: unknown };
+          linearProjectId = typeof record.linearProjectId === "string" ? record.linearProjectId.trim() : undefined;
+          linearMapIssue = typeof record.linearMapIssue === "string" ? record.linearMapIssue.trim() : undefined;
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          return failure(`Invalid JSON in ${recordRel}: ${detail}. Fix the JSON syntax, then click Refresh.`, "invalid-record");
+        }
       }
-      if (!linearProjectId) return failure("Set linearProjectId in this project's record for Pathways.");
+      if (!apiKey || !linearProjectId) {
+        const readLocal = async (): Promise<Pathways> => {
+          const now = Date.now();
+          const status = engine.leadStatus(slug);
+          const rawThreads = engine.agents().filter((a) => a.role === "thread" && a.project === slug && a.status !== "archived");
+          const threads = await mapPathwaysLimited(rawThreads, 8, async (a) => {
+            const info = (await bb.sdk.threads.get({ threadId: a.threadId }).catch(() => null)) as { title?: string | null; status?: string | null } | null;
+            const pr = engine.prFor(a.environmentId);
+            return {
+              address: a.address,
+              threadId: a.threadId,
+              title: info?.title?.trim() || engine.lastReport(a.address)?.split("\n")[0]?.trim() || a.address,
+              status: info?.status?.trim() || a.status,
+              prUrls: pr?.url ? [pr.url] : [],
+            };
+          });
+          const decisions = engine.decisions(5000).filter((decision) => decision.project === slug);
+          const prs = engine.knownPrs().filter((p) => p.project === slug);
+          const deliverables = engine.deliverables().filter((deliverable) => deliverable.project === slug);
+          const waits = engine.openWaits();
+          const map = localPathwaysMap({
+            slug,
+            status,
+            threads,
+            decisions: decisions.map((decision) => ({
+              id: decision.id,
+              state: decision.state,
+              title: decision.ask?.title ?? decision.request.title,
+              question: decision.ask?.question ?? decision.request.question,
+              action: decision.orchestrator.action,
+              createdAt: decision.created_at,
+              prUrls: (decision.request.blocks ?? []).flatMap((block) => (block.kind === "pr" ? [block.url] : [])),
+            })),
+            prs,
+            deliverables,
+            waits,
+            now,
+          });
+          const retroSummary = summarizePathwaysRetro(map, retroDecisions(decisions), now);
+          const retro =
+            retroSummary.finished.length ||
+            retroSummary.mergedPrs.length ||
+            retroSummary.decisions.length ||
+            retroSummary.stalled.length
+              ? { ...retroSummary, doc: null, hostId: null }
+              : null;
+          const notice = linearProjectId && !apiKey ? "Linear project is linked (linearProjectId is set), but linearApiKey is unset in Orchestrator plugin settings. Showing the local map until you set linearApiKey and refresh." : null;
+          return { error: null, notice, map, retro };
+        };
+        const localKey = `local:${linearProjectId ? "unkeyed" : "direct"}`;
+        return pathwaysSnapshots.view(slug, refresh ?? false, readLocal, localKey);
+      }
+      class LinearRequestError extends Error {
+        readonly status: number | null;
+        readonly retryAfter: number | null;
+        readonly graphql: string | null;
+        constructor(opts: { status?: number | null; retryAfter?: number | null; graphql?: string | null }) {
+          super("Linear request failed");
+          this.status = opts.status ?? null;
+          this.retryAfter = opts.retryAfter ?? null;
+          this.graphql = opts.graphql ?? null;
+        }
+      }
       const read = async (): Promise<Pathways> => { try {
         const request = async <T,>(query: string, id: string, after: string | null = null): Promise<T> => {
-          const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables: { id, after } }) });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const result = await response.json() as { data?: T; errors?: unknown[] };
-          if (result.errors?.length || !result.data) throw new Error("GraphQL error");
+          const response = await fetch("https://api.linear.app/graphql", { method: "POST", headers: { Authorization: apiKey, "Content-Type": "application/json" }, body: JSON.stringify({ query, variables: { id, after } }), signal: AbortSignal.timeout(12_000) });
+          if (!response.ok) {
+            const rawRetry = response.status === 429 ? response.headers.get("retry-after")?.trim() : undefined;
+            const secs = rawRetry && /^\d+$/.test(rawRetry) ? Number(rawRetry) : null;
+            throw new LinearRequestError({ status: response.status, retryAfter: secs && secs > 0 ? secs : null });
+          }
+          const result = await response.json() as { data?: T; errors?: { message?: unknown }[] };
+          if (result.errors?.length || !result.data) {
+            const firstMsg = result.errors?.find((e) => typeof e?.message === "string" && e.message.trim())?.message;
+            const detail = typeof firstMsg === "string" ? firstMsg.replace(/\s+/g, " ").trim().slice(0, 200) : "";
+            throw new LinearRequestError({ graphql: detail });
+          }
           return result.data;
         };
         const summary = await projectIssues((after) => request<{ project: { issues: { nodes: { identifier: string; parent: { identifier: string } | null; labels: { nodes: { name: string }[] } }[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } } | null }>(`query($id: String!, $after: String) { project(id: $id) { issues(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { identifier parent { identifier } labels { nodes { name } } } } } }`, linearProjectId, after));
-        if (!summary) return failure("Pathways Linear project not found. Check linearProjectId.");
+        if (!summary) return failure(`Linear project "${linearProjectId}" was not found. Update linearProjectId in ${recordRel}, then click Refresh.`, "project-missing");
         const mapIndex = selectPathwaysMap(summary, linearMapIssue);
-        if (!mapIndex) return failure(linearMapIssue ? `Pathways map issue ${linearMapIssue} not found in the linked Linear project.` : "No Pathways map issue (label wayfinder:map) found in the linked Linear project.");
+        if (!mapIndex) return failure(linearMapIssue ? `Map issue "${linearMapIssue}" was not found in Linear project "${linearProjectId}". Update linearMapIssue in ${recordRel}, then click Refresh.` : `No map issue with label "wayfinder:map" was found in Linear project "${linearProjectId}". Add that label in Linear or set linearMapIssue in ${recordRel}, then click Refresh.`, "map-missing");
         const ids = [mapIndex.identifier, ...summary.filter((issue) => issue.parent?.identifier === mapIndex.identifier).map((issue) => issue.identifier)];
         const detailQuery = `query($id: String!) { issue(id: $id) { identifier title url description updatedAt state { type name } priority estimate assignee { name } labels { nodes { name } } parent { identifier } attachments { nodes { id url } } relations { nodes { type relatedIssue { identifier title url state { type } } } } inverseRelations { nodes { type issue { identifier title url state { type } } } } } }`;
         const issues = await mapPathwaysLimited(ids, 8, async (id) => (await request<{ issue: PathwaysIssue | null }>(detailQuery, id)).issue);
@@ -2321,13 +2445,33 @@ export default async function plugin(bb: BbPluginApi) {
         const retroLibrary = join(projectsDir(), slug, "library");
         let retroDoc: string | null = null;
         if (existsSync(retroLibrary)) retroDoc = readdirSync(retroLibrary).filter((name) => /retro/i.test(name) && /\.md$/i.test(name)).sort()[0] ?? null;
-        const retro = { ...summarizePathwaysRetro(map, decisions.map((decision) => ({ id: decision.id, title: decision.request.title, state: decision.state })), Date.now()), doc: retroDoc ? join(retroLibrary, retroDoc) : null, hostId: retroDoc ? await onlyHost().catch(() => null) : null };
+        const retro = { ...summarizePathwaysRetro(map, retroDecisions(decisions), Date.now()), doc: retroDoc ? join(retroLibrary, retroDoc) : null, hostId: retroDoc ? await onlyHost().catch(() => null) : null };
         return { error: null, map, retro };
       } catch (error) {
-        const reason = error instanceof Error && (/^HTTP \d+$/.test(error.message) || error.message === "GraphQL error") ? error.message : "network error";
-        return failure(`Pathways Linear request failed: ${reason}. Check the connection and try Refresh.`);
+        if (error instanceof LinearRequestError) {
+          if (error.status === 401 || error.status === 403) {
+            return failure(`Linear rejected linearApiKey (HTTP ${error.status}). Update linearApiKey in Orchestrator plugin settings, then click Refresh.`, "auth");
+          }
+          if (error.status === 429) {
+            const wait = error.retryAfter ? `about ${error.retryAfter}s` : "a minute";
+            return failure(`Linear rate limit reached (HTTP 429). Wait ${wait} before clicking Refresh.`, "rate-limit");
+          }
+          if (error.status != null && error.status >= 500) {
+            return failure(`Linear returned a server error (HTTP ${error.status}). Try Refresh again shortly.`, "server");
+          }
+          if (error.graphql !== null) {
+            const detail = error.graphql ? `: ${error.graphql}` : "";
+            return failure(`Linear GraphQL error${detail}. Check linearProjectId ("${linearProjectId}") in ${recordRel} and linearApiKey permissions in Orchestrator settings.`, "graphql");
+          }
+          return failure(`Linear request failed (HTTP ${error.status}). Check your connection and click Refresh.`, "network");
+        }
+        if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+          return failure("Linear request timed out after 12s. Check Linear status or your connection, then click Refresh.", "timeout");
+        }
+        return failure("Linear request failed (network error). Check your connection and click Refresh.", "network");
       } };
-      return pathwaysSnapshots.view(slug, refresh ?? false, read);
+      const linearKey = `linear:${linearProjectId}:${linearMapIssue ?? ""}`;
+      return pathwaysSnapshots.view(slug, refresh ?? false, read, linearKey);
     },
     feed({ cursor, filter }) {
       return engine.feed({ cursor, filter }, feedPrompts);
@@ -2476,7 +2620,9 @@ export default async function plugin(bb: BbPluginApi) {
     const prior = engine.decisionByRequestKey(lead.address, pathwaysDecisionKey(b.ticketId, b.question));
     if (prior) return prior.id;
     const project = engine.project(b.slug);
-    const ticket = pathwaysSnapshots.peek(b.slug)?.value.map?.tickets.find((item) => item.identifier === b.ticketId);
+    const snapshotMap = pathwaysSnapshots.peek(b.slug)?.value.map;
+    if (snapshotMap?.source === "orchestrator") throw new EngineError("bad_state", "Decision drafts are only supported for Linear maps");
+    const ticket = snapshotMap?.tickets.find((item) => item.identifier === b.ticketId);
     if (!project || !ticket) throw new EngineError("not_found", "Project or ticket not found; refresh Pathways");
     if (ticket.readiness.state !== "needs decision" && ticket.displayState !== "blocked") throw new EngineError("bad_state", "Ticket has no recorded decision blocker");
     const draft = draftPathwaysDecision(ticket);
@@ -2928,8 +3074,9 @@ export default async function plugin(bb: BbPluginApi) {
   bb.cli.register({
     name: "orchestrator",
     summary: "Roles, decisions and mail of the bb orchestrator",
-    commands: usage.map((u) => ({ name: u.split(" ")[2]!, summary: u, usage: u })),
+    commands: [...usage.map((u) => ({ name: u.split(" ")[2]!, summary: u, usage: u })), ...slackWatch.cli.commands!],
     async run(argv, ctx) {
+      if (argv[0] === "slack-watch") return slackWatch!.cli.run(argv, ctx);
       const out = (s: string, code = 0) => ({ exitCode: code, stdout: s.endsWith("\n") ? s : `${s}\n` });
       try {
         const [cmd, ...rest] = argv;
@@ -2961,6 +3108,7 @@ export default async function plugin(bb: BbPluginApi) {
               const { readFileSync, statSync } = await import("node:fs");
               if (statSync(rest[1]!).size > 65536) throw new EngineError("invalid", "external mail file exceeds 64 KiB");
               const mail = externalMailSchema.parse(JSON.parse(readFileSync(rest[1]!, "utf8")));
+              if (Object.hasOwn(slackWatch!.routes(), mail.source)) throw new EngineError("forbidden", "watcher sources are reserved for slack-watch");
               allowImport(integrationRoutes(cfg.integrationRoutes), mail.source, mail.to);
               const item = engine.importMail(mail);
               void flush();
@@ -2970,6 +3118,8 @@ export default async function plugin(bb: BbPluginApi) {
               return out(JSON.stringify(engine.externalReceipts(rest[1], Number(rest[2] ?? 0), Number(rest[3] ?? 100))));
             }
             if (rest[0] === "heartbeat" && rest[1] && !rest[1].startsWith("--")) {
+              if (Object.hasOwn(slackWatch!.routes(), rest[1]!)) throw new EngineError("forbidden", "watcher heartbeats require a completed scan");
+              allowImport(integrationRoutes(cfg.integrationRoutes), rest[1]!);
               const b = guard(() => multiplayer.heartbeat(rest[1]!, everyArg(rest)));
               return out(JSON.stringify({ source: b.source, lastAt: b.lastAt, everyMs: b.everyMs, reads: b.reads }));
             }

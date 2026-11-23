@@ -57,4 +57,6 @@ test("an approval on an older head reopens review when the branch dismisses stal
   assert.equal(reducePathwaysWaitLane(keptReview, reducePathwaysProof(keptReview, []), []).steps[1]?.state, "done");
   const required = reducePathwaysPr(url, reading({ review: { state: "none" }, requiredApprovals: 2 }), 2500);
   assert.equal(reducePathwaysWaitLane(required, reducePathwaysProof(required, []), []).steps[1]?.state, "pending");
+  const changes = reducePathwaysPr(url, reading({ review: { state: "changes_requested" } }), 2500);
+  assert.equal(reducePathwaysWaitLane(changes, reducePathwaysProof(changes, []), []).steps[1]?.state, "blocked");
 });

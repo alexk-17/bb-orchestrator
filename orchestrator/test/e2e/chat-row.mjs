@@ -9,8 +9,9 @@
 // under the fold, and an open transcript was sized from a constant. Now the whole message box (field, attach, Send)
 // must be in the head's visible box, closed and open, at every size. At 1440x900 the head must not scroll at all, and
 // the cards below must keep at least a third of the detail.
-// The lead's answer (2026-11-20): the idle box sits on one line, like X's collapsed reply, and the focused, expanded box
-// must stay in view too, so each size is also checked with words typed in it, closed and open.
+// The lead's answer (2026-11-20): the idle box sits on one line, and the expanded box must stay in view too, so each
+// size is also checked with words typed in it, closed and open. Since 2026-11-21 (the owner: back to the old compact
+// bar) one line is the field with attach and Send beside it, its quiet line hidden; words typed show that line.
 // Checked closed, then open, at 1440x900, in a 720 px pane (a 1040 px window less bb's 320 px sidebar) and in a short
 // 1440x640 window. It exits 1 on any failure; with an out dir it saves a shot of each.
 import { checkBase } from "./live-guard.ts";
@@ -53,7 +54,7 @@ const measure = (page) =>
       fixed.scrollTop = was;
     }
     // the row's own height: what its content needs (a squeezed button's scrollHeight is still its content's)
-    return { sticky, rowReachable, head: Math.round(h.height), headNeeds: head.scrollHeight, chat: Math.round(c.height), gap: Math.round(b.top - h.bottom), fixed: Math.round(f.height), headOver: fixed.scrollHeight - fixed.clientHeight, detail: Math.round(d.height), cards: cards ? Math.round(cards.height) : null, wide: !!fixed.closest("[data-fits-pane]"), boxShows: { field: shows(field), attach: shows(attach), send: shows(send) }, inline: box.hasAttribute("data-inline"), boxH: Math.round(b.height), open: chat.getAttribute("data-open") };
+    return { sticky, rowReachable, head: Math.round(h.height), headNeeds: head.scrollHeight, chat: Math.round(c.height), gap: Math.round(b.top - h.bottom), fixed: Math.round(f.height), headOver: fixed.scrollHeight - fixed.clientHeight, detail: Math.round(d.height), cards: cards ? Math.round(cards.height) : null, wide: !!fixed.closest("[data-fits-pane]"), boxShows: { field: shows(field), attach: shows(attach), send: shows(send) }, inline: !!box.querySelector(":scope > .k-composer__meta[hidden]"), boxH: Math.round(b.height), open: chat.getAttribute("data-open") };
   }, slug);
 
 function judge(m, size) {
@@ -86,7 +87,7 @@ for (const [name, viewport] of Object.entries(SIZES)) {
   if ((await toggle.getAttribute("aria-expanded")) === "true") await click();
   const field = page.locator(`[data-composer="${slug}"] textarea`);
   for (const state of ["closed", "closed, typing", "open", "open, typing"]) {
-    // typing: the box focused and open to two rows; the words are cleared again before the next state, never sent
+    // typing: the box focused, its quiet line shown under it; the words are cleared again before the next state, never sent
     if (state === "open") await field.fill("");
     let blocked = state === "open" ? await click() : null;
     if (state.endsWith("typing")) {
@@ -99,7 +100,7 @@ for (const [name, viewport] of Object.entries(SIZES)) {
     const m = await measure(page);
     const bad = judge(m, name);
     if (blocked) bad.push(blocked);
-    // idle (empty, not focused), the box is one line, like X's collapsed reply; typing opens it to two rows
+    // idle (empty), the box is one line: the field, attach and Send; typing shows the quiet line under them
     if (!m.missing && !state.endsWith("typing") && !m.inline) bad.push(`the idle box isn't on one line (${m.boxH}px tall)`);
     if (!m.missing && state.endsWith("typing") && m.inline) bad.push("the focused box stayed on one line");
     const open = state.startsWith("open");

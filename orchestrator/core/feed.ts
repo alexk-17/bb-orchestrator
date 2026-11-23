@@ -41,7 +41,7 @@ export interface FeedPost {
   isNew: boolean;
   outcome: string | null;
   card: { id: string; rev: number; options: { id: string; label: string; detail: string; recommended: boolean }[]; allowText: boolean; merge: boolean } | null;
-  deliverable: { id: string; rev: number; state: string; shots: number; thumb: string | null } | null;
+  deliverable: { id: string; rev: number; state: string; shots: number; thumb: string | null; thumbFile?: { hostId: string | null; path: string | null } | null } | null;
   status: { steps: { title: string; state: string }[]; needs: string | null } | null;
   url: string | null;
   prompt: { threadId: string; id: string } | null;
@@ -246,7 +246,7 @@ function deliverableCand(d: Deliverable): Cand {
       scope: !!d.scope,
       needsOwner: d.state === "review",
       outcome: d.state === "approved" ? `approved rev ${d.feedback.filter((f) => f.outcome === "approved").at(-1)?.rev ?? d.rev}` : d.state === "changes" ? "changes requested" : null,
-      deliverable: { id: d.id, rev: d.rev, state: d.state, shots: shots.length, thumb: shots[0]?.id ?? null },
+      deliverable: { id: d.id, rev: d.rev, state: d.state, shots: shots.length, thumb: shots[0]?.id ?? null, thumbFile: shots[0] ? { hostId: shots[0].hostId, path: shots[0].path } : null },
     }),
   };
 }

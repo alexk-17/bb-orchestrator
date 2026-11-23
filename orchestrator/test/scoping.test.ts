@@ -114,7 +114,7 @@ test("a standing rule that settles a card does not settle it while the project i
   const plan = s.e.ask(s.lead, { title: "Plan: one research thread", question: "Start one read-only research thread?", options: [{ label: "Go" }, { label: "Not now" }], kind: "plan", threads: 1 });
   assert.equal(plan.state, "asked");
   assert.equal(plan.orchestrator.scope, true);
-  assert.equal(plan.ask!.allow_text, false, "a plan's go is an option, as on Needs you");
+  assert.equal(plan.ask!.allow_text, true, "the owner may answer a plan in their own words; only its go option starts threads");
   assert.throws(() => s.e.triageSettle(s.cos, plan.id, "r-any", "1", null), /isn't waiting for triage/);
 });
 

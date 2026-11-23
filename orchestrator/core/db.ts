@@ -469,6 +469,27 @@ export const MIGRATIONS: string[] = [
   `ALTER TABLE items ADD COLUMN about TEXT;
    UPDATE items SET about = 'msg:' || id WHERE kind = 'owner.message';
    CREATE INDEX items_about ON items (about, created_at)`,
+  // The highest thread number each project has given (2026-11-22): agent rows go when a retired thread takes another
+  // project or role, and spawn events age out, so neither alone remembers it. Seeded from both.
+  `CREATE TABLE thread_numbers (
+     project TEXT PRIMARY KEY,
+     last INTEGER NOT NULL
+   );
+   INSERT INTO thread_numbers (project, last)
+     SELECT project, MAX(n) FROM (
+       SELECT project, CAST(substr(address, length(project) + 9) AS INTEGER) AS n FROM agents
+         WHERE role = 'thread' AND project IS NOT NULL AND substr(address, 1, length(project) + 8) = 'thread:' || project || ':'
+       UNION ALL
+       SELECT project, CAST(substr(address, length(project) + 9) AS INTEGER) AS n FROM events
+         WHERE kind = 'spawn' AND project IS NOT NULL AND substr(address, 1, length(project) + 8) = 'thread:' || project || ':'
+     ) GROUP BY project`,
+  // Slack watcher: durable scan checkpoints, old thread roots and an idempotent import outbox.
+  `CREATE TABLE slack_watch_profiles (name TEXT PRIMARY KEY, json TEXT NOT NULL);
+   CREATE TABLE slack_watch_roots (profile TEXT NOT NULL, channel TEXT NOT NULL, ts TEXT NOT NULL,
+     PRIMARY KEY(profile,channel,ts));
+   CREATE TABLE slack_watch_events (key TEXT PRIMARY KEY, profile TEXT NOT NULL, channel TEXT NOT NULL,
+     json TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0);
+   CREATE INDEX slack_watch_pending ON slack_watch_events(profile,done)`,
 ];
 
 export function migrate(db: Db): void {

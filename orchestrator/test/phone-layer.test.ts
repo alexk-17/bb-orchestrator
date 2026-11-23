@@ -39,9 +39,9 @@ test("Reviews on a phone: its filters scroll with the fade, Post sits on the Sor
 
 test("Home on a phone: a post's face is on the gutter, and Open never takes a row of its own", () => {
   const feed = src("app/feed.tsx");
-  assert.match(feed, /\[data-orch\]\[data-phone\] \[data-feed\] \.k-post \{ padding: 12px 16px 8px; \}/);
-  assert.match(feed, /\{!\(phone && onlyOpen\) \? \(\s*<div className="mt-2 flex flex-wrap items-center gap-1\.5" data-actions="">/);
-  assert.match(feed, /onClick=\{phone && onlyOpen \? \(e\) =>/, "the post itself opens on a tap instead");
+  assert.match(feed, /\[data-orch\]\[data-phone\] \[data-feed\] \.k-post \{ grid-template-columns: 24px minmax\(0, 1fr\); column-gap: 10px; padding: 8px 16px; \}/);
+  assert.match(feed, /\{!\(phone && \(onlyOpen \|\| !phoneRow\)\) \? \(\s*<div className="mt-2 flex flex-wrap items-center gap-1\.5" data-actions="">/);
+  assert.match(feed, /onClick=\{phone && \(onlyOpen \|\| !phoneRow\) \? \(e\) =>/, "the post itself opens on a tap instead");
   assert.match(feed, /<span className="shrink-0 [^"]*whitespace-nowrap[^"]*" data-item-chip="">\{touch && d \? \(p\.scope \? "Scope" : "Delivered"\) : chipOf\(p\)\}/, "one line; on a phone a deliverable's state is said once, on its card");
   const pane = fn(feed, "ItemPane");
   assert.match(pane, /const touch = useTouchPhone\(\);/, "bb's touch phone, never the pane's width: a narrow desktop pane keeps the full chip");

@@ -17,13 +17,16 @@ import { Btn, cx } from "./ui.tsx";
  * pane's scroller: any element added or removed inside the pane (each keystroke in a reply box) made the browser re-check
  * that rule and restyle the whole pane, a few hundred ms per key on a big Projects page.
  */
-const PaneFits = createContext<(on: boolean) => void>(() => {});
+const PaneFits = createContext<(delta: 1 | -1) => void>(() => {});
+/** Each view that asks counts once (2026-11-22): Projects and the Scope page open inside it both ask, and the Scope
+ * page closing must not switch it off for Projects, which left the list a strip one row tall. */
 export function usePaneFits(on: boolean) {
-  const set = useContext(PaneFits);
+  const add = useContext(PaneFits);
   useLayoutEffect(() => {
-    set(on);
-    return () => set(false);
-  }, [on, set]);
+    if (!on) return;
+    add(1);
+    return () => add(-1);
+  }, [on, add]);
 }
 
 export function useWidth(ref: RefObject<HTMLElement | null>): number {
@@ -357,7 +360,9 @@ function PaneView({ pane, render, fill, wide, title, icon, onFocus, onClose, onS
     if (!focused) onFocus(pane.id);
   };
   const waiting = pending === pane.id;
-  const [fits, setFits] = useState(false);
+  const [asks, setAsks] = useState(0);
+  const addFits = useCallback((d: 1 | -1) => setAsks((n) => n + d), []);
+  const fits = asks > 0;
   const over = overlay?.paneId === pane.id ? overlay.node : null;
   const body = waiting ? null : render({ id: pane.id, route: pane.route, width });
   return (
@@ -442,7 +447,7 @@ function PaneView({ pane, render, fill, wide, title, icon, onFocus, onClose, onS
       <div className={cx("relative flex min-h-0 flex-1 flex-col", waiting && "bg-muted")} data-pane-body="">
         {waiting ? null : (
           <PaneContext.Provider value={pane.id}>
-          <PaneFits.Provider value={setFits}>
+          <PaneFits.Provider value={addFits}>
             {fills ? (
               <div className="flex min-h-0 flex-1 flex-col pt-2">{body}</div>
             ) : (

@@ -156,6 +156,11 @@ function PrChip({ c, title }: { c: Chip; title?: string }) {
   );
 }
 
+/** CI as a dot in its chip's colour (a phone's one-line facts); the words stay its accessible name and title. */
+function CiDot({ c }: { c: Chip }) {
+  return <span role="img" aria-label={c.text} title={c.text} data-chip={c.key} data-tone={c.tone} className="size-2.5 shrink-0 rounded-full" style={{ background: css(PR_CHIP_TONES[c.tone]) }} />;
+}
+
 const SORTS: { value: string; key: PrSort; desc: boolean; label: string }[] = [
   { value: "updated-desc", key: "updated", desc: true, label: "Newest update first" },
   { value: "updated-asc", key: "updated", desc: false, label: "Oldest update first" },
@@ -252,29 +257,33 @@ const PrCard = memo(function PrCard({ pr }: { pr: OpenPr }) {
   const chips = prChips(pr);
   const state = stateChip(chips);
   const who = reviewersOf(pr);
+  // a phone (2026-11-21, the owner: "too much wasted space"): the title on one line and the facts on one line, cut
+  // rather than wrapped; the whole title opens on a tap
+  const phone = useTouchPhone();
   return (
     <li data-pr={pr.url} data-needs={pr.needsReview ? "true" : "false"} data-open={open ? "true" : "false"}>
       <Collapsible open={open} onOpenChange={setOpen} asChild>
         <Card className="gap-0 rounded-lg py-0 shadow-none">
-          <div className="grid cursor-pointer gap-1 px-3 py-2.5" onClick={toggleOn(setOpen)} data-card-head="">
+          <div className={phone ? "grid cursor-pointer gap-0.5 px-3 py-1.5" : "grid cursor-pointer gap-1 px-3 py-2.5"} onClick={toggleOn(setOpen)} data-card-head="">
             <CollapsibleTrigger className="group flex min-h-6 min-w-0 items-start gap-1.5 rounded-sm text-left text-sm font-semibold outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50" data-toggle="" title={pr.title}>
               <ChevronRight aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
-              <span className="line-clamp-2 [overflow-wrap:anywhere]">{pr.title}</span>
+              <span className={phone ? "line-clamp-1 [overflow-wrap:anywhere]" : "line-clamp-2 [overflow-wrap:anywhere]"}>{pr.title}</span>
             </CollapsibleTrigger>
             {/* the facts wrap rather than squeeze a chip to "R…" beside a long repo name (a phone) */}
-            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 pl-5.5 text-xs" data-card-facts="">
+            <div className={phone ? "flex min-w-0 flex-nowrap items-center gap-x-1.5 overflow-hidden pl-5.5 text-xs" : "flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 pl-5.5 text-xs"} data-card-facts="">
               <ProofLink open={{ url: pr.url }} className="inline-flex min-h-6 shrink-0 items-center font-medium underline underline-offset-2" style={LINK} data-pr-link={pr.url} title={pr.url}>
                 {prRef(pr)}
               </ProofLink>
               <PrChip c={state} title={state.text} />
-              <PrChip c={ciChip(chips)} />
+              {/* a phone: CI as its colour, its words as the label and title, so the state keeps its words on one line */}
+              {phone ? <CiDot c={ciChip(chips)} /> : <PrChip c={ciChip(chips)} />}
               {who ? (
-                <span className="max-w-full min-w-0 truncate text-muted-foreground" title={who} data-reviewers="">
+                <span className={phone ? "min-w-0 shrink-[3] truncate text-muted-foreground" : "max-w-full min-w-0 truncate text-muted-foreground"} title={who} data-reviewers="">
                   {who}
                 </span>
               ) : null}
               <span className="ml-auto shrink-0 text-muted-foreground" title={pr.updatedAt} data-updated="">
-                <Ago at={Date.parse(pr.updatedAt)} /> ago
+                <Ago at={Date.parse(pr.updatedAt)} />{phone ? null : " ago"}
               </span>
             </div>
           </div>
@@ -384,8 +393,9 @@ function PrList({ prs, wide, action }: { prs: OpenPr[]; wide: boolean; action?: 
   const groups = useMemo(() => groupPrs(rows), [rows]);
   const { collapsed, toggle } = useCollapsed(GROUPS_KEY);
   const { layout, handle, boxRef } = useColumnWidths(COLS_KEY, PR_COLS, OLD_COLS_KEY);
+  const phone = useTouchPhone();
   return (
-    <div className="grid min-w-0 gap-2" data-prs-list={wide ? "rows" : "cards"}>
+    <div className={phone ? "grid min-w-0 gap-1" : "grid min-w-0 gap-2"} data-prs-list={wide ? "rows" : "cards"}>
       <div className="flex items-center gap-2">
         <Label htmlFor="open-prs-sort" className="text-xs font-normal text-muted-foreground">
           Sort
@@ -439,11 +449,11 @@ function PrList({ prs, wide, action }: { prs: OpenPr[]; wide: boolean; action?: 
           </Table>
         </div>
       ) : (
-        <div className="grid min-w-0 gap-3" data-prs-groups="">
+        <div className={phone ? "grid min-w-0 gap-1" : "grid min-w-0 gap-3"} data-prs-groups="">
           {groups.map((g) => {
             const open = !collapsed.has(g.key);
             return (
-              <section key={g.key ?? ""} className="grid min-w-0 gap-2" {...groupData(g, open)}>
+              <section key={g.key ?? ""} className={phone ? "grid min-w-0 gap-1" : "grid min-w-0 gap-2"} {...groupData(g, open)}>
                 <GroupHead g={g} open={open} onToggle={() => toggle(g.key)} />
                 {open ? (
                   <ul className="m-0 grid min-w-0 list-none gap-2 p-0" data-prs-cards="">
@@ -839,7 +849,7 @@ function OpenPrsBody({ wide }: { wide: boolean }) {
     </Btn>
   );
   return (
-    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4" data-open-prs="">
+    <div className={phone ? "grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2" : "grid min-w-0 grid-cols-[minmax(0,1fr)] gap-4"} data-open-prs="">
       {/* the five filters scroll sideways on a phone instead of widening the column (2026-11-18) */}
       <div className="grid min-w-0 grid-cols-[minmax(0,1fr)] gap-2">
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">

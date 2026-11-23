@@ -40,6 +40,7 @@ export const cardSchema = z.object({
   scopingDone: z.object({ summary: z.string(), projectMd: z.string() }).nullable().optional(),
   // the scoping task it waits under in the Scope tab (1.12.0), or none for the whole project
   scopeTask: z.string().nullable().optional(),
+  revised: z.number().optional(), // times its asker revised it while unanswered: drawn as "rev N+1"
 });
 export type Card = z.infer<typeof cardSchema>;
 
@@ -429,15 +430,32 @@ export const scopeSchema = z.object({
 });
 export type Scope = z.infer<typeof scopeSchema>;
 
+export const pathwaysErrorKindSchema = z.enum([
+  "invalid-record",
+  "auth",
+  "rate-limit",
+  "timeout",
+  "server",
+  "graphql",
+  "map-missing",
+  "project-missing",
+  "network",
+]);
+export type PathwaysErrorKind = z.infer<typeof pathwaysErrorKindSchema>;
+
 export const pathwaysSchema = z.object({
   error: z.string().nullable(),
+  errorKind: pathwaysErrorKindSchema.nullable().optional(),
+  notice: z.string().nullable().optional(),
   map: z.object({
     identifier: z.string(), title: z.string(), url: z.string(),
+    source: z.enum(["linear", "orchestrator"]).optional(),
     tickets: z.array(z.object({ identifier: z.string(), title: z.string(), url: z.string(), state: z.object({ type: z.string(), name: z.string() }), priority: z.number(), estimate: z.number().nullable(), type: z.string(), assignee: z.string().nullable(), unknown: z.array(z.string()), blockers: z.array(z.string()), displayState: z.enum(["done", "needs-you", "blocked", "claimed", "unknown", "ready"]), waitsOnYou: z.boolean(), readiness: z.object({ state: z.enum(["ready", "needs decision", "needs proof plan"]), reasons: z.array(z.string()), source: z.string() }), prLink: z.object({ state: z.enum(["missing", "linked", "ambiguous"]), urls: z.array(z.string()), source: z.enum(["attachment", "description", "both"]).nullable() }), prs: z.array(z.object({ pr: z.object({ url: z.string(), state: z.enum(["unavailable", "blocked", "ready", "merged", "closed"]), number: z.number().nullable(), title: z.string().nullable(), draft: z.boolean().nullable(), head: z.string().nullable(), createdAt: z.number().nullable(), headCommittedAt: z.number().nullable(), checksPendingSince: z.number().nullable(), reviews: z.array(z.object({ login: z.string(), state: z.string(), sha: z.string(), submittedAt: z.number().nullable() })), staleReviewDismissal: z.boolean().nullable(), requiredApprovals: z.number().nullable(), review: z.string(), checks: z.string(), mergeability: z.string(), reason: z.string(), retrievedAt: z.number() }), proof: z.object({ state: z.enum(["unrecorded", "stale", "partial", "blocked", "verified"]), verifiedSha: z.string().nullable(), liveInterface: z.string().nullable(), qaPacketUrl: z.string().nullable(), missing: z.array(z.string()), sourceUrl: z.string().nullable(), sourceLabel: z.string().nullable(), observedAt: z.number().nullable() }), waitLane: z.object({ head: z.string().nullable(), reviewFreshness: z.enum(["current", "stale", "older accepted", "unknown"]), steps: z.array(z.object({ kind: z.enum(["check run", "human review", "QA", "draft decision", "merge go"]), state: z.enum(["done", "pending", "blocked", "unknown"]), since: z.number().nullable(), owner: z.string().nullable(), note: z.string() })) }) })), pr: z.object({ url: z.string(), state: z.enum(["unavailable", "blocked", "ready", "merged", "closed"]), number: z.number().nullable(), title: z.string().nullable(), draft: z.boolean().nullable(), head: z.string().nullable(), createdAt: z.number().nullable(), headCommittedAt: z.number().nullable(), checksPendingSince: z.number().nullable(), reviews: z.array(z.object({ login: z.string(), state: z.string(), sha: z.string(), submittedAt: z.number().nullable() })), staleReviewDismissal: z.boolean().nullable(), requiredApprovals: z.number().nullable(), review: z.string(), checks: z.string(), mergeability: z.string(), reason: z.string(), retrievedAt: z.number() }).nullable(), proof: z.object({ state: z.enum(["unrecorded", "stale", "partial", "blocked", "verified"]), verifiedSha: z.string().nullable(), liveInterface: z.string().nullable(), qaPacketUrl: z.string().nullable(), missing: z.array(z.string()), sourceUrl: z.string().nullable(), sourceLabel: z.string().nullable(), observedAt: z.number().nullable() }).nullable(), waitLane: z.object({ head: z.string().nullable(), reviewFreshness: z.enum(["current", "stale", "older accepted", "unknown"]), steps: z.array(z.object({ kind: z.enum(["check run", "human review", "QA", "draft decision", "merge go"]), state: z.enum(["done", "pending", "blocked", "unknown"]), since: z.number().nullable(), owner: z.string().nullable(), note: z.string() })) }).nullable(), decisionDraft: z.object({ ticketId: z.string(), ticketUrl: z.string(), title: z.string(), question: z.string(), context: z.string(), options: z.array(z.object({ label: z.string(), detail: z.string() })), affected: z.array(z.string()) }).nullable(), decision: z.object({ state: z.enum(["missing", "ambiguous", "linked"]), cardId: z.string().nullable(), cardState: z.string().nullable(), title: z.string().nullable(), waiting: z.boolean(), direct: z.array(z.string()), transitive: z.array(z.string()) }), preflight: z.object({ state: z.enum(["not planned", "needs access", "unknown", "blocked", "declared"]), environment: z.string().nullable(), verifier: z.string().nullable(), ownerAction: z.string().nullable(), accessTicket: z.string().nullable(), gaps: z.array(z.string()), source: z.string() }) })),
     external: z.array(z.object({ identifier: z.string(), title: z.string().optional(), url: z.string().optional(), state: z.object({ type: z.string() }) })),
     edges: z.array(z.object({ from: z.string(), to: z.string(), type: z.enum(["blocks", "sub-issue", "related"]) })),
     fog: z.array(z.string()), frontier: z.array(z.string()), claimed: z.array(z.string()), blocked: z.array(z.string()), firstPath: z.array(z.string()),
     ownerActions: z.array(z.object({ identifier: z.string(), url: z.string(), action: z.string(), kind: z.enum(["sign-in", "permission", "approval", "other"]), affected: z.array(z.string()), next: z.string().nullable(), neededBefore: z.number().nullable(), onlyOpenBlocker: z.boolean() })),
+    cycles: z.array(z.array(z.string())).optional(),
   }).nullable(),
   retro: z.object({ finished: z.array(z.object({ label: z.string(), url: z.string(), prUrl: z.string().nullable() })), mergedPrs: z.array(z.object({ ticket: z.string(), url: z.string() })), decisions: z.array(z.object({ id: z.string(), title: z.string() })), stalled: z.array(z.object({ label: z.string(), url: z.string(), kind: z.string(), durationMs: z.number() })), doc: z.string().nullable(), hostId: z.string().nullable() }).nullable(),
 });
@@ -486,7 +504,7 @@ export const feedPostSchema = z.object({
   isNew: z.boolean(),
   outcome: z.string().nullable(),
   card: z.object({ id: z.string(), rev: z.number(), options: z.array(opt), allowText: z.boolean(), merge: z.boolean() }).nullable(),
-  deliverable: z.object({ id: z.string(), rev: z.number(), state: z.string(), shots: z.number(), thumb: z.string().nullable() }).nullable(),
+  deliverable: z.object({ id: z.string(), rev: z.number(), state: z.string(), shots: z.number(), thumb: z.string().nullable(), thumbFile: z.object({ hostId: z.string().nullable(), path: z.string().nullable() }).nullable().optional() }).nullable(),
   status: z.object({ steps: z.array(z.object({ title: z.string(), state: z.string() })), needs: z.string().nullable() }).nullable(),
   url: z.string().nullable(),
   prompt: z.object({ threadId: z.string(), id: z.string() }).nullable(),

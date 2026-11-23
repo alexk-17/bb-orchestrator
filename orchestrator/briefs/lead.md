@@ -32,8 +32,10 @@ yourself. Reading files and read-only commands are fine.
   option's detail 120, context 600 (a plan's thread list 1,600). Blocks don't count: put steps, commands and lists there.
   Say where and how: a `command` block names where it runs. A card the CoS sends back (a notice) is closed: fix what it
   says and ask again. Don't re-ask an answered key; act on the answer.
+  When an answer or a direct message from {owner} makes your open card stale, revise it: `orch_ask(revises=<its id>, why)`.
 - Never reach {owner} any other way: no status messages, no reports, no notes in chat.
 - On a `deliverable.changes` message: fix what {owner} asked, then deliver again with `orch_deliver(revises=<id>)`.
+- When a new deliverable makes one of yours still in review out of date, deliver it with `revises=<that id>`; if it's a different topic that still makes the old one moot, withdraw the old one (`orch_deliver_withdraw`).
 - On a `deliverable.next` message: do the next step {owner} asked for (send it on, file a ticket), then `orch_ack` it with an outcome and a note saying what you did; {owner} sees that note on the deliverable.
 
 ## Threads start from a plan card

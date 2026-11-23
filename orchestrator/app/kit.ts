@@ -9,7 +9,7 @@
 import type { Deliverables, ProjectBook, Projects, Scope, SummaryWait } from "../contract.ts";
 import { blockersOf, stateOf, statusStale, type RowState } from "./command-center.ts";
 import { age, type Lane } from "./lanes.ts";
-import { otherWaits, prsInFlight } from "./source.ts";
+import { fold, otherWaits, prsInFlight } from "./source.ts";
 
 type Project = Projects[number];
 type ProjectPr = NonNullable<Project["prs"]>[number];
@@ -108,9 +108,10 @@ export interface ListRowSpec {
   quiet: boolean;
 }
 
-export function listRow(p: Project, lanes: Lane[] | undefined, now: number, quiet: boolean): ListRowSpec {
+/** `scoping`: what waits in the project's scoping children beyond needCount (scopeExtra), counted in its "N for you" too. */
+export function listRow(p: Project, lanes: Lane[] | undefined, now: number, quiet: boolean, scoping = 0): ListRowSpec {
   const state = projectState(p, lanes);
-  const needs = needCount(p, lanes);
+  const needs = needCount(p, lanes) + scoping;
   const blocked = blockersOf(p).length;
   const waits = p.summary?.waits.length ?? 0;
   const prs = prsInFlight(p).length;
@@ -426,3 +427,86 @@ export function ownerCountsLabel(c: { needs: number; delivered: number; scope: n
 }
 /** What the Deliverables tab lists: a board's reviews never (they live on the Multiplayer tab), a scoping one once decided. */
 export const onDeliverablesTab = (d: Deliverable) => !d.board && !inScope(d);
+
+// ---------------------------------------------------------------- scoping under its project (2026-11-22)
+// Projects' list draws a project's scope entries (scopeEntries) as its children, not as a group of their own: "Whole
+// project" while it scopes, then one row per open scoping task. What waits in them (scope.tsx scopeWaitingIn) only shows
+// there, never in Needs you, so the parent row counts it too.
+
+/** A project's scope entry as a child row, and what waits on the owner in it: its cards and its deliverables in review. */
+export interface ScopeChild {
+  entry: ScopeEntry;
+  /** cards + deliverables (scope.tsx scopeWaitingIn): what the child row says */
+  waiting: number;
+  /** of those, the deliverables in review */
+  deliverables: number;
+}
+
+/** What waits in all of a project's children. */
+export const childWaiting = (kids: readonly ScopeChild[]): number => kids.reduce((n, k) => n + k.waiting, 0);
+
+/**
+ * What the children add to the project's own count (needCount), so each waiting item counts once. needCount's cards
+ * (summary.needsYou, core/history.ts) are every person-level card the project asked, scope cards included: only the
+ * scope deliverables in review are new. (2026-11-22: adding the cards too counted each scope card twice.)
+ */
+export const scopeExtra = (kids: readonly ScopeChild[]): number => kids.reduce((n, k) => n + k.deliverables, 0);
+
+/** The "Quiet" group: a project quiet by its own rule (command-center isQuiet), and nothing waits in its children. */
+export const quietWithScope = (quiet: boolean, kids: readonly ScopeChild[]): boolean => quiet && childWaiting(kids) === 0;
+
+/** The "Needs me" filter (and the others, unchanged): a project matches by its own rule, or "you" while a child waits. */
+export const matchesWithScope = (f: string, own: boolean, kids: readonly ScopeChild[]): boolean => own || (f === "you" && childWaiting(kids) > 0);
+
+/** A scoping task the search matched by name (childHits), for the search box's lines: its project, entry and name. */
+export type TaskHit = { project: string; key: string; name: string };
+
+/**
+ * The search box's head (search.tsx SearchHits). The matched lines and the matched scoping tasks count together: the list
+ * under the box shows a project opened on a task it matched, so the head saying "0 matches" contradicted it (2026-11-22).
+ */
+export function matchesHead(lines: number, tasks: number): string {
+  const n = lines + tasks;
+  return `${n} ${n === 1 ? "match" : "matches"} on the projects`;
+}
+
+/** The children whose task name has every word searched for (as the search compares: source.ts fold). */
+export function childHits(kids: readonly ScopeChild[], q: string): ScopeChild[] {
+  const words = fold(q).split(" ").filter(Boolean);
+  if (!words.length) return [];
+  return kids.filter((k) => !!k.entry.task && words.every((w) => fold(k.entry.task!.name).includes(w)));
+}
+
+/** A press of a project's chevron, with what was in sight then: the searched words, and which of its entries was open. */
+export type FoldPress = { open: boolean; q: string; held: string | null };
+
+/**
+ * Whether a project's children show: the viewer's last press of the chevron wins, unless a search or a selection came
+ * after it (a search for other words that matches a child, or another of its children opened since); a press made
+ * during a search lasts as long as that search. Else open while a child waits, holds the open entry or matches the
+ * search; else the viewer's last choice for the project (stored); else closed. A collapse used to win over everything,
+ * so a search for a task could leave its matching child hidden (review of public PR #22).
+ */
+export function childrenOpen(o: { kids: readonly ScopeChild[]; toggled: FoldPress | undefined; q: string; stored: boolean | null; held: string | null; searchHit: boolean }): boolean {
+  const t = o.toggled;
+  const ended = !!t && !!t.q.trim() && !o.q.trim();
+  const newer = !!t && ((o.searchHit && fold(o.q) !== fold(t.q)) || (o.held !== null && o.held !== t.held));
+  if (t && !ended && !newer) return t.open;
+  if (childWaiting(o.kids) > 0 || o.held !== null || o.searchHit) return true;
+  return o.stored === true;
+}
+
+/**
+ * The presses after the open entry changed to `open` (projects.tsx, on each change of the open entry): a press made while
+ * one of its project's entries was open forgets that entry once it is no longer the open one. Else, after open child A,
+ * collapse, select the parent, open A again, the press still named A and A stayed hidden (review of public PR #22's
+ * landing). Unchanged presses return the same object, so nothing re-renders.
+ */
+export function leftEntry(toggled: Record<string, FoldPress>, open: string | null): Record<string, FoldPress> {
+  const stale = Object.entries(toggled).filter(([, t]) => t.held !== null && t.held !== open);
+  if (!stale.length) return toggled;
+  return { ...toggled, ...Object.fromEntries(stale.map(([slug, t]) => [slug, { ...t, held: null }])) };
+}
+
+/** What a scoping child row says of its planner (2026-11-22): only that a task's scoping thread is stuck; else nothing. */
+export const plannerStuck = (e: ScopeEntry): string | null => (e.planner?.status === "error" ? plannerOf(e).text.split(" · ").pop()! : null);

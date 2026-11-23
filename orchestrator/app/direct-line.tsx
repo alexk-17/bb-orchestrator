@@ -20,7 +20,7 @@ import { chatOrder, chatPreview, directState, followUpOf, seenUpTo } from "./com
 import { directWrite, imageWrite, leadChatView, messageStates } from "./lead-chat.ts";
 import { admit, canSend, imageFiles } from "./lead-images.ts";
 import { AttachButton, ImageThumbs, attached, base64, useDrop, type Attached } from "./image-attach.tsx";
-import { ReplyButton, ReplyComposer, ReplyField, ReplyHint } from "./reply-composer.tsx";
+import { CompactBar, ReplyField, ReplyHint } from "./reply-composer.tsx";
 import { age } from "./lanes.ts";
 import { INLINE_LINK } from "./ref-text.tsx";
 import { firstScroller, useStickBottom } from "./stick-bottom.ts";
@@ -30,6 +30,7 @@ import { Button } from "./ui/button.tsx";
 import { Card } from "./ui/card.tsx";
 import { Checkbox } from "./ui/checkbox.tsx";
 import { Label } from "./ui/label.tsx";
+import { cn } from "./ui/utils.ts";
 import { ChevronRight, Image as ImageIcon } from "lucide-react";
 
 type Project = Projects[number];
@@ -68,10 +69,13 @@ export const directCss = /* css */ `
 [data-orch] .orch-cc .k-chat__log > .k-jump { position: sticky; bottom: 0; }
 [data-orch] .orch-cc .k-leadthread > .k-jump { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); }
 [data-orch] .orch-cc .k-chat__empty { margin: 0; font-size: 12px; line-height: 16px; color: var(--muted-foreground); }
-/* the composer (2026-11-20): the reply box (reply-composer.tsx) in the card's last zone; the row's quiet line says only
-   what changes, and a dead message's warning in the need colour */
-[data-orch] .orch-cc .k-composer { padding: 12px 16px; }
-[data-orch] .orch-cc .k-composer__hint { min-width: 0; font-size: 12px; line-height: 16px; color: var(--muted-foreground); }
+/* the composer (1.16.0, back on 2026-11-21: the owner wants the old compact bar) is reply-composer.tsx's CompactBar, the
+   one bar every message box draws: the text area with attach and Send beside it, at its last line while it grows; under
+   them the thumbnails and a refusal (image-attach.tsx), then, only when there is something to say, the follow-up switch
+   and one quiet line (always mounted: hidden, so a keystroke adds no element), a dead message's warning in the need colour */
+[data-orch] .orch-cc .k-composer__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; font-size: 12px; line-height: 16px; color: var(--muted-foreground); }
+[data-orch] .orch-cc .k-composer__meta[hidden] { display: none; }
+[data-orch] .orch-cc .k-composer__hint { min-width: 0; }
 [data-orch] .orch-cc .k-composer__hint .warn { color: var(--k-need); font-weight: 600; }
 `;
 
@@ -350,9 +354,12 @@ function resend(slug: string, id: string, refetchAll: () => void) {
  * Whatever the chat above shows, a send is the owner's tracked direct message (lead-chat.ts directWrite). While the
  * lead's thread shows, the quiet line also says where the latest message is, and offers Resend for a dead one: the
  * transcript doesn't. `via`: where the message goes, when it is not plainly "the lead" (the Scope tab's scoping thread).
- * 2026-11-20 (the owner's model, X's inline reply): the reply box (reply-composer.tsx). The field, then one row: attach
- * and the follow-up switch, one quiet line, Send. The line says only what changes (the last message's state, a dead
- * one's Resend, who passes it on) and "Not an approval", whose detail holds the full rules.
+ * 2026-11-21, the owner: "can we go back to the old more compact input bars for chatting directly to leads in projects
+ * or giving feedback for deliverables the new input bar is terrible". So it is the 1.16.0 bar again: no avatar, a
+ * bordered field (ReplyField, still never a controlled textarea) with attach and Send beside it, and under them the
+ * follow-up switch and one quiet line. Since the same day it is reply-composer.tsx's CompactBar, which every message box
+ * draws ("back to the same one that's there for the talk directly to lead"). The line says only what changes (the last message's state, a dead one's
+ * Resend, who passes it on) and "Not an approval", whose detail holds the full rules, the 48 h one included.
  */
 export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact = false, via }: { project: Project; now: number; cos: string; busy: boolean; refetchAll: () => void; onFocus: () => void; compact?: boolean; via?: string }) {
   const slug = project.slug;
@@ -456,31 +463,23 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
   const following = !!followUp && (!compact || !!text || !!images.length);
   const why = refused.get(slug) ?? null;
   const uploading = staging.has(slug);
-  // idle on one line (2026-11-20, the lead: X's reply collapses until you focus it): compact, empty, nothing attached or
-  // refused, and focus nowhere in the box. It saves a row in the project's head, so the whole box shows at 1440x900
-  const [within, setWithin] = useState(false);
-  const idle = compact && !within && !text && !images.length && !why && !states?.dead.length;
   return (
     // a file dropped anywhere on the box attaches (2026-11-17); what isn't an image is refused under the field
-    <ReplyComposer
+    <CompactBar
       role="group"
       aria-label={`Message the ${project.slug} lead`}
       data-composer={project.slug}
-      className={compact ? "k-composer compact" : "k-composer"}
+      className={cn("k-composer px-4 py-3", compact && "compact")}
       {...drop}
-      inline={idle}
-      onFocus={() => setWithin(true)}
-      onBlur={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setWithin(false);
-      }}
       field={
         <ReplyField
           ref={box}
           value={text}
           maxLength={MAX}
-          // it grows with the text (field-sizing) up to eight lines, then scrolls
+          // one line when empty; it grows with the text (field-sizing) up to about eight lines, then scrolls
           aria-keyshortcuts="Meta+Enter Control+Enter"
-          placeholder={`Message Lead · ${project.slug}…`}
+          // compact (a project's head, under its name): short words that fit a phone's one line
+          placeholder={compact ? "Message the lead…" : `Message Lead · ${project.slug}…`}
           aria-label={`Message to lead:${project.slug}`}
           onFocus={onFocus}
           onChange={(e) => update(e.target.value)}
@@ -500,48 +499,45 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
           }}
         />
       }
-      tools={
+      actions={
         <>
           <AttachButton onFiles={attach} disabled={uploading} data={{ "data-direct-attach": project.slug }} />
-          {following ? (
-            // the whole line is the target (24 px), the box and its words
-            <Label className="min-h-6 cursor-pointer text-xs font-normal text-muted-foreground" title={`Follow-up of your last message: ${followUp.text}`}>
-              <Checkbox checked={follow} onCheckedChange={(c) => update(text, c === true)} data-direct-follow={followUp.id} />
-              Follow-up
-            </Label>
-          ) : null}
+          <Btn tone="primary" className="k-composer__send" data-direct-send={project.slug} disabled={busy || uploading || !canSend(text, images.length)} title="Send (⌘/Ctrl+Enter)" onClick={() => void send()}>
+            {uploading ? "Sending…" : "Send"}
+          </Btn>
         </>
-      }
-      hint={
-        quiet ? (
-          <span className="k-composer__hint" data-composer-hint="">
-            {states?.dead.map((m) => (
-              <span key={m.id} data-direct-dead={m.id}>
-                <b className="warn">No ack for your message of {age(m.at, now)} ago</b> ·{" "}
-                <Button type="button" variant="link" className={RESEND} data-direct-resend={m.id} disabled={busy} onClick={() => resend(slug, m.id, refetchAll)}>
-                  Resend
-                </Button>
-                {" · "}
-              </span>
-            ))}
-            {states?.last ? (
-              <span data-direct-last={states.last.id} data-chat-state="">
-                Last message: {states.last.word} ·{" "}
-              </span>
-            ) : null}
-            {left < 500 ? `${left} characters left · ` : ""}
-            {via ? `${via} · ` : ""}
-            <ReplyHint detail={rules}>Not an approval</ReplyHint>
-          </span>
-        ) : null
-      }
-      actions={
-        <ReplyButton data-direct-send={project.slug} disabled={busy || uploading || !canSend(text, images.length)} title="Send (⌘/Ctrl+Enter)" onClick={() => void send()}>
-          {uploading ? "Sending…" : "Send"}
-        </ReplyButton>
       }
     >
       <ImageThumbs images={images} refused={why} onRemove={detach} disabled={uploading} data={project.slug} />
-    </ReplyComposer>
+      {/* mounted always, hidden until there is something to say: the first keystroke shows it and adds no element */}
+      <div className="k-composer__meta" hidden={!quiet}>
+        {followUp ? (
+          // the whole line is the target (24 px), the box and its words
+          <Label className={cn("min-h-6 cursor-pointer text-xs font-normal text-muted-foreground", !following && "hidden")} title={`Follow-up of your last message: ${followUp.text}`}>
+            <Checkbox checked={follow} onCheckedChange={(c) => update(text, c === true)} data-direct-follow={followUp.id} />
+            Follow-up
+          </Label>
+        ) : null}
+        <span className="k-composer__hint" data-composer-hint="">
+          {states?.dead.map((m) => (
+            <span key={m.id} data-direct-dead={m.id}>
+              <b className="warn">No ack for your message of {age(m.at, now)} ago</b> ·{" "}
+              <Button type="button" variant="link" className={RESEND} data-direct-resend={m.id} disabled={busy} onClick={() => resend(slug, m.id, refetchAll)}>
+                Resend
+              </Button>
+              {" · "}
+            </span>
+          ))}
+          {states?.last ? (
+            <span data-direct-last={states.last.id} data-chat-state="">
+              Last message: {states.last.word} ·{" "}
+            </span>
+          ) : null}
+          {left < 500 ? `${left} characters left · ` : ""}
+          {via ? `${via} · ` : ""}
+          <ReplyHint detail={rules}>Not an approval</ReplyHint>
+        </span>
+      </div>
+    </CompactBar>
   );
 }

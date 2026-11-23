@@ -62,3 +62,21 @@ export function cardBlockOrder(blocks: readonly Block[]): { lead: number[]; more
   const pick = items.find((d) => d.status === "needs_you") ?? items[0];
   return { lead, more, after, line: pick?.text ?? null };
 }
+
+/**
+ * Whether two lines say the same thing (case, spaces and a closing ? or . aside). A phone's Needs you card says its
+ * question once: not again under a title that already is it (2026-11-21, the owner: "very cluttered").
+ */
+export function sameText(a: string, b: string): boolean {
+  const n = (x: string) => x.trim().replace(/\s+/g, " ").replace(/[?.!]+$/, "").toLowerCase();
+  return n(a) === n(b);
+}
+
+/** Markdown's marks off, for a phone's closed deliverable, whose summary is clamped to two lines (the opened card draws the Markdown). */
+export function plainSummary(md: string): string {
+  return md
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/[*_`#>]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}

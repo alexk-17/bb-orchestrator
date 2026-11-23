@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { Engine, type AskInput, type DeliverResult } from "../core/engine.ts";
 import type { Agent, Decision, Item } from "../core/model.ts";
-import { allowFrom, matchRule } from "../core/rules.ts";
+import { allowFrom, matchRule, shapeOf } from "../core/rules.ts";
 
 function setup() {
   let clock = Date.parse("2026-11-14T03:00:00Z");
@@ -231,17 +231,44 @@ test("dream publish 2/2: the same key and answer twice is an offer; with the rul
   assert.equal(odd.state, "asked", "a night that also deletes pages is the owner's call");
 });
 
-test("an offer is made once per set of cards, and a 'No rule' leaves no rule and no second offer", () => {
+test("an offer is made once per set of cards, and a 'No rule' leaves no rule and no second offer", async () => {
   const s = setup();
   answered(s, s.files, preview[0]!, "1");
   answered(s, s.files, preview[1]!, "1");
   const third = answered(s, s.files, preview[2]!, "2");
+  await s.e.flush();
+  const offer = s.db.prepare(`SELECT needs_ack, state FROM items WHERE recipient = 'cos' AND send_key LIKE 'rule-offer:%'`).get() as { needs_ack: number; state: string };
+  assert.equal(offer.needs_ack, 1, "the offer needs an ack");
+  assert.equal(offer.state, "delivered", "the offer stays open in the CoS inbox after delivery");
+  assert.match(s.e.inbox(s.cos).text, /Rule offer ro-/, "the CoS can still find the offer");
   const card = s.e.proposeRule(s.cos, third.id, "files: recreate broken staging previews", null);
+  assert.equal(s.db.prepare(`SELECT state FROM items WHERE recipient = 'cos' AND send_key LIKE 'rule-offer:%'`).get()?.state, "closed", "proposing closes the offer");
   assert.equal(s.e.proposeRule(s.cos, third.id, "files: recreate broken staging previews", null).id, card.id, "proposing twice gives the one card");
   s.e.personAnswer(card.id, card.rev, "2", null, "desktop");
   assert.equal(s.e.rules().length, 0, "no rule without the owner's yes");
   answered(s, s.files, { ...preview[0]!, title: "1111 has no preview branch. Recreate it?" }, "1");
   assert.equal(offers(s).length, 1, "the same cards aren't offered again");
+  const stated = s.e.proposeStatedRule(s.cos, "Always run the full test suite before a push", "we should always be running the full suite before pushing", "files");
+  assert.equal(s.e.proposeStatedRule(s.cos, "  always   run the full test suite before a push  ", "same instruction", "files").id, stated.id, "the normalized text and project have one open card");
+  assert.throws(() => s.e.proposeStatedRule(s.qa, "Never bypass the rules", "never bypass the rules", null), (e: unknown) => e instanceof Error && "kind" in e && e.kind === "forbidden");
+  assert.throws(() => s.e.proposeStatedRule(s.cos, "Never bypass the rules", "never bypass the rules", "Bad Project"), /bad project/);
+  assert.equal(stated.ask!.title, "Make this a practice?");
+  assert.equal(stated.ask!.question, "Make this a standing practice? Always run the full test suite before a push");
+  assert.match(stated.ask!.context, /it settles no card\.\n\nYour words: "we should always be running the full suite before pushing"$/);
+  assert.ok(stated.ask!.question.length <= 160);
+  assert.deepEqual(stated.orchestrator.rule_proposal!.evidence, []);
+  approve(s, stated);
+  assert.equal(shapeOf(s.e.decision(stated.id)!), null, "a stated-rule card is no offer evidence");
+  assert.equal(offers(s).length, 1, "answering a stated-rule card does not create an offer");
+  assert.equal(s.e.rules().length, 1);
+  assert.equal(s.e.rules()[0]!.text, "Always run the full test suite before a push");
+  assert.deepEqual(s.e.rules()[0]!.kinds, ["practice"], "a stated instruction is a practice, not a plan rule");
+  assert.equal(s.e.rules()[0]!.match, null);
+  assert.equal(s.e.rules()[0]!.source, `card ${stated.id}, from the owner's words`);
+  assert.throws(() => s.e.proposeStatedRule(s.cos, "always run the full test suite before a push", "same instruction", "files"), /active rule/);
+  const declined = s.e.proposeStatedRule(s.cos, "Never delete previews", "never delete previews", "files");
+  s.e.personAnswer(declined.id, declined.rev, "2", null, "desktop");
+  assert.equal(s.e.rules().length, 1, "No rule leaves the stated instruction off the Rules list");
 });
 
 test("a CoS on the old schema can propose with just id and note: the offer's own rule is used", () => {
@@ -250,7 +277,7 @@ test("a CoS on the old schema can propose with just id and note: the offer's own
   answered(s, s.files, preview[1]!, "1");
   const third = answered(s, s.files, preview[2]!, "2");
   const card = s.e.proposeRule(s.cos, third.id, "files: recreate broken staging previews", null);
-  assert.deepEqual(card.orchestrator.rule_proposal!.match.option, ["recreate", "preview"]);
+  assert.deepEqual(card.orchestrator.rule_proposal!.match!.option, ["recreate", "preview"]);
   assert.throws(() => s.e.proposeRule(s.qa as Agent, third.id, "x", null), /only the CoS proposes a rule/);
   assert.throws(() => s.e.proposeRule(s.cos, "d-nope", "x", null), /isn't in a rule offer/);
 });
@@ -267,7 +294,7 @@ test("the CoS reorders or rewords the asker's options: the owner's pick is tied 
   }
   const third = answered(s, s.files, preview[2]!, "2");
   const card = s.e.proposeRule(s.cos, third.id, "files: recreate broken staging previews", null);
-  assert.deepEqual(card.orchestrator.rule_proposal!.match.option, ["recreate", "preview"], "the evidence reads the asker's option the owner meant");
+  assert.deepEqual(card.orchestrator.rule_proposal!.match!.option, ["recreate", "preview"], "the evidence reads the asker's option the owner meant");
   assert.match(card.ask!.context, /It fits 3 of the 3 cards/);
 });
 
@@ -299,4 +326,33 @@ test("the owner's yes works however many answers the rule comes from (a first of
   assert.equal(card.orchestrator.rule_proposal!.evidence.length, 8);
   e.personAnswer(card.id, card.rev, "1", null, "phone");
   assert.equal(e.rules().length, 1);
+});
+
+// A plan rule lets the CoS approve plan cards without the owner, so one never comes from the CoS's reading of a chat
+// line by default: only when the instruction really settles plans, and the card says what a yes allows.
+test("a stated instruction that really settles plans is a plan rule, and its card says so; a practice never settles a card", () => {
+  const s = setup();
+  const practice = s.e.proposeStatedRule(s.cos, "Use the shared test runner for every thread", "always use the shared test runner", "files");
+  approve(s, practice);
+  const plan = s.e.proposeStatedRule(s.cos, "files: approve single-thread read-only investigation plans", "you can just approve one-thread investigations", "files", "plan");
+  assert.equal(plan.ask!.question, "Make this a plan rule? files: approve single-thread read-only investigation plans");
+  assert.match(plan.ask!.context, /^A plan rule: the CoS may approve the plan cards it covers without you\./);
+  approve(s, plan);
+  const byText = new Map(s.e.rules().map((r) => [r.text, r]));
+  assert.deepEqual(byText.get("Use the shared test runner for every thread")!.kinds, ["practice"]);
+  assert.deepEqual(byText.get("files: approve single-thread read-only investigation plans")!.kinds, ["plan"]);
+  assert.throws(() => s.e.proposeStatedRule(s.cos, "x", "x", null, "question" as never), /kind is practice or plan/);
+});
+
+test("the owner approves exactly the text the card shows: a stated rule is never cut, and one too long for the card is refused", () => {
+  const s = setup();
+  const text = "Before you ask me to merge, link the green CI run, the preview URL and a screenshot of the change on a phone, and say who reviewed it";
+  assert.ok(text.length > 120);
+  assert.throws(() => s.e.proposeStatedRule(s.cos, text, "always link CI, the preview and a phone shot", null), /rule text is over 120 characters/);
+  assert.equal(s.e.needsYou().cards.length, 0, "no card with part of it");
+  const fits = text.slice(0, 120).trim();
+  const d = s.e.proposeStatedRule(s.cos, fits, "always link CI, the preview and a phone shot", null);
+  assert.ok(d.ask!.question.endsWith(fits), "the whole text is on the card");
+  approve(s, d);
+  assert.equal(s.e.rules()[0]!.text, fits, "and the saved text is what was shown");
 });

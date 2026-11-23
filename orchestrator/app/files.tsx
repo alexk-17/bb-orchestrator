@@ -12,6 +12,7 @@ import type { z } from "zod";
 import { WRITES, type Outputs, type outputRemoveBody } from "../contract.ts";
 import { openInBb } from "./open-proof.ts";
 import { ProofLink } from "./proof-link.tsx";
+import { ImagePopout } from "./image-popout.tsx";
 import { gate, write } from "./store.ts";
 import { Fold } from "./answer-ui.tsx";
 import { Button } from "./ui/button.tsx";
@@ -233,12 +234,18 @@ export function FileRow2({ f, host, after, onDeliverable, noProject }: { f: File
 /** A deliverable's file as a full item: an image or a video inline at full width, else its row. */
 export function FileFull({ f, host, after }: { f: FileItem; host: string | null; after: () => void }) {
   const [broken, setBroken] = useState(false);
+  const navigate = useBbNavigate();
   if (servable(f, "image") && !broken)
     return (
       <figure className="m-0" data-file={f.key} data-file-kind="images">
-        <ProofLink open={openable(f, host)} fallback={routeOf(f)} className={cn(SHOT, "block")}>
-          <img src={routeOf(f)} alt={f.caption ?? f.name} loading="lazy" decoding="async" onError={() => setBroken(true)} className="block h-auto w-full cursor-zoom-in" />
-        </ProofLink>
+        <ImagePopout
+          src={routeOf(f)!}
+          caption={f.caption ?? f.name}
+          className={cn(SHOT, "block")}
+          sidePanel={() => openInBb(navigate, openable(f, host))}
+        >
+          <img src={routeOf(f)} alt={f.caption ?? f.name} loading="lazy" decoding="async" onError={() => setBroken(true)} className="block h-auto w-full" />
+        </ImagePopout>
         <figcaption className="mt-1 text-xs text-muted-foreground [overflow-wrap:anywhere]">
           {f.caption ? `${f.caption} · ` : ""}
           {f.name}

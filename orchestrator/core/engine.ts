@@ -348,6 +348,15 @@ function parsePoints(points: unknown): { points?: Point[] } {
   return { points: r.data };
 }
 
+/** A plan's go and thread count: exactly one go option (the recommended one unless another is marked), 1 to 10 threads. */
+function planOf(options: Opt[], threads: number): { threads: number; go: string } {
+  const gos = options.filter((o) => o.go);
+  if (gos.length > 1) throw new EngineError("invalid", "a plan has exactly one go option");
+  if (gos.length === 0) options[0]!.go = true;
+  if (!Number.isInteger(threads) || threads < 1 || threads > 10) throw new EngineError("invalid", "a plan starts 1 to 10 threads");
+  return { threads, go: options.find((o) => o.go)!.id };
+}
+
 export interface AskInput {
   title: string;
   question: string;
@@ -367,6 +376,9 @@ export interface AskInput {
   scopingDone?: { summary: string; projectMd?: string; doc?: string; task?: string | null } | null;
   /** A lead's scoping task (1.12.0, its id or an open task's name): the card goes to the owner's Scope pane under it. */
   scopeTask?: string | null;
+  /** Revise this open card of the asker's own (its decision id) instead of filing a new one; `why` says what made it stale. */
+  revises?: string | null;
+  why?: string | null;
 }
 
 /** The "Scoping done?" card's options, fixed so the owner's yes can't be misread: option 1 makes the project active. */
@@ -1028,13 +1040,21 @@ export class Engine {
         throw new EngineError("conflict", `thread ${threadId} is already ${existing.address}`);
       }
       const proj = role === "cos" || role === "steward" ? null : project;
-      // a retired thread may take a new role; its old address stays retired (items keep naming it)
-      this.db.prepare(`DELETE FROM agents WHERE thread_id = ? AND retired_at IS NOT NULL`).run(threadId);
+      // the next number is one past the highest ever given in the project, retired ones included (items and history
+      // name them), read before this thread's own retired row goes: a count fell short once re-registering deleted rows.
+      // thread_numbers keeps that highest when its row is gone (a retired thread moved to another project or role).
       let n: number | undefined;
       if (role === "thread") {
-        const c = this.db.prepare(`SELECT COUNT(*) AS c FROM agents WHERE role = 'thread' AND project = ?`).get(proj) as { c: number };
-        n = c.c + 1;
+        const prefix = `thread:${proj}:`;
+        const m = this.db
+          .prepare(`SELECT MAX(CAST(substr(address, ?) AS INTEGER)) AS m FROM agents WHERE role = 'thread' AND project = ? AND substr(address, 1, ?) = ?`)
+          .get(prefix.length + 1, proj, prefix.length, prefix) as { m: number | null };
+        const last = this.db.prepare(`SELECT last FROM thread_numbers WHERE project = ?`).get(proj) as { last: number } | undefined;
+        n = Math.max(m.m ?? 0, last?.last ?? 0) + 1;
+        this.db.prepare(`INSERT INTO thread_numbers (project, last) VALUES (?, ?) ON CONFLICT (project) DO UPDATE SET last = excluded.last`).run(proj, n);
       }
+      // a retired thread may take a new role; its old address stays retired (items keep naming it)
+      this.db.prepare(`DELETE FROM agents WHERE thread_id = ? AND retired_at IS NOT NULL`).run(threadId);
       const address = addressFor(role, proj, n);
       if (this.agentByAddress(address)) throw new EngineError("conflict", `${address} is already taken`);
       if (role === "lead") this.ensureProject(proj!, null); // its type is picked before its Pokémon
@@ -2774,9 +2794,70 @@ export class Engine {
     }));
   }
 
+  /**
+   * The asker revises its own unanswered card (2026-11-20: an answer or a direct message from the owner made its options
+   * stale, and only the CoS could withdraw it). Same id; the save bumps rev, so an answer to the old rev is refused as
+   * changed. On the owner's Needs you (or Scope pane) it is updated in place and the CoS gets a read-only copy; still
+   * waiting for triage, the CoS is told to triage this version; with a thread's lead, the lead is told.
+   */
+  private revise(by: Agent, id: string, input: AskInput): Decision {
+    const why = oneLine(input.why ?? "", 300, "why (what made the card stale)");
+    return tx(this.db, () => {
+      const d = this.mustDecision(id);
+      if (d.orchestrator.asker !== by.address) throw new EngineError("forbidden", `only ${d.orchestrator.asker}, who asked ${id}, revises it`);
+      if (d.state !== "open" && d.state !== "asked") throw new EngineError("bad_state", `${id} is ${d.state}${d.withdrawn ? ` (${d.withdrawn.moot ? "moot" : "withdrawn"}: ${d.withdrawn.reason})` : ""}: only an unanswered card can be revised; ask again with a new card`);
+      if (d.orchestrator.scoping_done) throw new EngineError("invalid", `${id} is a "Scoping done?" card: its options are fixed`);
+      if ((input.kind ?? d.kind) !== d.kind || (input.action ?? d.orchestrator.action) !== d.orchestrator.action) throw new EngineError("invalid", `${id} is a ${d.orchestrator.action === "merge" ? "merge card" : d.kind}: a revision keeps its kind`);
+      const options = this.options(input.options, 2);
+      const tooLong = cardRefusal({ question: input.question, context: input.context, options, kind: d.kind });
+      if (tooLong) throw new EngineError("invalid", tooLong);
+      if (d.kind === "plan") d.orchestrator.plan = planOf(options, input.threads ?? d.orchestrator.plan?.threads ?? 1);
+      else if (options.some((o) => o.go)) throw new EngineError("invalid", "only a plan has a go option");
+      const r = d.request;
+      r.title = oneLine(input.title, 60, "title");
+      r.question = oneLine(input.question, 600, "question");
+      r.context = (input.context ?? "").slice(0, 8192);
+      r.options = options;
+      if (input.blocks !== undefined) r.blocks = parseBlocks(input.blocks);
+      // a merge card stays one: the owner's yes is read against its PR, so a revision can't drop it
+      if (d.orchestrator.action === "merge" && !(r.blocks ?? []).some((b) => b.kind === "pr")) throw new EngineError("invalid", `${id} is a merge card: its revision needs a pr block (the PR's URL, and a one-line verdict as its note)`);
+      if (d.orchestrator.at_level !== "lead") this.gate(d);
+      const n = (d.orchestrator.revised?.count ?? 0) + 1;
+      d.orchestrator.revised = { count: n, at: iso(this.now()), why };
+      // on the owner's screen: the asker's new wording replaces the CoS's; same place in the list, no new push
+      if (d.ask) d.ask = { ...d.ask, title: r.title, question: r.question, context: r.context, options: options.map((o, i) => ({ ...o, recommended: i === 0 })) };
+      // cards merged into it duplicated the old question: one answer to the new one mustn't settle them, so each goes
+      // back to the CoS's triage on its own
+      const detached = d.merged.map((mid) => this.decision(mid)).filter((m): m is Decision => !!m && m.state === "merged");
+      d.merged = [];
+      this.save(d, "revise", by.address, why, null);
+      for (const m of detached) {
+        m.state = "open";
+        m.merged_into = null;
+        m.orchestrator.triage.triaged_at = null;
+        m.orchestrator.triage.by = null;
+        this.save(m, "merge", "engine", `detached: ${d.id}, which it was merged into, was revised by its asker`, null);
+        this.fileWithCos(m, m.orchestrator.asker);
+      }
+      const card = `${d.id} ${JSON.stringify(r.title)}`;
+      if (d.orchestrator.at_level === "lead") {
+        if (this.agentByAddress(`lead:${d.project}`)) this.put({ recipient: `lead:${d.project}`, sender: by.address, kind: "notice", ref: d.id, body: `${by.address} revised ${card} (revision ${n}): ${JSON.stringify(why)}. This version replaces the one you had: ${this.describe(d, "lead")}`, key: `revise:${d.id}:${n}`, needsAck: false });
+      } else if (this.agentByAddress("cos")) {
+        const body =
+          d.state === "asked"
+            ? `${by.address} revised ${card} (revision ${n}), already on ${this.owner.name}'s ${d.orchestrator.scope ? "Scope pane" : "Needs you"}: ${JSON.stringify(why)}. Read-only copy: it was updated in place there, with the asker's new wording; nothing for you to do (to merge a card into it, pass into_revision=${n}). Question: ${JSON.stringify(r.question)} Options: ${options.map((o) => `${o.id}) ${JSON.stringify(o.label)}`).join(" ")}.`
+            : `${by.address} revised ${card} (revision ${n}) before you triaged it: ${JSON.stringify(why)}. Triage this version with revision=${n}, not the one you had: ${this.describe(d, "cos")}`;
+        const back = detached.length ? ` ${detached.map((m) => m.id).join(", ")} ${detached.length === 1 ? "was" : "were"} merged into it and ${detached.length === 1 ? "is" : "are"} back with you to triage on ${detached.length === 1 ? "its" : "their"} own.` : "";
+        this.put({ recipient: "cos", sender: by.address, kind: d.state === "asked" ? "copy" : "notice", ref: d.id, body: body + back, key: `revise:${d.id}:${n}`, needsAck: false });
+      }
+      return this.mustDecision(d.id);
+    });
+  }
+
   /** File a question. A thread's goes to its lead; a lead's or the Steward's to the CoS. Never blocks. */
   ask(by: Agent, input: AskInput): Decision {
     if (by.role === "cos") throw new EngineError("forbidden", `the CoS asks ${this.owner.name} through triage(ask_person)`);
+    if (input.revises) return this.revise(by, input.revises, input);
     const t = this.now();
     // a scoping project's lead, or a lead filing into one of its scoping tasks, files into the owner's Scope pane; its
     // threads still ask it, as always
@@ -2792,12 +2873,7 @@ export class Engine {
     let plan: { threads: number; go: string } | null = null;
     if (kind === "plan") {
       if (by.role !== "lead") throw new EngineError("forbidden", "only a lead files a plan card");
-      const gos = options.filter((o) => o.go);
-      if (gos.length > 1) throw new EngineError("invalid", "a plan has exactly one go option");
-      if (gos.length === 0) options[0]!.go = true; // the recommended option is the go unless another is marked
-      const threads = input.threads ?? 1;
-      if (!Number.isInteger(threads) || threads < 1 || threads > 10) throw new EngineError("invalid", "a plan starts 1 to 10 threads");
-      plan = { threads, go: options.find((o) => o.go)!.id };
+      plan = planOf(options, input.threads ?? 1);
     } else if (options.some((o) => o.go)) throw new EngineError("invalid", "only a plan has a go option");
     const atCos = by.role !== "thread";
     const asker = by.address;
@@ -2905,7 +2981,10 @@ export class Engine {
         : d.orchestrator.action === "merge"
           ? "A merge card: you may not settle or merge it. triage(ask_person)."
           : "triage it: settle (cite a rule id), ask_person, or merge into a duplicate.";
-    return `${JSON.stringify(d.request.title)} ${JSON.stringify(d.request.question)} Options: ${opts}. ${what}`;
+    // its asker revised it: the CoS triages it naming that revision (cosDecision), so the notice says which one this is
+    const n = d.orchestrator.revised?.count ?? 0;
+    const rev = !n ? "" : forWhom === "cos" ? ` This is revision ${n}: triage it with revision=${n}, and merge another card into it with into_revision=${n}.` : ` This is revision ${n}: answer it with revision=${n}.`;
+    return `${JSON.stringify(d.request.title)} ${JSON.stringify(d.request.question)} Options: ${opts}. ${what}${rev}`;
   }
 
   private fileWithCos(d: Decision, by: string): void {
@@ -3028,11 +3107,15 @@ export class Engine {
    * A lead settles its own thread's question: from a project rule, or with no rule (null or "") as its own call, which
    * needs a note saying why (the owner approved it, 2026-11-13: leads without standing rules still close their threads' cards).
    */
-  leadAnswer(by: Agent, id: string, ruleId: string | null, option: string, note: string | null): Decision {
+  /** `revision`: the version of the thread's question the lead answers (0 or left out: never revised); a newer one is refused. */
+  leadAnswer(by: Agent, id: string, ruleId: string | null, option: string, note: string | null, revision = 0): Decision {
     return tx(this.db, () => {
       const d = this.mustDecision(id);
       if (by.role !== "lead" || d.orchestrator.at_level !== "lead" || d.project !== by.project) throw new EngineError("forbidden", `${id} isn't your thread's question`);
       if (d.state !== "open") throw new EngineError("bad_state", `${id} is ${d.state}`);
+      // an option id means what the version the lead read said: a thread's revision since may have replaced its options
+      const now = d.orchestrator.revised?.count ?? 0;
+      if (revision !== now) throw new EngineError("conflict", `${id} is at revision ${now}, you answered revision ${revision}: its thread revised it since. Answer this version with revision=${now}: ${this.describe(d, "lead")}`);
       if (ruleId?.trim()) return this.settle(d, by, ruleId.trim(), option, note);
       if (d.orchestrator.action === "merge") throw new EngineError("forbidden", `${d.id} is a merge card: only ${this.owner.name} answers it`);
       if (d.kind !== "question") throw new EngineError("forbidden", `${d.id} is a ${d.kind}: only a standing rule settles it below ${this.owner.name}`);
@@ -3090,30 +3173,33 @@ export class Engine {
     }
   }
 
-  triageSettle(by: Agent, id: string, ruleId: string, option: string, note: string | null): Decision {
+  triageSettle(by: Agent, id: string, ruleId: string, option: string, note: string | null, revision?: number): Decision {
     return tx(this.db, () => {
-      const d = this.cosDecision(by, id);
+      const d = this.cosDecision(by, id, revision);
       return this.settle(d, by, ruleId, option, note);
     });
   }
 
-  private cosDecision(by: Agent, id: string): Decision {
+  /** A card the CoS triages, as the version it read (`revision`, 0 or left out for one never revised): an asker's revision since is refused as stale. */
+  private cosDecision(by: Agent, id: string, revision = 0): Decision {
     if (by.role !== "cos") throw new EngineError("forbidden", "only the CoS triages");
     const d = this.mustDecision(id);
     if (d.orchestrator.at_level !== "cos") throw new EngineError("bad_state", `${id} isn't waiting for triage (it is at ${d.orchestrator.at_level})`);
     if (d.state !== "open") throw new EngineError("bad_state", `${id} is ${d.state}`);
+    const now = d.orchestrator.revised?.count ?? 0;
+    if (revision !== now) throw new EngineError("conflict", `${id} is at revision ${now}, you triaged revision ${revision}: its asker revised it since. Triage this version with revision=${now}: ${this.describe(d, "cos")}`);
     return d;
   }
 
-  triageAskPerson(by: Agent, id: string, p: { title?: string; question: string; context?: string; options: { label: string; detail?: string }[]; allowText: boolean }): Decision {
+  triageAskPerson(by: Agent, id: string, p: { title?: string; question: string; context?: string; options: { label: string; detail?: string }[]; allowText: boolean; revision?: number }): Decision {
     return tx(this.db, () => {
-      const d = this.cosDecision(by, id);
+      const d = this.cosDecision(by, id, p.revision);
       // a plan's options are the lead's (the go option must survive); the CoS may reword only the question
       const options = d.kind === "plan" ? d.request.options : this.options(p.options, 2);
       // the owner reads the CoS's wording, so it gets the asker's caps; a context left out is the asker's, already checked
       const tooLong = cardRefusal({ question: p.question, context: p.context ?? "", options: d.kind === "plan" ? [] : options, kind: d.kind });
       if (tooLong) throw new EngineError("invalid", tooLong);
-      this.putAsk(d, "cos", p.title ?? d.request.title, p.question, p.context ?? d.request.context, options, d.kind === "plan" ? false : p.allowText);
+      this.putAsk(d, "cos", p.title ?? d.request.title, p.question, p.context ?? d.request.context, options, p.allowText);
       d.orchestrator.triage.triaged_at = iso(this.now());
       d.orchestrator.triage.by = by.address;
       this.save(d, "ask", by.address, null, null);
@@ -3136,11 +3222,14 @@ export class Engine {
     };
   }
 
-  triageMerge(by: Agent, id: string, into: string): Decision {
+  triageMerge(by: Agent, id: string, into: string, revision?: number, intoRevision = 0): Decision {
     return tx(this.db, () => {
-      const d = this.cosDecision(by, id);
+      const d = this.cosDecision(by, id, revision);
       const p = this.mustDecision(into);
       if (p.id === d.id) throw new EngineError("invalid", "a decision can't merge into itself");
+      // the duplicate takes the destination's answer: judged a duplicate of a version its asker has since revised, it isn't
+      const now = p.orchestrator.revised?.count ?? 0;
+      if (intoRevision !== now) throw new EngineError("conflict", `${into} is at revision ${now}, you merged into revision ${intoRevision}: its asker revised it since. Check it still duplicates ${id}, then merge with into_revision=${now}: ${this.describe(p, "cos")}`);
       if (!["open", "asked"].includes(p.state) || p.orchestrator.at_level === "lead") throw new EngineError("bad_state", `${into} is ${p.state} at ${p.orchestrator.at_level}`);
       if (p.orchestrator.scope) throw new EngineError("forbidden", `${into} waits in ${this.owner.name}'s Scope pane (${this.scopeWhy(p.project, p.orchestrator.scope_task)}): your copy is read-only`);
       // a merged card takes its parent's answer: a plan's go or a merge card's yes must come from the owner on that card itself
@@ -3314,10 +3403,10 @@ export class Engine {
    * step the asker can take itself). Withdrawn with the reason, never answered; the asker is told what to fix, and
    * cards merged into it go back too.
    */
-  triageBounce(by: Agent, id: string, reason: string): Decision {
+  triageBounce(by: Agent, id: string, reason: string, revision?: number): Decision {
     const why = oneLine(reason ?? "", 300, "the reason (note)");
     return tx(this.db, () => {
-      const d = this.cosDecision(by, id);
+      const d = this.cosDecision(by, id, revision);
       this.bounceOne(d, why, by.address);
       for (const mid of d.merged) {
         const m = this.decision(mid);
@@ -3419,7 +3508,7 @@ export class Engine {
       d.deferred = null;
       const proposal = d.orchestrator.rule_proposal;
       if (proposal && opt?.id === "1") {
-        const r = this.addRule({ text: proposal.text, project: proposal.project, kinds: ["question"], expiresAt: null, source: `card ${d.id}, from ${proposal.evidence.length} of ${this.owner.name}'s answers`, match: proposal.match });
+        const r = this.addRule({ text: proposal.text, project: proposal.project, kinds: proposal.kinds ?? ["question"], expiresAt: null, source: proposal.evidence.length ? `card ${d.id}, from ${proposal.evidence.length} of ${this.owner.name}'s answers` : `card ${d.id}, from ${this.owner.name}'s words`, match: proposal.match });
         proposal.rule_id = r.id;
       }
       this.save(d, "answer", "person", wasDeferred ? "answered while deferred" : proposal?.rule_id ? `rule ${proposal.rule_id} added` : null, rev);
@@ -3589,11 +3678,11 @@ export class Engine {
       kind: "notice",
       ref: d.id,
       key: `rule-offer:${offerId}`,
-      needsAck: false,
+      needsAck: true,
       body:
         `Rule offer ${offerId}: ${this.owner.name} answered ${cards.length} cards (${s.group.startsWith("project:") ? `project ${s.group.slice("project:".length)}` : `from ${s.group.slice("asker:".length)}`}) the same way:\n${lines.join("\n")}\n${how}\n` +
         `If the next ones should be settled without ${this.owner.name}, propose it: triage(action=propose_rule, id=${JSON.stringify(d.id)}, note=<the rule in one line, at most 120 characters>), ` +
-        `optionally rule={from, words, without, key_prefix, option} to narrow it. ${this.owner.Name} gets one "Make this a rule?" card. Ignore this if the answers were one-offs.`,
+        `optionally rule={from, words, without, key_prefix, option} to narrow it. ${this.owner.Name} gets one "Make this a rule?" card. Propose a rule, or ack this offer with outcome="refused" and a note for one-offs.`,
     });
   }
 
@@ -3632,7 +3721,10 @@ export class Engine {
       if (fits.length < 2) throw new EngineError("invalid", `the rule fits ${fits.length} of the ${evidence.length} cards it comes from; it needs 2 (${misses.join("; ")})`);
       const key = `rule-proposal:${offer.id}`;
       const dup = this.db.prepare(`SELECT id FROM decisions WHERE asker = 'cos' AND json_extract(json, '$.request_key') = ? AND state IN ('open','asked')`).get(key) as { id: string } | undefined;
-      if (dup) return this.mustDecision(dup.id);
+      if (dup) {
+        this.closeItems(`recipient = 'cos' AND send_key = ?`, [`rule-offer:${offer.id}`], "done", `proposed as ${dup.id}`);
+        return this.mustDecision(dup.id);
+      }
       const project = offer.grp.startsWith("project:") ? offer.grp.slice("project:".length) : null;
       const t = this.now();
       const options: Opt[] = [
@@ -3690,6 +3782,86 @@ export class Engine {
       };
       this.save(d, "add", "cos", `rule offer ${offer.id}`, null);
       this.putAsk(d, "cos", d.request.title, question, d.request.context, options, false);
+      this.save(d, "ask", "cos", null, null);
+      this.ports.cardUp?.(d);
+      this.closeItems(`recipient = 'cos' AND send_key = ?`, [`rule-offer:${offer.id}`], "done", `proposed as ${d.id}`);
+      return this.mustDecision(d.id);
+    });
+  }
+
+  /**
+   * The CoS proposes a standing instruction the owner stated in their own words (chat, a card note). By default it is a
+   * practice: leads, the CoS and threads follow it, and it settles no card. Only one that really settles plan decisions
+   * is a plan rule (it lets the CoS approve the plan cards it covers), and its card says so. The card's
+   * question carries the whole text, so the owner approves exactly what is saved.
+   */
+  proposeStatedRule(by: Agent, text: string, quote: string, project: string | null = null, kind: "practice" | "plan" = "practice"): Decision {
+    if (by.role !== "cos") throw new EngineError("forbidden", "only the CoS proposes a rule");
+    if (kind !== "practice" && kind !== "plan") throw new EngineError("invalid", `kind is practice or plan, not ${kind}`);
+    const ruleText = oneLine(text ?? "", 120, "rule text");
+    const ownerQuote = (quote ?? "").trim().slice(0, 600);
+    if (!ownerQuote) throw new EngineError("invalid", "quote is empty");
+    if (project !== null && !PROJECT_RE.test(project)) throw new EngineError("invalid", `bad project ${project}`);
+    const normalized = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+    const key = `rule-stated:${createHash("sha256").update(JSON.stringify([normalized(ruleText), project, kind])).digest("hex")}`;
+    return tx(this.db, () => {
+      if (this.rules().some((r) => r.revokedAt === null && (r.expiresAt === null || r.expiresAt > this.now()) && r.project === project && normalized(r.text) === normalized(ruleText)))
+        throw new EngineError("invalid", "an active rule already has this text and project");
+      const dup = this.db.prepare(`SELECT id FROM decisions WHERE asker = 'cos' AND json_extract(json, '$.request_key') = ? AND state IN ('open','asked')`).get(key) as { id: string } | undefined;
+      if (dup) return this.mustDecision(dup.id);
+      const t = this.now();
+      const practice = kind === "practice";
+      const options: Opt[] = practice
+        ? [{ id: "1", label: "Make it a practice", detail: "Add it to Rules: agents follow it; it settles no card" }, { id: "2", label: "No", detail: "Leave it off Rules" }]
+        : [{ id: "1", label: "Make it a rule", detail: "Add it to Rules: the CoS may approve the plans it covers" }, { id: "2", label: "No rule", detail: "Leave it off Rules" }];
+      // never cut: the text is at most 120 characters, so the question shows all of it
+      const question = practice ? `Make this a standing practice? ${ruleText}` : `Make this a plan rule? ${ruleText}`;
+      const what = practice ? "A practice: leads, the CoS and threads follow it; it settles no card." : "A plan rule: the CoS may approve the plan cards it covers without you.";
+      const context = `${what}\n\nYour words: ${JSON.stringify(ownerQuote)}`;
+      const d: Decision = {
+        schema: 1,
+        id: decisionId(t),
+        rev: 0,
+        state: "open",
+        kind: "question",
+        created_at: iso(t),
+        updated_at: iso(t),
+        project,
+        request_key: key,
+        request: {
+          by: { role: "cos", project: null, thread: by.threadId, terminal: null, machine: null, address: "cos" },
+          title: practice ? "Make this a practice?" : "Make this a rule?",
+          question,
+          context,
+          options,
+          blocks: [],
+        },
+        reply_to: { labels: { "orchestrator.address": "cos" }, terminal: null, machine: null },
+        ask: null,
+        answer: null,
+        relay: null,
+        ack: null,
+        cos_notified_at: null,
+        owed_from: null,
+        merged_into: null,
+        merged: [],
+        withdrawn: null,
+        deferred: null,
+        returned: null,
+        history: [],
+        orchestrator: {
+          at_level: "person",
+          asker: "cos",
+          origin: "cos",
+          action: null,
+          triage: { filed_at: null, due_at: null, triaged_at: iso(t), by: "cos", escalated_at: null },
+          forwarded_by: null,
+          plan: null,
+          rule_proposal: { text: ruleText, project, match: null, evidence: [], kinds: [kind], rule_id: null },
+        },
+      };
+      this.save(d, "add", "cos", "stated rule", null);
+      this.putAsk(d, "cos", d.request.title, question, context, options, false);
       this.save(d, "ask", "cos", null, null);
       this.ports.cardUp?.(d);
       return this.mustDecision(d.id);
@@ -4118,7 +4290,7 @@ export class Engine {
 
   /** A card from a scoping project's lead, or one filed into a scoping task: straight to the owner in its Scope pane, and a read-only copy to the CoS. */
   private fileInScope(d: Decision, by: string): void {
-    this.putAsk(d, by, d.request.title, d.request.question, d.request.context, d.request.options, d.kind !== "plan");
+    this.putAsk(d, by, d.request.title, d.request.question, d.request.context, d.request.options, true);
     d.orchestrator.scope = true;
     this.save(d, "ask", "engine", "scoping: in the owner's Scope pane", null);
     if (!this.agentByAddress("cos")) return;
@@ -5068,10 +5240,13 @@ export class Engine {
       if (input.revises) {
         d = this.mustDeliverable(input.revises);
         if (d.lead !== by.address) throw new EngineError("forbidden", `${d.id} is ${d.lead}'s deliverable`);
-        if (d.state !== "changes") throw new EngineError("bad_state", `${d.id} is ${d.state}: revise only a deliverable ${this.owner.name} sent back with changes`);
-        // an old-schema lead revises without board: the revision stays on its board
+        // still in review too (2026-11-21): a newer deliverable on the same topic replaces it in place, not beside it
+        if (d.state !== "changes" && d.state !== "review") throw new EngineError("bad_state", `${d.id} is ${d.state}: revise only a deliverable still in review or one ${this.owner.name} sent back with changes`);
+        // an old-schema lead revises without board: the revision stays on its board. Still in review, its flag is
+        // unanswered, so it stays and the new revision gets its own Needs you card; sent back, the owner already settled it.
         if (!board && d.board) {
-          board = { id: d.board.id, ...(d.board.record ? { record: d.board.record } : {}) };
+          const flag = d.state === "review" ? d.board.flag : undefined;
+          board = { id: d.board.id, ...(d.board.record ? { record: d.board.record } : {}), ...(flag ? { flag } : {}) };
           scoping = false;
         }
         this.closeBoardCard(d, `rev ${d.rev + 1} replaced it`);
@@ -5407,7 +5582,6 @@ export class Engine {
         if (d.state !== "open" || d.orchestrator.at_level !== "cos") return;
         this.putAsk(d, "engine", d.request.title, d.request.question, `${d.request.context}\n\n*CoS didn't triage this within ${Math.round(this.settings.escalateMs / 60000)} min; it is as the asker wrote it.*`.trim(), d.request.options, true);
         d.orchestrator.triage.escalated_at = iso(t);
-        if (d.kind === "plan") d.ask!.allow_text = false;
         this.save(d, "ask", "engine", "CoS didn't triage", null);
         this.upOrHold(d);
       });

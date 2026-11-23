@@ -13,6 +13,7 @@ import { Card } from "./ui/card.tsx";
 import { Input } from "./ui/input.tsx";
 import { age } from "./lanes.ts";
 import { hitWord, type Hit } from "./source.ts";
+import { matchesHead, type TaskHit } from "./kit.ts";
 
 type Project = Projects[number];
 
@@ -47,11 +48,11 @@ function Line({ p, onOpen, children, tail, data, title }: { p: Project | undefin
 
 /** The search box: one query over the loaded projects (source.ts searchLoaded), and older answered cards. Esc leaves
  * it with the words kept, as every text box on the page does (keys.ts); the box's own × clears it. */
-export function SearchBox({ value, onChange }: { value: string; onChange: (q: string) => void }) {
+export function SearchBox({ value, onChange, autoFocus }: { value: string; onChange: (q: string) => void; autoFocus?: boolean }) {
   return (
     <label className="search relative block" data-search="">
       <Search aria-hidden className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-      <Input type="search" className="pl-9" value={value} placeholder="PR number, ticket id or words" aria-label="Search the projects" data-search-input="" onChange={(e) => onChange(e.target.value)} />
+      <Input type="search" className="pl-9" value={value} placeholder="PR number, ticket id or words" aria-label="Search the projects" data-search-input="" autoFocus={autoFocus} onChange={(e) => onChange(e.target.value)} />
     </label>
   );
 }
@@ -72,7 +73,7 @@ export function useSettled(v: string, ms = 250): string {
 }
 
 /** What the search found: the loaded lines by project, then older answered cards from the plugin. */
-export function SearchHits({ q, hits, projects, now, onOpen }: { q: string; hits: Hit[]; projects: Project[]; now: number; onOpen: (slug: string) => void }) {
+export function SearchHits({ q, hits, tasks = [], projects, now, onOpen }: { q: string; hits: Hit[]; tasks?: TaskHit[]; projects: Project[]; now: number; onOpen: (slug: string) => void }) {
   const settled = useSettled(q.trim());
   const older = experimental_useRpcQuery({ contract: rpcContract, method: "searchCards", input: { q: settled.slice(0, 80) }, enabled: settled.length >= OLDER_MIN });
   const by = new Map(projects.map((p) => [p.slug, p] as const));
@@ -80,12 +81,18 @@ export function SearchHits({ q, hits, projects, now, onOpen }: { q: string; hits
   return (
     <Card className="hits min-w-0 gap-1 px-4 py-3 shadow-none" data-search-hits={hits.length} data-search-older={cards.length}>
       <h3 className="hits-h">
-        {hits.length} {hits.length === 1 ? "match" : "matches"} on the projects
+        {matchesHead(hits.length, tasks.length)}
         {settled.length >= OLDER_MIN ? ` · ${older.data ? older.data.length : "…"} older answered ${older.data?.length === 1 ? "card" : "cards"}` : ""}
       </h3>
       {hits.map((h, i) => (
         <Line key={i} p={by.get(h.project)} onOpen={onOpen} tail={hitWord(h.kind)} data={`hit-${h.kind}`} title={h.text}>
           <RefText text={h.text} exact={h.kind === "pr" || h.kind === "wait" ? h.ref : undefined} />
+        </Line>
+      ))}
+      {/* a scoping task matched by its name: its project is in the list below, opened on it */}
+      {tasks.map((t) => (
+        <Line key={t.key} p={by.get(t.project)} onOpen={onOpen} tail="scoping task" data="hit-task" title={t.name}>
+          {t.name}
         </Line>
       ))}
       {cards.map((c) => (
@@ -97,7 +104,7 @@ export function SearchHits({ q, hits, projects, now, onOpen }: { q: string; hits
           <span className="tail">answered {age(c.at, now)} ago</span>
         </div>
       ))}
-      {!hits.length && !cards.length ? <div className="empty">Nothing matches “{q.trim()}”{settled.length >= OLDER_MIN ? " (the newest 2000 answers searched)" : ""}</div> : null}
+      {!hits.length && !tasks.length && !cards.length ? <div className="empty">Nothing matches “{q.trim()}”{settled.length >= OLDER_MIN ? " (the newest 2000 answers searched)" : ""}</div> : null}
     </Card>
   );
 }
