@@ -4,6 +4,7 @@
 // started it, its providers, its PRs) and what waits on what.
 import { type Db, tx } from "./db.ts";
 import { MOOT_MIN_SHARED, sharedWords } from "./moot.ts";
+import { BUSY_STATUSES, PR_BLOCKED, prWait, reviewOf, threadState } from "./attach-state.ts";
 
 // lead-status: an orch_status publish (value = the status as JSON); the history builder doesn't draw it.
 // mode (1.11.0): the project's mode changed (value = the new mode, address = its lead's, note = who, ref = the card).
@@ -184,14 +185,8 @@ export interface DecisionLite {
   question?: string;
 }
 
-const BUSY = new Set(["active", "pending", "starting", "stopping"]);
 export function segState(status: string | null): SegState {
-  if (!status) return "unknown";
-  if (BUSY.has(status)) return "working";
-  if (status === "idle") return "idle";
-  if (status === "error") return "blocked";
-  if (status === "stopped" || status === "archived") return "released";
-  return "unknown";
+  return threadState(status);
 }
 
 /** thread:<p>:<n> → n; a lead sorts first. */
@@ -395,17 +390,15 @@ function depRules(x: DepInput, ours: Set<string>, live: Set<string>, prThreads: 
     if (!live.has(address)) continue;
     for (const p of x.prs) {
       if (!ids.has(p.thread_id) || !p.url || (p.state !== "open" && p.state !== "draft")) continue;
-      const review = reviewOf(p.sig);
-      if (p.checks === "pending") out.push({ from: address, on: "ci", kind: "ci", label: `PR #${p.number ?? "?"}`, since: null, ref: p.url, block: false });
-      else if (p.state === "open" && (review === "review_required" || review === "review_requested" || p.attention === "review_requested"))
+      const w = prWait({ ...p, review: reviewOf(p.sig) });
+      if (w === "ci") out.push({ from: address, on: "ci", kind: "ci", label: `PR #${p.number ?? "?"}`, since: null, ref: p.url, block: false });
+      else if (w === "review")
         out.push({ from: address, on: "review", kind: "review", label: `PR #${p.number ?? "?"}`, since: null, ref: p.url, block: false });
     }
   }
   return out.sort((a, b) => Number(b.block) - Number(a.block) || DEP_RANK[a.kind] - DEP_RANK[b.kind] || (a.since ?? Infinity) - (b.since ?? Infinity));
 }
 
-/** The review decision a PR row's signature holds (v2|url|state|checks|review|merge|queued), else null. */
-const reviewOf = (sig: string) => (sig.startsWith("v2|") ? sig.split("|")[4] || null : null);
 
 // ---------------------------------------------------------------- the Projects row (2026-11-16, the command center)
 
@@ -472,11 +465,10 @@ export interface SummaryInput extends DepInput {
   last: { text: string; at: number } | null;
 }
 
-const WORKING = new Set(["active", "pending", "starting", "stopping"]);
+const WORKING = BUSY_STATUSES;
 export const SUMMARY_DONE_MS = 24 * 3_600_000;
 /** A wait on the lead's own thread is part of the title until that thread has been idle this long (or failed). */
 export const OWN_THREAD_IDLE_MS = 30 * 60_000;
-const PR_BLOCKED = new Set(["conflicts", "blocked", "checks_failed"]);
 
 /**
  * One project's row, from the dependency rules kept in one place (depRules), filtered to waits by the project on

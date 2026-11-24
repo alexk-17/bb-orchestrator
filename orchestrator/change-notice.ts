@@ -51,6 +51,12 @@ export const READS = {
   // the feed shows the prompts the last needsYou read found (server.ts feedPrompts); a reply goes only to a live line;
   // with the batched inbox on, an item is read when its recipient acks its batch (inbox_entries)
   feed: ["agents", LIVE, "board", "decisions", "deliverables", "events", "inbox_entries", "lead_status", "projects", "scoping_tasks", ...ITEMS, BB],
+  // the work board (core/work-board.ts): tasks with their hand moves (a move writes tasks too; task_moves is only its
+  // log), durable PR links, and what each card shows
+  workBoard: ["agents", STATUS, "decisions", "deliverables", "events", "lead_status", "pr_readings", "prs", "projects", "spawns", "tasks", "task_prs"],
+  // the since lens (core/since.ts): the move log, the log's merges, the tasked PRs (task_prs of tasks not dropped), the
+  // owner's approvals and the feed's seen line; GitHub's cached read is plugin kv, which board-since.ts announces itself
+  boardSince: ["cursors", "deliverables", "events", "task_moves", "task_prs", "tasks"],
 } satisfies Record<string, readonly string[] | null>;
 
 export type ChangeRead = keyof typeof READS;

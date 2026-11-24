@@ -34,7 +34,12 @@ export interface Wait {
 
 export interface LeadStatus {
   goal: string;
-  steps: { title: string; state: StepState }[];
+  /**
+   * `id`: the step's work-board task (core/tasks.ts), set by the engine on publish; absent on statuses stored before it.
+   * `blocker`: what stops this step's task, one line; it marks that task Blocked on the board (the project's blockers
+   * still mark the current step's).
+   */
+  steps: { id?: string; title: string; state: StepState; blocker?: string }[];
   waitingOn: { kind: WaitKind; ref: string | null; label: string | null };
   /** Up to STATUS_CAPS.waits, the first one mirrored in waitingOn. Absent in statuses stored before 2026-11-16: waitsOf. */
   waits?: Wait[];
@@ -56,14 +61,16 @@ export interface StatusUpdate {
 }
 
 // Every parameter optional, nullable, and accepted as a JSON string too: agents on an older schema send what they can.
-const stepIn = z.union([z.string(), z.object({ title: z.string().nullish(), state: z.string().nullish() })]);
+const stepIn = z.union([z.string(), z.object({ id: z.string().max(80).nullish(), title: z.string().nullish(), state: z.string().nullish(), blocker: z.string().max(4000).nullish() })]);
 const waitIn = z.union([z.string(), z.object({ kind: z.string().nullish(), ref: z.string().nullish(), label: z.string().nullish(), who: z.string().nullish() })]);
 export const statusParams = z.object({
   goal: z.string().max(4000).nullish().describe(`The project's goal in one line, at most ${STATUS_CAPS.goal} characters`),
   steps: z
     .preprocess(fromJson, z.array(stepIn).max(50))
     .nullish()
-    .describe(`Your plan in order, at most ${STATUS_CAPS.steps}: {title (at most ${STATUS_CAPS.step}), state: done|current|next|skipped}; at most one current`),
+    .describe(
+      `Your plan in order, at most ${STATUS_CAPS.steps}: {id (the t-… the last reply gave this step; keep it when you reword the step), title (at most ${STATUS_CAPS.step}), state: done|current|next|skipped, blocker (optional, at most ${STATUS_CAPS.blocker}): what stops this step}; at most one current`,
+    ),
   waiting_on: z
     .preprocess(fromJson, z.union([waitIn, z.array(waitIn).max(20)]))
     .nullish()
@@ -102,6 +109,9 @@ const TOP_LEVEL_UPDATE = ["working_on", "at", "needs"] as const;
 export const topLevelUpdateFields = (p: StatusParams): string[] => TOP_LEVEL_UPDATE.filter((k) => p[k] !== undefined);
 /** The top-level update fields ignored because `update` was given too; the tool's result text names them. */
 export const ignoredTopLevelUpdate = (p: StatusParams): string[] => (p.update !== undefined ? topLevelUpdateFields(p) : []);
+
+/** A step title as the task matcher compares it: case, spacing and punctuation ignored. */
+export const normTitle = (s: string): string => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 
 const STATE_ALIAS: Record<string, StepState> = { todo: "next", pending: "next", active: "current", doing: "current", in_progress: "current", complete: "done", completed: "done", skip: "skipped" };
 const line = (s: string) => s.replace(/\s+/g, " ").trim();
@@ -155,6 +165,8 @@ export function normalizeStatus(
     const steps = p.steps ?? [];
     if (steps.length > STATUS_CAPS.steps) return { refusal: `${steps.length} steps; the cap is ${STATUS_CAPS.steps}. Merge small ones into one step` };
     out.steps = [];
+    const seen = new Map<string, number>();
+    const ids = new Map<string, number>();
     for (const [i, s] of steps.entries()) {
       const title = line(typeof s === "string" ? s : (s.title ?? ""));
       if (!title) return { refusal: `step ${i + 1} has no title` };
@@ -162,7 +174,16 @@ export function normalizeStatus(
       const raw = typeof s === "string" ? "next" : line(s.state ?? "next").toLowerCase().replace(/[\s-]+/g, "_");
       const state = (STEP_STATES as readonly string[]).includes(raw) ? (raw as StepState) : STATE_ALIAS[raw];
       if (!state) return { refusal: `step ${i + 1}'s state "${raw}" is not one of ${STEP_STATES.join(", ")}` };
-      out.steps.push({ title, state });
+      // one task per step: the same title twice (case, spacing and punctuation aside), or the same id twice, is refused
+      const n = normTitle(title);
+      if (seen.has(n)) return { refusal: `steps ${seen.get(n)! + 1} and ${i + 1} have the same title once case, spacing and punctuation are ignored: merge them or name them apart` };
+      seen.set(n, i);
+      const id = typeof s === "string" ? "" : line(s.id ?? "");
+      if (id && ids.has(id)) return { refusal: `steps ${ids.get(id)! + 1} and ${i + 1} both give id ${id}: each task id names one step` };
+      if (id) ids.set(id, i);
+      const blocker = typeof s === "string" ? "" : line(s.blocker ?? "");
+      if (blocker.length > STATUS_CAPS.blocker) return { refusal: over(`step ${i + 1}'s blocker`, blocker.length, STATUS_CAPS.blocker, "One line: what stops this step") };
+      out.steps.push({ ...(id ? { id } : {}), title, state, ...(blocker ? { blocker } : {}) });
     }
   }
   if (p.waiting_on !== undefined) {

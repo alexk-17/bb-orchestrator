@@ -8,6 +8,7 @@ import { ChangeTables, eventKindAt, recordWrites, writtenTables } from "../core/
 import { KNOWN_TABLES, STATUS } from "../change-notice.ts";
 import { Engine } from "../core/engine.ts";
 import type { Db } from "../core/db.ts";
+import { statusParams } from "../core/status.ts";
 
 test("a statement's written tables: inserts, updates, deletes and upserts; reads write nothing", () => {
   assert.deepEqual(writtenTables("INSERT INTO items (id) VALUES (?)"), ["items"]);
@@ -77,7 +78,7 @@ test("the notice: the tables written; an unmapped table, or a call naming everyt
   n.call();
   assert.deepEqual(n.take(), []);
 
-  n.wrote(["tasks"]); // a table no read is mapped to yet (a new migration)
+  n.wrote(["a_new_table"]); // a table no read is mapped to yet (a new migration)
   n.call();
   assert.equal(n.take(), null);
 
@@ -103,6 +104,28 @@ test("a lead's wake and its gap's log keep the notice to named tables, not every
   await e.flush(); // the wake goes and is logged
   const written = new Set(seen.flat());
   assert.ok(written.has("inbox_wake_log"), "the wake was logged");
+  const n = new ChangeTables(KNOWN_TABLES);
+  n.wrote([...written]);
+  n.call();
+  assert.notEqual(n.take(), null, `every table written is mapped: ${[...written].filter((x) => !KNOWN_TABLES.has(x)).join(", ")}`);
+});
+
+// The work board (migrations 42-45) writes tasks, task_moves and task_prs on a lead's status, a plan card and a
+// thread's PR. Unmapped, each of those writes would make every open screen refetch everything, as the wake log did.
+test("a lead's plan, its thread and the thread's PR keep the notice to named tables, not everything", () => {
+  const { db, seen } = recorded();
+  const e = new Engine(db, { now: () => 1_000, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} }, { owner: "Robin" });
+  const cos = e.register("T-cos", "cos", null);
+  const lead = e.register("T-lead", "lead", "kite");
+  seen.length = 0;
+  const [step] = e.publishStatus(lead, statusParams.parse({ goal: "Ship it", steps: [{ title: "Build", state: "current" }] })).steps;
+  const plan = e.ask(lead, { title: "Start a thread?", question: "Start one thread?", options: [{ label: "Go" }, { label: "Not now" }], kind: "plan", threads: 1, task: step!.id });
+  e.triageAskPerson(cos, plan.id, { question: "Start one thread?", options: [], allowText: true });
+  e.personAnswer(plan.id, e.decision(plan.id)!.rev, "1", null, "desktop");
+  e.confirmSpawn(e.reserveSpawn(lead, plan.id), "T-1");
+  e.report(e.register("T-1", "thread", "kite", "T-lead"), "The PR", "ready", "https://github.com/o/r/pull/7");
+  const written = new Set(seen.flat());
+  for (const t of ["tasks", "task_moves", "task_prs"]) assert.ok(written.has(t), `${t} was written`);
   const n = new ChangeTables(KNOWN_TABLES);
   n.wrote([...written]);
   n.call();

@@ -11,7 +11,7 @@ import ts from "typescript";
 import { BB, LIVE, READS, STATUS, type ChangeRead } from "../change-notice.ts";
 
 const ROOT = join(import.meta.dirname, "..");
-const FILES = ["server.ts", "personas.ts", "blocks.ts", ...readdirSync(join(ROOT, "core")).filter((f) => f.endsWith(".ts")).map((f) => `core/${f}`)];
+const FILES = ["server.ts", "personas.ts", "blocks.ts", "board-since.ts", ...readdirSync(join(ROOT, "core")).filter((f) => f.endsWith(".ts")).map((f) => `core/${f}`)];
 const SQL_TABLE = /\b(?:FROM|JOIN)\s+([a-z_][a-z0-9_]*)/gi;
 
 /** Declared, though no path from the read's handler reaches a SELECT of it: each with why. */
@@ -135,7 +135,8 @@ test("every table a read's code can SELECT is in its READS entry", () => {
     assert.ok(ix.handlers.has(m), `no handler for ${m} in server.ts`);
     const declared = READS[m];
     if (!declared) continue; // refetched on every change
-    for (const [t, path] of reach(ix, m)) if (!(declared as readonly string[]).includes(t)) missing.push(`${m} reads ${t} via ${path}`);
+    // sqlite_master is the schema: no write names it, and a schema change already makes the notice null (refetch all)
+    for (const [t, path] of reach(ix, m)) if (t !== "sqlite_master" && !(declared as readonly string[]).includes(t)) missing.push(`${m} reads ${t} via ${path}`);
   }
   assert.deepEqual(missing, [], "add each to change-notice.ts READS, or the screen misses that change");
 });

@@ -549,6 +549,92 @@ export const feedSchema = z.object({
 });
 export type Feed = z.infer<typeof feedSchema>;
 
+// ---- the work board's data (2026-11-23, SCOPE st-070570dd pieces 1 and 3; core/work-board.ts, core/tasks.ts). No UI here.
+// A card is a task: a lead's status step with a stable id (t-xxxxxx). Threads, PRs, deliverables and cards attach to it
+// and its column is derived from them, in this precedence: a hand move (while the attachments' signature `sig` is what
+// it was at the move), then Shipped, Waiting on you, Blocked, In review, In progress, Planned.
+// - Shipped: the lead marked the step done (whatever is live); or it has at least one PR or deliverable (closed PRs and
+//   withdrawn deliverables aside), every PR is merged, every deliverable approved, and no attached thread is still live
+//   (a PR a thread reported with orch_report that bb never read counts, with an unknown state, so it blocks this)
+//   (since: the last merge or approval). A merged PR with a live thread stays In progress until the thread is resolved.
+// - Waiting on you: an open card at the owner's level (deferred and held ones too, flagged), a deliverable in the owner's
+//   review, or an open PR ready to merge.
+// - Blocked: the step's own blocker (orch_status steps[].blocker); the lead's project blockers, on its current step's
+//   task; or an attached live thread in error.
+// - In review: an open (not draft) PR that doesn't need its thread's fix (CI, a reviewer, or nothing named yet).
+// - In progress: a live thread attached (working or idle), the lead's current step, or a draft PR or one that needs a fix.
+// - Planned: anything else.
+// Bounds: open tasks; Shipped ones shipped since `since` (default 7 days), plus undated ones (the upgrade's) still in
+// the lead's list. Unfiled: only live things (live threads, open or draft PRs a live agent holds, deliverables in review
+// or sent back, open cards) that no task holds. `dropped`: tasks dropped with attachments (their unfiled list), for the CoS to confirm
+// or restore; one dropped with nothing attached never shows. `source: "github"` is for merges read from GitHub (later).
+export const BOARD_COLUMNS = ["planned", "in_progress", "in_review", "waiting", "blocked", "shipped"] as const;
+export type BoardColumn = (typeof BOARD_COLUMNS)[number];
+export const COLUMN_LABEL: Record<BoardColumn, string> = { planned: "Planned", in_progress: "In progress", in_review: "In review", waiting: "Waiting on you", blocked: "Blocked", shipped: "Shipped" };
+const boardThreadSchema = z.object({ address: z.string(), threadId: z.string(), state: z.enum(["working", "idle", "blocked", "released", "unknown"]), live: z.boolean() });
+const boardPrSchema = z.object({
+  url: z.string(),
+  number: z.number().nullable(),
+  state: z.string().nullable(),
+  checks: z.string().nullable(),
+  review: z.string().nullable(),
+  attention: z.string().nullable(),
+  wait: z.enum(["ci", "review", "merge", "blocked"]).nullable(),
+  at: z.number(), // when this state was last seen to change (a merge: when it merged, where known)
+  thread: z.string().nullable(), // the address that holds it
+  source: z.enum(["orchestrator", "github"]),
+});
+const boardDeliverableSchema = z.object({ id: z.string(), title: z.string(), state: z.string(), rev: z.number(), at: z.number(), approvedAt: z.number().nullable() });
+const boardCardSchema = z.object({ id: z.string(), title: z.string(), level: z.string(), state: z.string(), askedAt: z.number().nullable(), ownerWaits: z.boolean(), deferred: z.boolean(), held: z.boolean() });
+const boardAttachmentsSchema = z.object({ threads: z.array(boardThreadSchema), prs: z.array(boardPrSchema), deliverables: z.array(boardDeliverableSchema), cards: z.array(boardCardSchema) });
+export const boardTaskSchema = boardAttachmentsSchema.extend({
+  id: z.string(),
+  project: z.string(),
+  title: z.string(),
+  state: z.enum(["open", "shipped", "dropped"]),
+  step: z.object({ n: z.number(), state: z.enum(STEP_STATES) }).nullable(), // its place in the lead's list now (from 1), or null once it left
+  column: z.enum(BOARD_COLUMNS),
+  derived: z.enum(BOARD_COLUMNS), // the column without the hand move
+  since: z.number().nullable(), // when it entered the column, where known
+  why: z.string(), // what put it there, a few words
+  hand: z.object({ column: z.enum(BOARD_COLUMNS), at: z.number(), holds: z.boolean() }).nullable(),
+  sig: z.string(), // the attachments' signature now: a hand move stores it, and holds while it stays the same
+});
+export const workBoardSchema = z.object({
+  now: z.number(),
+  since: z.number(),
+  projects: z.array(
+    z.object({
+      slug: z.string(),
+      tasks: z.array(boardTaskSchema),
+      unfiled: boardAttachmentsSchema,
+      dropped: z.array(z.object({ id: z.string(), title: z.string(), droppedAt: z.number().nullable(), unfiled: z.object({ threads: z.array(z.string()), deliverables: z.array(z.string()), cards: z.array(z.string()) }) })),
+    }),
+  ),
+});
+export type BoardTask = z.infer<typeof boardTaskSchema>;
+export type BoardAttachments = z.infer<typeof boardAttachmentsSchema>;
+export type WorkBoard = z.infer<typeof workBoardSchema>;
+
+// the since-T lens (2026-11-23, SCOPE piece 6; core/since.ts): counts from task_moves since T and the allowlist (merges and
+// releases from GitHub's cached read and the log, owner approvals), each moved task's from and to, and merges no task holds
+const sinceColumn = z.enum([...BOARD_COLUMNS, "dropped"]);
+export const boardSinceSchema = z.object({
+  since: z.number(),
+  now: z.number(),
+  looked: z.number().nullable(), // the feed's seen line: "since I last looked"
+  counts: z.object({ shipped: z.number(), new: z.number(), waiting: z.number(), blocked: z.number(), dropped: z.number() }),
+  moved: z.record(z.string(), z.object({ from: sinceColumn.nullable(), to: sinceColumn, at: z.number(), isNew: z.boolean() })),
+  merged: z.number(),
+  releases: z.array(z.object({ tag: z.string(), name: z.string(), at: z.number(), url: z.string() })),
+  approved: z.number(),
+  // whose merges counted: the githubLogin setting's, else gh's signed-in login's (each plus tasked PRs), else tasked PRs only
+  whose: z.discriminatedUnion("by", [z.object({ by: z.enum(["setting", "gh"]), login: z.string() }), z.object({ by: z.literal("tasked"), login: z.null() })]),
+  noTask: z.array(z.object({ url: z.string(), number: z.number().nullable(), title: z.string(), mergedAt: z.number() })),
+  github: z.object({ at: z.number().nullable(), repos: z.number(), errors: z.array(z.string()), pending: z.number() }), // pending: repos waiting their turn for a read
+});
+export type BoardSince = z.infer<typeof boardSinceSchema>;
+
 export const rpcContract = defineRpcContract({
   config: { input: z.null(), output: configSchema },
   // the one-page guide (USAGE.md), for the How it works view
@@ -575,6 +661,11 @@ export const rpcContract = defineRpcContract({
   // "You and the CoS" on the Chat tab: the owner's tracked messages and the CoS's replies, oldest first
   cosLine: { input: z.object({ before: z.number().nullable() }).strict(), output: z.object({ entries: z.array(z.object({ kind: z.enum(["owner", "cos", "hidden"]), msg: feedMsgSchema.nullable(), re: z.string().nullable(), hidden: z.number() })), more: z.boolean() }) },
   // a post's conversation before an entry's time ("Show N earlier replies"), or all of it (the desktop pane)
+  // the work board (core/work-board.ts): every project's tasks with their attachments and derived columns. Read-only.
+  workBoard: { input: z.object({ since: z.number().nullable().optional(), project: z.string().min(1).max(40).nullable().optional() }).strict(), output: workBoardSchema },
+  // the since-T lens (core/since.ts): read-only; GitHub comes from the background job's cache, never read here
+  // since: T, or null for "since I last looked" (the feed's seen line, resolved by the server; the output's since is T)
+  boardSince: { input: z.object({ since: z.number().nullable(), project: z.string().min(1).max(40).nullable().optional() }).strict(), output: boardSinceSchema },
   feedThread: { input: z.object({ about: z.string().min(1).max(400), before: z.number().nullable() }).strict(), output: z.object({ messages: z.array(feedMsgSchema), more: z.boolean() }) },
 });
 
@@ -592,9 +683,13 @@ export const holdBody = z.object({ slug: z.string(), held: z.boolean() }).strict
 // 2026-11-17: `images` are ids the image write returned for this lead (never paths: a page can't attach a file of its
 // choosing), at most MAX_IMAGES; a message with images may have no words.
 export const directMessageBody = z
-  .object({ slug: z.string(), text: z.string().max(4000), followUp: z.string().nullable().optional(), images: z.array(z.string().min(1).max(40)).max(MAX_IMAGES).optional(), about: z.string().min(1).max(400).nullable().optional() })
+  .object({ slug: z.string(), text: z.string().max(4000), followUp: z.string().nullable().optional(), images: z.array(z.string().min(1).max(40)).max(MAX_IMAGES).optional(), about: z.string().min(1).max(400).nullable().optional(), task: z.string().min(1).max(40).optional() })
   .strict()
   .refine((b) => b.text.trim().length > 0 || (b.images?.length ?? 0) > 0, { message: "a message needs words or an image" });
+// the owner's hand move of a work-board task (SCOPE piece 5): it holds until something attached changes,
+// and its lead is told. A move writes only the task's hand move: it never merges, answers or approves anything.
+export const boardMoveBody = z.object({ task: z.string().min(1).max(40), to: z.enum(BOARD_COLUMNS) }).strict();
+// `task` (2026-11-23): the work-board task it is about (its id), from the board's card panel.
 // one image per write, as base64 (bb's local routes take JSON only); the length cap is checked before anything decodes
 export const directImageBody = z
   .object({ slug: z.string().min(1).max(40), name: z.string().min(1).max(200), mime: z.enum(IMAGE_TYPES), data: z.string().min(1).max(Math.ceil(MAX_IMAGE_BYTES / 3) * 4) })
@@ -679,4 +774,5 @@ export const WRITES = {
   watchDrop: "/watchers/drop",
   feedSeen: "/feed/seen",
   feedResend: "/feed/resend",
+  boardMove: "/board/move",
 } as const;

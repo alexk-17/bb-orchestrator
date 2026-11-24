@@ -27,10 +27,11 @@ export function leadChatView(lead: Project["lead"]): LeadChatView {
 /**
  * The write the composer sends, whichever view is above it: always the owner's tracked direct message to the lead
  * (owner.message), never a plain message into the thread. `images` (2026-11-17): the ids the image write returned,
- * in the order attached; a text-only send has no images field, as before.
+ * in the order attached; a text-only send has no images field, as before. `task` (2026-11-23): the work-board task it is
+ * about, from the board's card panel; the lead reads the task's id and title at the top.
  */
-export function directWrite(slug: string, text: string, followUp: string | null, images: readonly string[] = []): { path: string; body: z.input<typeof directMessageBody> } {
-  return { path: WRITES.directMessage, body: images.length ? { slug, text, followUp, images: [...images] } : { slug, text, followUp } };
+export function directWrite(slug: string, text: string, followUp: string | null, images: readonly string[] = [], task?: string): { path: string; body: z.input<typeof directMessageBody> } {
+  return { path: WRITES.directMessage, body: { slug, text, followUp, ...(images.length ? { images: [...images] } : {}), ...(task ? { task } : {}) } };
 }
 
 /** The write for one image before the message (2026-11-17): its name, its type and its bytes as base64. */

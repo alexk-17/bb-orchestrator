@@ -23,6 +23,9 @@ import { type DirectImage, type ImageType, MAX_IMAGE_BYTES, MAX_IMAGES, withImag
 import { type BbPrReading, PR_URL_RE } from "./open-prs.ts";
 import type { WaitView } from "./watchers.ts";
 import { type LeadStatus, normalizeStatus, sameWait, type StatusParams, STATUS_STALE_MS, statusLine } from "./status.ts";
+import { addressTask, assignTasks, linkCardPrs, linkDeliverablePrs, linkPr, resolveTaskRef, taskRow, TaskError, waitTask, type TaskRow as WorkTaskRow } from "./tasks.ts";
+import { readBoard, settleColumns } from "./work-board.ts";
+import { COLUMN_LABEL, type BoardColumn, type WorkBoard } from "../contract.ts";
 import { backfillEvents, buildHistory, buildSummary, logEvent, logSince, SUMMARY_DONE_MS, type DecisionLite, type EventIn, type EventRow, type HistoryInput, type ProjectHistory, type ProjectSummary, type SummaryInput } from "./history.ts";
 import { waitsOf } from "./status.ts";
 import { COPY_MAX, fileProof, folderFor, keepFile, keptCopy, listFolder, type Kept, writeReadme } from "./deliverable-files.ts";
@@ -382,6 +385,8 @@ export interface AskInput {
   /** Revise this open card of the asker's own (its decision id) instead of filing a new one; `why` says what made it stale. */
   revises?: string | null;
   why?: string | null;
+  /** The work-board task it is about (core/tasks.ts: an id or an open task's title); else it follows its thread's. A plan card's threads get it. */
+  task?: string | null;
 }
 
 /** The "Scoping done?" card's options, fixed so the owner's yes can't be misread: option 1 makes the project active. */
@@ -575,6 +580,8 @@ export interface DeliverInput {
   scopeTask?: string | null;
   /** A Multiplayer board's review (its board id, resolved by the caller): reviewed on that board, never on Deliverables. */
   board?: { id: string; record?: string; flag?: string } | null;
+  /** The work-board task it belongs to (core/tasks.ts: an id or an open task's title); a revision keeps the last one. */
+  task?: string | null;
 }
 interface TaskRow {
   id: string;
@@ -1957,7 +1964,7 @@ export class Engine {
    * characters. `followUp` names an earlier direct message to the same lead. Refused without a live lead. The CoS gets
    * a read-only copy and Activity keeps a row. Never a push.
    */
-  ownerMessage(slug: string, text: string, followUp: string | null = null, images: string[] = [], about: string | null = null): Item {
+  ownerMessage(slug: string, text: string, followUp: string | null = null, images: string[] = [], about: string | null = null, task: string | null = null): Item {
     const words = text.trim();
     if (!words && !images.length) throw new EngineError("invalid", "empty message");
     if (words.length > 4000) throw new EngineError("invalid", `a message is at most 4000 characters; this is ${words.length}`);
@@ -1979,7 +1986,10 @@ export class Engine {
       if (imgs.length !== images.length) throw new EngineError("invalid", "an image is named twice");
       for (const i of imgs) if (!i || i.slug !== slug || i.item_id !== null) throw new EngineError("invalid", "an image isn't one sent for this message: attach it again");
       const kept = imgs.map((i) => imageOf(i!));
-      const body = withImages(words, kept);
+      // from the work board's card panel (2026-11-23): the task it is about, by id, heads the message
+      const onTask = task ? this.taskGuard(() => resolveTaskRef(this.db, slug, task)) : null;
+      if (onTask && onTask.id !== task) throw new EngineError("invalid", `name the task by its id, not ${JSON.stringify(task)}`);
+      const body = `${onTask ? `About task ${onTask.id} ${JSON.stringify(onTask.title)} on the work board:\n` : ""}${withImages(words, kept)}`;
       const it = this.put({ recipient: to, sender: "person", kind: "owner.message", ref: followUp, body, needsAck: true, about: thread.about });
       kept.forEach((i, n) => this.db.prepare(`UPDATE direct_images SET item_id = ?, n = ? WHERE id = ?`).run(it.id, n, i.id));
       const re = this.reLine(it.about);
@@ -2294,6 +2304,8 @@ export class Engine {
   private bindWait(by: Agent, id: string, url: string, when: WaitWhen): string {
     const wid = `w-${hex(4)}`;
     this.db.prepare(`INSERT INTO waits (id, owner, ref, about, pr_url, cond, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(wid, by.address, id, this.waitAbout(id), url, when, this.now());
+    // the PR a wait watches belongs to the owner's task (a lead's: its card's), and stays after the wait closes
+    linkPr(this.db, url, waitTask(this.db, by.address, id), "wait", by.address, this.now());
     const shown = this.prByUrl(url);
     const woke = this.checkWaits(url);
     if (woke.includes(wid)) return `bound to ${url}: it is ${WHEN_WORDS[when]} already, so it is back in your inbox now (${wid})`;
@@ -2404,8 +2416,27 @@ export class Engine {
              sig = excluded.sig, seen_at = excluded.seen_at, read_at = excluded.read_at`,
         )
         .run(url, pr.number ?? null, pr.state, f.shown, f.checks, f.sig, old && old.sig === f.sig ? old.seen_at : t, t);
+      this.logSettledPr(url, pr.state, pr.number ?? null);
       return this.checkWaits(url);
     });
+  }
+
+  /**
+   * A merge or close a PR wait's own reading saw goes in the PR log too, under the PR's holder (its bb reading's thread,
+   * else whoever the log last named), as prSeen logs a live thread's: pruneWaitReadings drops the reading once the wait
+   * is met, and the work board (core/work-board.ts) must still know a retired thread's PR merged. Once per state.
+   */
+  private logSettledPr(url: string, state: string, number: number | null): void {
+    if (state !== "merged" && state !== "closed") return;
+    const last = this.db.prepare(`SELECT value, address, project, thread_id FROM events WHERE kind = 'pr' AND ref = ? ORDER BY at DESC, seq DESC LIMIT 1`).get(url) as
+      | { value: string | null; address: string | null; project: string | null; thread_id: string | null }
+      | undefined;
+    if (last?.value === state) return;
+    const held = this.db.prepare(`SELECT a.address, a.project, a.thread_id FROM prs p JOIN agents a ON a.thread_id = p.thread_id WHERE p.url = ? ORDER BY p.seen_at DESC LIMIT 1`).get(url) as
+      | { address: string; project: string | null; thread_id: string }
+      | undefined;
+    const who = held ?? last;
+    this.event({ kind: "pr", project: who?.project ?? null, address: who?.address ?? null, threadId: who?.thread_id ?? null, value: state, ref: url, note: number != null ? String(number) : null });
   }
 
   /** Drop the gh readings no open wait names any more (a wait met, moved or dropped). Returns how many went. */
@@ -2480,6 +2511,7 @@ export class Engine {
     const wid = `w-${hex(4)}`;
     return tx(this.db, () => {
       this.db.prepare(`INSERT INTO waits (id, owner, ref, about, pr_url, cond, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(wid, to.address, wid, `${who}'s note: ${JSON.stringify(note.slice(0, 600))}`, w.url, w.when, this.now());
+      linkPr(this.db, w.url, waitTask(this.db, to.address, wid), "wait", to.address, this.now());
       const line = `${who} added PR wait ${wid} for ${to.address}: until ${w.url} is ${WHEN_WORDS[w.when]}`;
       this.watchTell(to.address, `${who} added a PR wait for you (${wid}): once ${w.url} is ${WHEN_WORDS[w.when]}, carry out ${JSON.stringify(note.slice(0, 300))}. It comes back to you then.`, `watch:${wid}:add`);
       this.boardAdd("notice", from, to.project, line, note.slice(0, 600), wid);
@@ -2497,6 +2529,8 @@ export class Engine {
     if (next.url === w.pr_url && next.when === w.cond) return `${id} already waits until ${w.pr_url} is ${WHEN_WORDS[next.when]}; nothing changed`;
     return tx(this.db, () => {
       this.db.prepare(`UPDATE waits SET pr_url = ?, cond = ? WHERE id = ?`).run(next.url, next.when, id);
+      // the new PR joins the owner's task; the old one's link stays (it was on the task, and it may still be unmerged)
+      linkPr(this.db, next.url, waitTask(this.db, w.owner, w.ref), "wait", w.owner, this.now());
       const was = `${w.pr_url} ${WHEN_WORDS[w.cond as WaitWhen]}`;
       const now = `${next.url} ${WHEN_WORDS[next.when]}`;
       this.watchTell(w.owner, `${who} retargeted your PR wait ${id} (${w.ref}): now until ${now}, was ${was}.`, `watch:${id}:retarget:${this.now()}`);
@@ -2514,6 +2548,7 @@ export class Engine {
     if (to.address === w.owner) return `${id} is ${w.owner}'s already; nothing changed`;
     return tx(this.db, () => {
       this.db.prepare(`UPDATE waits SET owner = ? WHERE id = ?`).run(to.address, id);
+      linkPr(this.db, w.pr_url, waitTask(this.db, to.address, w.ref), "wait", to.address, this.now());
       const what = `${w.pr_url} ${WHEN_WORDS[w.cond as WaitWhen]}`;
       this.watchTell(w.owner, `${who} moved your PR wait ${id} (${w.ref}, until ${what}) to ${to.address}.`, `watch:${id}:move-from:${this.now()}`);
       this.watchTell(to.address, `${who} gave you PR wait ${id} from ${w.owner}: once ${what}, you get back ${w.about.replace(/\s+/g, " ").slice(0, 300)}.`, `watch:${id}:move-to:${this.now()}`);
@@ -2635,6 +2670,8 @@ export class Engine {
       const r = normalizeStatus(p, prev, { now: this.now(), by: a.address, ownerName: this.settings.owner ?? "", legacySince });
       if ("refusal" in r) throw new EngineError("invalid", r.refusal);
       const s = r.status;
+      // the steps are the project's work-board tasks: each gets its id, and the tasks follow (core/tasks.ts)
+      if (p.steps !== undefined) s.steps = this.taskGuard(() => assignTasks(this.db, project, s.steps, s.updatedAt));
       const json = JSON.stringify(s);
       this.db
         .prepare(
@@ -2643,6 +2680,7 @@ export class Engine {
         )
         .run(project, a.address, a.threadId, json, s.updatedAt);
       this.event({ at: s.updatedAt, kind: "lead-status", project, address: a.address, threadId: a.threadId, value: json });
+      if (p.steps !== undefined) settleColumns(this.db, s.updatedAt, { log: true, by: a.address, project });
       this.ports.changed();
       return s;
     });
@@ -2667,6 +2705,68 @@ export class Engine {
       since = Math.min(since, r.at);
     }
     return since;
+  }
+
+  /** A tasks.ts refusal as the engine's own. */
+  private taskGuard<T>(fn: () => T): T {
+    try {
+      return fn();
+    } catch (e) {
+      if (e instanceof TaskError) throw new EngineError("invalid", e.message);
+      throw e;
+    }
+  }
+
+  /** The work-board task an agent names (orch_ask, orch_deliver: an id or an open task's title) in its project. */
+  workTask(by: Agent, ref: string): WorkTaskRow {
+    return this.taskGuard(() => resolveTaskRef(this.db, by.project, ref));
+  }
+
+  /** The work board (core/work-board.ts): read-only. */
+  workBoard(opts: { since?: number | null; project?: string | null } = {}): WorkBoard {
+    return readBoard(this.db, this.now(), opts);
+  }
+
+  /**
+   * The owner's hand move of a task on the work board (SCOPE piece 5). It writes only the task's hand move:
+   * the column, its time and the attachments' signature now, so it holds until something attached changes (the board's
+   * `sig`). A move to the column the attachments give clears the hand move. The project's pending changes are logged
+   * first as the engine's, so task_moves puts exactly this move down to the owner. The lead gets an INFO notice and the
+   * CoS a copy. A move never merges a PR, answers a card or approves a deliverable: moving to Shipped ships nothing, and
+   * moving out of Waiting on you leaves the card open (the notice says so).
+   */
+  boardMove(id: string, to: BoardColumn): { task: string; from: BoardColumn; to: BoardColumn; holds: boolean } {
+    return tx(this.db, () => {
+      const row = taskRow(this.db, id);
+      if (!row) throw new EngineError("not_found", `no task ${id}`);
+      if (row.state === "dropped") throw new EngineError("bad_state", `task ${id} was dropped: the CoS can restore it`);
+      const now = this.now();
+      settleColumns(this.db, now, { log: true, by: "engine", project: row.project });
+      const t = readBoard(this.db, now, { project: row.project, since: 0 }).projects[0]?.tasks.find((x) => x.id === id);
+      if (!t) throw new EngineError("not_found", `task ${id} is not on the board`);
+      if (t.column === to) return { task: id, from: t.column, to, holds: !!t.hand?.holds };
+      const back = to === t.derived;
+      if (back) this.db.prepare(`UPDATE tasks SET hand_col = NULL, hand_at = NULL, hand_sig = NULL WHERE id = ?`).run(id);
+      else this.db.prepare(`UPDATE tasks SET hand_col = ?, hand_at = ?, hand_sig = ? WHERE id = ?`).run(to, now, t.sig, id);
+      settleColumns(this.db, now, { log: true, by: "person", project: row.project });
+      const open = t.cards.filter((c) => c.ownerWaits);
+      const lead = `lead:${row.project}`;
+      const body =
+        `${this.owner.Name} moved task ${id} ${JSON.stringify(t.title)} from ${COLUMN_LABEL[t.column]} to ${COLUMN_LABEL[to]} on the work board. ` +
+        (back ? "That is where its attachments put it, so no hand move holds." : "It holds there until something attached to it changes (a thread, PR, deliverable or card).") +
+        ` The move merged, answered and approved nothing${open.length ? `; ${open.map((c) => `card ${c.id}`).join(", ")} still waits on ${this.owner.name}` : ""}.`;
+      if (this.agentByAddress(lead)) {
+        const it = this.put({ recipient: lead, sender: "orchestrator", kind: "notice", ref: null, body, needsAck: false });
+        if (this.agentByAddress("cos")) this.put({ recipient: "cos", sender: "orchestrator", kind: "copy", ref: it.id, body: `(copy of the notice ${it.id} to ${lead}) ${body}`, key: `copy:cos:${it.id}`, needsAck: false });
+      }
+      this.ports.changed();
+      return { task: id, from: t.column, to, holds: !back };
+    });
+  }
+
+  /** Log the work board's column changes since the last settle (task_moves); from the tick, once a minute. */
+  settleBoard(): number {
+    return tx(this.db, () => settleColumns(this.db, this.now(), { log: true, by: "engine" }));
   }
 
   /** A project's latest status, or null before its lead published one. */
@@ -2822,6 +2922,7 @@ export class Engine {
         JSON.stringify(d),
         t,
       );
+    linkCardPrs(this.db, d, t);
     if (o.at_level !== "lead") this.ports.mirror(d);
     this.ports.changed();
     return d;
@@ -2862,6 +2963,7 @@ export class Engine {
       r.context = (input.context ?? "").slice(0, 8192);
       r.options = options;
       if (input.blocks !== undefined) r.blocks = parseBlocks(input.blocks);
+      if (input.task) d.orchestrator.task = this.workTask(by, input.task).id;
       // a merge card stays one: the owner's yes is read against its PR, so a revision can't drop it
       if (d.orchestrator.action === "merge" && !(r.blocks ?? []).some((b) => b.kind === "pr")) throw new EngineError("invalid", `${id} is a merge card: its revision needs a pr block (the PR's URL, and a one-line verdict as its note)`);
       if (d.orchestrator.at_level !== "lead") this.gate(d);
@@ -2920,6 +3022,7 @@ export class Engine {
     } else if (options.some((o) => o.go)) throw new EngineError("invalid", "only a plan has a go option");
     const atCos = by.role !== "thread";
     const asker = by.address;
+    const workTask = input.task ? this.workTask(by, input.task).id : null;
     return tx(this.db, () => {
       if (input.key) {
         const dup = this.db.prepare(`SELECT id FROM decisions WHERE asker = ? AND json_extract(json, '$.request_key') = ? AND state IN ('open','asked')`).get(asker, input.key) as { id: string } | undefined;
@@ -2973,6 +3076,7 @@ export class Engine {
           plan,
           ...(done ? { scoping_done: done } : {}),
           ...(task ? { scope_task: task } : {}),
+          ...(workTask ? { task: workTask } : {}),
         },
       };
       if (atCos) this.gate(d);
@@ -3942,6 +4046,8 @@ export class Engine {
     return tx(this.db, () => {
       this.boardAdd(pr ? "pr" : "report", by.address, by.project, oneLine(title, 120, "title"), body, pr);
       if (by.role !== "thread") return "On the board.";
+      // a reported PR belongs to the thread's task even if bb never reads it: unread, it keeps the task off Shipped
+      if (pr) linkPr(this.db, pr, addressTask(this.db, by.address), "report", by.address, this.now());
       const lead = `lead:${by.project}`;
       const it = this.put({ recipient: lead, sender: by.address, kind: "notice", ref: ref?.startsWith("i-") ? ref : null, body: `report: ${JSON.stringify(title)}${pr ? ` (${pr})` : ""}. It is on the board.`, needsAck: false });
       // a report wakes its lead: new threads' turn ends no longer do (parentNotifications "stuck", 2026-11-20)
@@ -4625,8 +4731,10 @@ export class Engine {
       const used = (this.db.prepare(`SELECT COUNT(*) AS c FROM spawns WHERE plan_id = ?`).get(planId) as { c: number }).c;
       if (used >= d.orchestrator.plan!.threads) throw new EngineError("bad_state", `${planId} allows ${d.orchestrator.plan!.threads} thread(s); all started`);
       const task = scopeTask ? this.resolveTask(lead, scopeTask).id : null;
+      // the plan's work-board task, while it isn't dropped: the thread is attached to it
+      const work = d.orchestrator.task ? (this.db.prepare(`SELECT id FROM tasks WHERE id = ? AND state <> 'dropped'`).get(d.orchestrator.task) as { id: string } | undefined)?.id ?? null : null;
       const token = `pending:${hex(4)}`;
-      this.db.prepare(`INSERT INTO spawns (thread_id, plan_id, via, lead, created_at, scope_task) VALUES (?, ?, 'plan', ?, ?, ?)`).run(token, planId, lead.address, this.now(), task);
+      this.db.prepare(`INSERT INTO spawns (thread_id, plan_id, via, lead, created_at, scope_task, task) VALUES (?, ?, 'plan', ?, ?, ?, ?)`).run(token, planId, lead.address, this.now(), task, work);
       return token;
     });
   }
@@ -4725,6 +4833,8 @@ export class Engine {
     this.db.prepare(`UPDATE prs SET thread_id = ? WHERE environment_id = ? AND thread_id <> ?`).run(a.threadId, environmentId, a.threadId);
     if (res.outcome !== "available") return false;
     const pr = res.pullRequest;
+    // the PR belongs to its holder's task for good (on every reading, so a thread filed later links on its next one)
+    linkPr(this.db, pr.url, addressTask(this.db, a.address), "bb", a.address, this.now());
     // bb reads this PR now: a PR wait's own gh reading of it is older news (bb's reading is kept when it has one)
     this.db.prepare(`DELETE FROM pr_readings WHERE url = ?`).run(pr.url.replace(/\/+$/, ""));
     const old = this.db.prepare(`SELECT url, state, checks, attention, sig FROM prs WHERE environment_id = ? AND url = ?`).get(environmentId, pr.url) as
@@ -4854,6 +4964,8 @@ export class Engine {
         this.db
           .prepare(`INSERT INTO handed_off_prs (project, thread_address, thread_id, pr, owner, note, by_address, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
           .run(t.project, t.address, t.threadId, off.pr, off.owner, off.note, lead.address, this.now());
+      // the handed-off PR stays on the thread's task, whatever bb's last reading of it was: it blocks Shipped until it merges
+      if (off) linkPr(this.db, off.pr, addressTask(this.db, t.address), "handoff", t.address, this.now());
       this.boardAdd("resolved", lead.address, lead.project, `${to} resolved: ${why}`, `Its worktree is clean (${w.why}); the thread is archived.`, t.threadId);
     });
     return `Resolved ${to} (${why === w.why ? why : `${why}; worktree clean: ${w.why}`}).`;
@@ -5080,6 +5192,7 @@ export class Engine {
            updated_at = excluded.updated_at, json = excluded.json`,
       )
       .run(d.id, d.project, d.lead, d.title, d.summary, d.state, d.rev, d.createdAt, d.updatedAt, JSON.stringify(d));
+    linkDeliverablePrs(this.db, d, d.updatedAt);
     this.readme(d);
     this.ports.changed();
   }
@@ -5287,6 +5400,7 @@ export class Engine {
       // A scoping task's (1.12.0) too; a revision stays in the task its earlier rev was in while that task is open.
       if (input.board && input.scopeTask) throw new EngineError("invalid", "board and scope_task route a deliverable to different places: give one");
       let task = input.scopeTask ? this.resolveTask(by, input.scopeTask).id : null;
+      const workTask = input.task ? this.workTask(by, input.task).id : null;
       let scoping = !input.board && (!!task || this.isScoping(by.project));
       let d: Deliverable;
       let board: Deliverable["board"] = input.board ? { id: input.board.id, ...(input.board.record ? { record: input.board.record } : {}), ...(input.board.flag ? { flag: input.board.flag } : {}) } : undefined;
@@ -5319,6 +5433,7 @@ export class Engine {
         else delete d.scope_task;
         if (board) d.board = board;
         else delete d.board;
+        if (workTask) d.task = workTask;
         this.saveDeliverable(d);
         // The owner's request is answered by the new revision: its item would otherwise be resent and dead-lettered
         this.closeItems(`recipient = ? AND kind = 'deliverable.changes' AND ref = ?`, [by.address, d.id], "done", `re-delivered as rev ${d.rev}`);
@@ -5340,6 +5455,7 @@ export class Engine {
           ...(scoping ? { scope: true } : {}),
           ...(task ? { scope_task: task } : {}),
           ...(board ? { board } : {}),
+          ...(workTask ? { task: workTask } : {}),
         };
         this.fileInto(d, proof);
         this.saveDeliverable(d);
@@ -5686,8 +5802,14 @@ export class Engine {
     }
     // 9. a lead whose status went stale while it has work going is told once
     this.statusNudges();
+    // 10. the work board's column changes since the last settle are logged (task_moves), once a minute
+    if (this.now() - this.boardSettledAt >= 60_000) {
+      this.boardSettledAt = this.now();
+      this.settleBoard();
+    }
   }
   private outdatedCheckedAt = 0;
+  private boardSettledAt = 0;
 
   // ---------------------------------------------------------------- dreams (phase 3, gap 5): the orchestrator's own cards
   // A card the orchestrator itself puts to the owner (the nightly dream batch): no agent asks it, so it skips the CoS and goes

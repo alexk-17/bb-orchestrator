@@ -357,3 +357,15 @@ test("server: if bb refuses the image inputs, the lead and the CoS still get the
   assert.match(s.sends.find((x) => x.threadId === "T-cos" && x.input[0].text.startsWith("And this."))!.input[0].text, /1 image attached/);
   assert.ok(s.logs.some((l) => /refused 1 image input\(s\).*paths only/.test(l)));
 });
+
+test("removing an image takes it off the draft it is in: no callback in the box to a lead shadows the draft's key", () => {
+  // the draft, its refusal line and its staging are all keyed by the box's `key`; a callback taking its own `key`
+  // (an image's) reads a draft that isn't there, so Remove left the image attached (Codex review, P2)
+  const src = readFileSync(new URL("../app/direct-line.tsx", import.meta.url), "utf8");
+  const start = src.indexOf("export function Composer(");
+  const end = src.indexOf("\nexport function ", start + 1);
+  const body = src.slice(start, end === -1 ? undefined : end);
+  assert.ok(start >= 0 && body.includes("const detach = ("), "the Composer and its detach are found");
+  assert.doesNotMatch(body, /\(\s*key\s*(?::[^)]*)?\)\s*=>/, "no arrow function takes a parameter named key");
+  assert.match(body, /const detach = \((\w+): string\) => \{\s*const cur = drafts\.get\(key\);[\s\S]*?i\.key !== \1\)/, "detach reads the box's draft and filters by the image's key");
+});

@@ -180,6 +180,8 @@ const INPUTS: Record<ChangeRead, unknown> = {
   projectBook: { slug: "kite-app" },
   projectHistory: { slug: "kite-app" },
   feed: { cursor: null, filter: "all" },
+  workBoard: { since: 0, project: null }, // a fixed T: the default (now less 7 days) moves with the clock
+  boardSince: { since: 0, project: null },
 };
 
 /** A read's input: the one card read whole is the seed's deliverable with a PR and a next move (its PR's state shows). */
@@ -195,7 +197,8 @@ test(`every read reads only the tables its READS entry declares${batchInbox ? " 
     if (!declared) continue; // refetched on every change
     h.reads.clear();
     await h.read(m, inputOf(h, m));
-    for (const t of h.reads) if (!(declared as readonly string[]).includes(t)) missing.push(`${m} reads ${t}`);
+    // sqlite_master is the schema (the board checks task_prs is there): no write names it, a schema change refetches all
+    for (const t of h.reads) if (t !== "sqlite_master" && !(declared as readonly string[]).includes(t)) missing.push(`${m} reads ${t}`);
   }
   h.stop.abort();
   assert.deepEqual(missing, [], "add each to change-notice.ts READS, or the screen misses that change");
@@ -385,6 +388,54 @@ test("the notice after each change refetches the reads that show it, and not the
   h.stop.abort();
 });
 
+test("the since lens refetches on a move and on a PR linked to a task, and not on a thread's status or a rule", async (tc) => {
+  // the strip counts moves and tasked merges: a card moved must show in its counts from the move's own notice, and the
+  // thousands of status flips a weekend brings must not refetch it
+  const h = await host();
+  tc.after(() => h.stop.abort());
+  await h.announce();
+  const board = (await h.read("workBoard", INPUTS.workBoard)) as { projects: { tasks: { id: string; column: string; state: string }[] }[] };
+  const t = board.projects.flatMap((p) => p.tasks).find((x) => x.state === "open" && x.column !== "blocked")!;
+  h.notices.length = 0;
+  await h.post(WRITES.boardMove, { task: t.id, to: "blocked" });
+  await h.quiet();
+  assert.ok(h.notices.some((n) => touches(n, "boardSince")), JSON.stringify(h.notices));
+  const st = (await h.read("boardSince", INPUTS.boardSince)) as { moved: Record<string, { to: string }> };
+  assert.equal(st.moved[t.id]?.to, "blocked", "the refetched strip shows the move");
+  // a PR linked to a task: its notice names task_prs, which the lens reads (its tasked merges)
+  assert.ok(touches({ tables: ["task_prs"] }, "boardSince"));
+  // a rule added, and a thread's status flips: neither is in the strip
+  h.notices.length = 0;
+  await h.post(WRITES.ruleAdd, { text: "Made-up rule", project: null, kinds: ["question"], expiresInDays: null, source: "test" });
+  await h.quiet();
+  assert.ok(h.notices.length > 0 && !h.notices.some((n) => touches(n, "boardSince")), JSON.stringify(h.notices));
+  assert.ok(!touches({ tables: [STATUS] }, "boardSince") && !touches({ tables: [STATUS, LIVE] }, "boardSince"));
+});
+
+test("a card moved on the work board refetches the board; a write it doesn't show leaves the board alone", async (tc) => {
+  // the owner moves a card: the board must show it where it was put, at once, from the move's own notice
+  const h = await host();
+  tc.after(() => h.stop.abort()); // a failed check must not leave the services running
+  await h.announce();
+  const last = () => h.notices.at(-1) as { tables: string[] | null };
+  const board = (await h.read("workBoard", INPUTS.workBoard)) as { projects: { tasks: { id: string; column: string; state: string }[] }[] };
+  const t = board.projects.flatMap((p) => p.tasks).find((x) => x.state === "open" && x.column !== "blocked")!;
+  h.notices.length = 0;
+  await h.post(WRITES.boardMove, { task: t.id, to: "blocked" });
+  await h.quiet();
+  assert.ok(h.notices.some((n: any) => Array.isArray(n.tables) && n.tables.includes("tasks")), JSON.stringify(h.notices));
+  assert.ok(touches(last(), "workBoard"), JSON.stringify(last()));
+  const moved = ((await h.read("workBoard", INPUTS.workBoard)) as typeof board).projects.flatMap((p) => p.tasks).find((x) => x.id === t.id)!;
+  assert.equal(moved.column, "blocked", "the refetched board shows the move");
+  // a rule added: the main board shows rules, the work board doesn't, so it stays put
+  h.notices.length = 0;
+  await h.post(WRITES.ruleAdd, { text: "Made-up rule", project: null, kinds: ["question"], expiresInDays: null, source: "test" });
+  await h.quiet();
+  assert.ok(h.notices.length > 0 && h.notices.every((n: any) => Array.isArray(n.tables)), JSON.stringify(h.notices));
+  assert.ok(h.notices.some((n) => touches(n, "board")), "the rule shows on the main board");
+  assert.ok(!h.notices.some((n) => touches(n, "workBoard")), JSON.stringify(h.notices));
+});
+
 test("each change's notice touches every read whose answer it changed", async (tc) => {
   const h = await host();
   tc.after(() => h.stop.abort()); // a failed check must not leave the services running
@@ -480,15 +531,20 @@ test("which change refetches which read", () => {
   assert.deepEqual(touched({ tables: null }), Object.keys(READS));
   // outputs, deliverableFolders and projectBook read the disk too: every notice
   assert.deepEqual(touched({ tables: [] }), ["outputs", "deliverableFolders", "projectBook"]);
-  assert.deepEqual(touched({ tables: [STATUS] }), reads("needsYou", "board", "projects", "agents", "scope", "projectHistory"));
-  assert.deepEqual(touched({ tables: ["deliverables"] }), reads("projects", "scope", "deliverables", "deliverable", "deliverableIndex", "feed"));
+  assert.deepEqual(touched({ tables: [STATUS] }), reads("needsYou", "board", "projects", "agents", "scope", "projectHistory", "workBoard"));
+  assert.deepEqual(touched({ tables: ["deliverables"] }), reads("projects", "scope", "deliverables", "deliverable", "deliverableIndex", "feed", "workBoard", "boardSince"));
   // only a deliverable written changes the index of every card's revisions (Delivered's search and Files)
-  assert.deepEqual(touched({ tables: ["decisions"] }), reads("needsYou", "board", "projects", "scope", "projectHistory", "feed"));
+  assert.deepEqual(touched({ tables: ["decisions"] }), reads("needsYou", "board", "projects", "scope", "projectHistory", "feed", "workBoard"));
   assert.deepEqual(touched({ tables: [BB] }), reads("needsYou", "agents", "scope", "feed"));
   // mail: a lead's ack of a next move shows on Delivered; Needs you shows no mail
   assert.deepEqual(touched({ tables: ["items"] }), reads("board", "projects", "deliverables", "deliverable", "directHistory", "projectHistory", "feed"));
   // a PR's reading: the cards about it, a wait's PR, the sidebar's and a project's PRs, PR proof
-  assert.deepEqual(touched({ tables: ["prs"] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "deliverable", "projectHistory"));
+  assert.deepEqual(touched({ tables: ["prs"] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "deliverable", "projectHistory", "workBoard"));
+  // the work board's own tables: a hand move (tasks, with its task_moves log) or a PR linked to a task refetches only
+  // the board and its since lens (which counts the move log and the tasked merges); the log alone, only the lens
+  assert.deepEqual(touched({ tables: ["tasks", "task_moves"] }), reads("workBoard", "boardSince"));
+  assert.deepEqual(touched({ tables: ["task_prs"] }), reads("workBoard", "boardSince"));
+  assert.deepEqual(touched({ tables: ["task_moves"] }), reads("boardSince"));
   // an agent archived or back: besides the status flip's reads, the feed's reply line and Delivered's lead persona
-  assert.deepEqual(touched({ tables: [STATUS, LIVE] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "deliverable", "projectHistory", "feed"));
+  assert.deepEqual(touched({ tables: [STATUS, LIVE] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "deliverable", "projectHistory", "feed", "workBoard"));
 });

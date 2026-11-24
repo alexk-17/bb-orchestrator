@@ -1,3 +1,5 @@
+import { seedTaskPrs, seedTasks } from "./tasks.ts";
+
 // The SQL surface the engine needs. better-sqlite3 (bb.storage.database()) and node:sqlite (tests) both fit it.
 export interface Stmt {
   run(...params: unknown[]): unknown;
@@ -512,7 +514,73 @@ export const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS deliverables_list ON deliverables (updated_at, id, state, project, created_at, json_extract(json, '$.revisions[#-1].at'))
      WHERE json_extract(json, '$.board') IS NULL;
    CREATE INDEX IF NOT EXISTS deliverables_board_list ON deliverables (updated_at, id) WHERE json_extract(json, '$.board') IS NOT NULL`,
+  // The work board (2026-11-23, core/tasks.ts and core/work-board.ts): a task is a lead's status step with an id. state:
+  // open, shipped (the step was done) or dropped (it left the list before it was done). norm: the title as the matcher
+  // compares it. unfiled: what a drop moved to the project's Unfiled list (JSON), null when nothing was attached (a quiet
+  // drop); the CoS reads these. hand_*: the owner's hand move (its column, time and the attachments' signature then;
+  // it holds while the signature stays). col/col_at: the column task_moves last logged. A spawn row names its thread's
+  // task. SEEDS below turns each project's current steps into tasks in the same transaction.
+  `CREATE TABLE tasks (
+     id TEXT PRIMARY KEY,
+     project TEXT NOT NULL,
+     title TEXT NOT NULL,
+     norm TEXT NOT NULL,
+     state TEXT NOT NULL CHECK (state IN ('open', 'shipped', 'dropped')),
+     created_at INTEGER NOT NULL,
+     shipped_at INTEGER,
+     dropped_at INTEGER,
+     unfiled TEXT,
+     hand_col TEXT,
+     hand_at INTEGER,
+     hand_sig TEXT,
+     col TEXT,
+     col_at INTEGER
+   );
+   CREATE INDEX tasks_project ON tasks (project, state);
+   CREATE TABLE task_moves (
+     seq INTEGER PRIMARY KEY AUTOINCREMENT,
+     task TEXT NOT NULL,
+     project TEXT NOT NULL,
+     from_col TEXT,
+     to_col TEXT NOT NULL,
+     at INTEGER NOT NULL,
+     by TEXT NOT NULL,
+     why TEXT
+   );
+   CREATE INDEX task_moves_at ON task_moves (at);
+   CREATE INDEX task_moves_task ON task_moves (task, seq);
+   ALTER TABLE spawns ADD COLUMN task TEXT`,
+  // The work board's PR log read (core/work-board.ts gather): each PR's last logged state, by URL. Without it every
+  // settle scanned the whole events table.
+  `CREATE INDEX events_pr_ref_at ON events (ref, at) WHERE kind = 'pr'`,
+  // Durable PR links (2026-11-24, the owner's call; core/tasks.ts linkPr): one row per PR and
+  // task, written when the PR is first seen through any path, never pruned. via: how (bb's reading, a thread's
+  // report, a PR wait, the CoS filing it, or the upgrade); by: the address it came through. A PR's state is read per
+  // URL (prs, pr_readings, the PR log); none means unknown, which keeps the task off Shipped. SEEDS backfills it.
+  `CREATE TABLE task_prs (
+     url TEXT NOT NULL,
+     task TEXT NOT NULL,
+     project TEXT NOT NULL,
+     via TEXT NOT NULL CHECK (via IN ('bb', 'report', 'wait', 'handoff', 'card', 'deliverable', 'cos', 'upgrade')),
+     by TEXT,
+     first_at INTEGER NOT NULL,
+     PRIMARY KEY (url, task)
+   );
+   CREATE INDEX task_prs_task ON task_prs (task);
+   CREATE INDEX task_prs_by ON task_prs (by)`,
+  // one address's task (core/tasks.ts addressTask: a PR link's task, its card's or wait's) over every holder, retired
+  // ones too; agents_live_address covers live ones only, so the lookup scanned agents (Codex's review of fec268d)
+  `CREATE INDEX agents_address_created ON agents (address, created_at)`,
 ];
+
+/**
+ * Data steps that need code, by the index of the migration they follow: each runs right after that statement, in its
+ * transaction, once. Append-only like MIGRATIONS.
+ */
+export const SEEDS: ReadonlyMap<number, (db: Db) => void> = new Map([
+  [MIGRATIONS.findIndex((m) => m.startsWith("CREATE TABLE tasks (")), (db: Db) => seedTasks(db, Date.now())],
+  [MIGRATIONS.findIndex((m) => m.startsWith("CREATE TABLE task_prs (")), (db: Db) => seedTaskPrs(db, Date.now())],
+]);
 
 export function migrate(db: Db): void {
   db.exec(`CREATE TABLE IF NOT EXISTS _migrations (id INTEGER PRIMARY KEY)`);
@@ -521,6 +589,7 @@ export function migrate(db: Db): void {
     if (done.has(i)) return;
     tx(db, () => {
       db.exec(sql);
+      SEEDS.get(i)?.(db);
       db.prepare(`INSERT INTO _migrations (id) VALUES (?)`).run(i);
     });
   });

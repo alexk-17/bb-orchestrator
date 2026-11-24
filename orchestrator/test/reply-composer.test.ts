@@ -298,7 +298,8 @@ test("the box to a lead: same look and hooks, its bar CompactBar; the quiet line
   assert.match(s, /<CompactBar\s+role="group"\s+aria-label=\{`Message the \$\{project\.slug\} lead`\}\s+data-composer=\{project\.slug\}\s+className=\{cn\("k-composer px-4 py-3", compact && "compact"\)\}\s+\{\.\.\.drop\}/, "its padding (12px 16px), hooks and drop zone");
   assert.doesNotMatch(all, /\.k-composer \{|\.k-composer__actions|\.k-composer__wide/, "its own grid went: CompactBar lays it out");
   assert.match(prop(s, "actions"), /<AttachButton [^\n]*data-direct-attach[^]*<Btn tone="primary"[^\n]*data-direct-send=/, "attach, then Send");
-  assert.match(prop(s, "field"), /placeholder=\{compact \? "Message the lead…" : `Message Lead · \$\{project\.slug\}…`\}/);
+  // a work-board task's box (2026-11-23) says what it is about instead
+  assert.match(prop(s, "field"), /placeholder=\{task \? "About this task…" : compact \? "Message the lead…" : `Message Lead · \$\{project\.slug\}…`\}/);
   const rest = under(s);
   assert.ok(rest.indexOf("<ImageThumbs") >= 0 && rest.indexOf("<ImageThumbs") < rest.indexOf("k-composer__meta"), "the thumbnails, then the quiet line, under the bar");
   // compact (a project's head): the quiet line shows once typed in, or while a message needs a Resend; Scope's always

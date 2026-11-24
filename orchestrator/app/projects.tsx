@@ -55,6 +55,8 @@ import { Chip, Icon, kitCss } from "./kit-ui.tsx";
 
 import { threadCss } from "./thread-card.tsx";
 import { pinsCss } from "./pins.tsx";
+import { BoardView, type BoardPlace } from "./work-board.tsx";
+import { BoardSince, MovedChip } from "./board-since.tsx";
 
 type Query = { data: Projects | undefined; error: { message: string } | null; refetch: () => Promise<void> };
 type Project = Projects[number];
@@ -697,6 +699,8 @@ export function ProjectsView({
   deliverables,
   mons,
   accents,
+  board = null,
+  onBoard = () => {},
 }: {
   q: Query;
   refetchAll: () => void;
@@ -722,6 +726,9 @@ export function ProjectsView({
   deliverables: Deliverables | undefined;
   mons: ReadonlyMap<string, FaceOf>;
   accents: ReadonlyMap<string, string | null>;
+  /** The work board (projects/~board): its project filter and open task; null shows the list. */
+  board?: BoardPlace | null;
+  onBoard?: (place: BoardPlace | null, how?: "push" | "replace") => void;
 }) {
   useGate();
   const { ownerName, cosTitle } = useIdentity();
@@ -759,6 +766,27 @@ export function ProjectsView({
   useEffect(() => {
     if (phone || scopeOpen || (picked && !wide)) document.querySelector(`${here} [data-projects-width]`)?.closest(".orch-pane__scroll")?.scrollTo({ top: 0 });
   }, [detail, scopeOpen, phone, picked]);
+  // List | Board (the work board, SCOPE piece 2)
+  const switcher = (
+    <ToggleGroup type="single" variant="outline" size="sm" aria-label="View" data-projects-view={board ? "board" : "list"} value={board ? "board" : "list"} onValueChange={(v) => v && (v === "board") !== !!board && onBoard(v === "board" ? { project: null, task: null } : null)}>
+      <ToggleGroupItem value="list" data-view-pick="list">
+        List
+      </ToggleGroupItem>
+      <ToggleGroupItem value="board" data-view-pick="board">
+        Board
+      </ToggleGroupItem>
+    </ToggleGroup>
+  );
+  if (board)
+    return (
+      <div className="orch-cc tab pb-8" data-phone={phone || undefined} data-projects-tab="" data-layout="board">
+        <BoardView place={board} onPlace={(p, how) => onBoard(p, how)} switcher={switcher}
+          since={(project, onLens) => <BoardSince project={project} onLens={onLens} />}
+          movedChip={(move, now) => <MovedChip move={move} now={now} />}
+          reads={{ needs, scope: scope.data, deliverables, projects: q.data, refetchAll }}
+        />
+      </div>
+    );
   const all = q.data;
   if (!all) return <ReadState q={q} what="the projects" />;
   const lanes = buildLanes(lanesFrom, needs);
@@ -880,12 +908,14 @@ export function ProjectsView({
   const searchShown = !phone || searching || query !== "";
   const top = phone ? (
     <div className="top" data-top-row="">
+      {switcher}
       <ScrollRow className="flex-1">{filters}</ScrollRow>
       {searchShown ? null : <Btn tone="ghost" className="size-11 shrink-0" icon={<Search aria-hidden />} aria-label="Search the projects" title="Search" data-search-open="" onClick={() => setSearching(true)} />}
       {searchShown ? <SearchBox value={query} onChange={setQuery} autoFocus={searching} /> : null}
     </div>
   ) : (
     <div className="top">
+      {switcher}
       {filters}
       <SearchBox value={query} onChange={setQuery} />
     </div>
