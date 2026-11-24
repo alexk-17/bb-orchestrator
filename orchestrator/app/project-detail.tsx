@@ -17,7 +17,7 @@ import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group.tsx";
 import { AgentFace } from "./face.tsx";
 import { KIND_TONES, ROLE_TONES, css, roleOf, tint, type Tone } from "./palette.ts";
 import { ACCENT, accentTone, accentVars } from "./accent.ts";
-import { useWidth } from "./panes.tsx";
+import { usePaneFits, useWidth } from "./panes.tsx";
 import { ProofLink } from "./proof-link.tsx";
 import { Btn, EmptyState, Kind, ReadState } from "./ui.tsx";
 import { age, type Lane } from "./lanes.ts";
@@ -75,7 +75,8 @@ function Timeline({ h, width, lanes }: { h: Hist; width: number; lanes: Map<stri
   return (
     <div data-timeline="" className="flex flex-col gap-2">
       {long ? (
-        <div className="flex">
+        // the Range stays at the top of the scroll while the lanes go under it, down to the last lane
+        <div className="sticky top-0 z-10 flex bg-background pb-1" data-range-row="">
           <ToggleGroup type="single" variant="outline" size="sm" aria-label="Range" value={range} onValueChange={(v) => v && setRange(v as Range)}>
             <ToggleGroupItem value="all">All</ToggleGroupItem>
             <ToggleGroupItem value="week">7 days</ToggleGroupItem>
@@ -567,10 +568,13 @@ export function ProjectDetail({ project, lanes, onBack, openCard, ownerName, pat
   const now = useMinute();
   const { cosTitle } = useIdentity();
   const lead = project.lead;
+  // the page lays out its own scroll (panes.tsx [data-fits-pane]): its name row and Back stay put above the one region
+  // that scrolls, so a long lane list never takes them off screen (2026-11-24, the owner: the lanes couldn't be reached)
+  usePaneFits(true);
   return (
-    <div data-project-detail={project.slug} data-accent={project.monType ?? undefined} className="flex min-w-0 flex-col gap-3 pb-8" style={accentVars(project.monType)}>
+    <div data-project-detail={project.slug} data-fits-pane="" data-accent={project.monType ?? undefined} className="flex min-w-0 flex-col gap-3" style={accentVars(project.monType)}>
       {/* 2026-11-17: no accent bar under the head (the kept rule); the project's colour stays on its name */}
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
+      <div className="flex min-w-0 flex-none flex-wrap items-center gap-2" data-detail-name-row="">
         <Btn tone="ghost" data-detail-back="" onClick={onBack} aria-label="Back to Projects">
           ← Projects
         </Btn>
@@ -580,10 +584,14 @@ export function ProjectDetail({ project, lanes, onBack, openCard, ownerName, pat
         </span>
         {project.heldAt !== null ? <Kind of="held">On hold</Kind> : null}
       </div>
-      <StatusBar status={project.status} ownerName={ownerName} lanes={lanes} openCard={openCard} />
-      <AllWaits waits={project.summary?.waits ?? []} now={now} cos={cosTitle} />
-      <ProjectSections project={project} lanes={lanes} openCard={openCard} ownerName={ownerName} />
-      <PathwaysPart slug={project.slug} open={pathwaysOpen} />
+      {/* the one region that scrolls; 2 px each side so a card's edge or a focus ring isn't clipped, and a kept gutter so
+          the timeline's measured width doesn't change when the scrollbar comes */}
+      <div className="-mx-0.5 flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-y-auto px-0.5 pb-8 [scrollbar-gutter:stable]" data-detail-scroll={project.slug}>
+        <StatusBar status={project.status} ownerName={ownerName} lanes={lanes} openCard={openCard} />
+        <AllWaits waits={project.summary?.waits ?? []} now={now} cos={cosTitle} />
+        <ProjectSections project={project} lanes={lanes} openCard={openCard} ownerName={ownerName} />
+        <PathwaysPart slug={project.slug} open={pathwaysOpen} />
+      </div>
     </div>
   );
 }

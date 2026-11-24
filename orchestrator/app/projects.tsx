@@ -759,7 +759,11 @@ export function ProjectsView({
   const phone = useTouchPhone();
   const narrow = width > 0 && width <= 640;
   const wide = isWide(width);
-  usePaneFits(wide);
+  // only the list's root below fits the pane ([data-fits-pane]). The board and the web project page return before it, and
+  // the width they'd see is the list's last one (its root is gone), so asking for them left the pane scrolling nothing
+  // with nothing of theirs scrolling either: the Timeline page was cut off at the pane's bottom
+  const listShown = !board && !!q.data && !(detail && !phone && q.data.some((p) => p.slug === detail));
+  usePaneFits(wide && listShown);
   const now = useMinute();
   const busy = gate.lock !== null;
   // a page opens from the top, as a new page does
