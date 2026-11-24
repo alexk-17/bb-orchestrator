@@ -226,17 +226,39 @@ export function buildHistory(x: HistoryInput): ProjectHistory {
   const { now, logSince: since } = x;
   // holders by address: the agents rows, plus those only the events know (a thread that later took a new role)
   const holders = new Map<string, { threadId: string; role: string; parent: string | null; from: number; to: number | null; live: boolean }[]>();
+  const held = new Set<string>(); // every thread id some address's holders list has
   const add = (address: string, h: { threadId: string; role: string; parent: string | null; from: number; to: number | null; live: boolean }) => {
     const list = holders.get(address) ?? [];
     if (!list.some((y) => y.threadId === h.threadId)) list.push(h);
     holders.set(address, list);
+    held.add(h.threadId);
   };
+  // the log grouped once, in log order, by address and by thread (2026-11-23, lag: each address filtered the whole log,
+  // 140 ms on a busy project); an event with both lands in both lists, and a row's own events are their union
+  const byAddress = new Map<string, number[]>();
+  const byThread = new Map<string, number[]>();
+  const at = (m: Map<string, number[]>, k: string, i: number) => {
+    const l = m.get(k);
+    if (l) l.push(i);
+    else m.set(k, [i]);
+  };
+  x.events.forEach((e, i) => {
+    if (e.address != null) at(byAddress, e.address, i);
+    if (e.thread_id !== null) at(byThread, e.thread_id, i);
+  });
   for (const a of x.agents) add(a.address, { threadId: a.thread_id, role: a.role, parent: a.parent_thread_id, from: a.created_at, to: a.retired_at, live: a.retired_at === null });
   for (const e of x.events) {
     if (e.kind !== "spawn" || !e.address || !e.thread_id) continue;
-    if ([...holders.values()].some((l) => l.some((h) => h.threadId === e.thread_id))) continue;
-    const end = x.events.find((r) => r.kind === "retire" && r.thread_id === e.thread_id && r.at >= e.at);
+    if (held.has(e.thread_id)) continue;
+    const end = (byThread.get(e.thread_id) ?? []).map((i) => x.events[i]!).find((r) => r.kind === "retire" && r.at >= e.at);
     add(e.address, { threadId: e.thread_id, role: e.value ?? "thread", parent: e.ref, from: e.at, to: end?.at ?? e.at, live: false });
+  }
+  const asksOf = new Map<string, DecisionLite[]>();
+  for (const d of x.decisions) {
+    if (d.level !== "person") continue;
+    const l = asksOf.get(d.origin);
+    if (l) l.push(d);
+    else asksOf.set(d.origin, [d]);
   }
   const addressOfThread = new Map<string, string>();
   for (const [address, list] of holders) for (const h of list) addressOfThread.set(h.threadId, address);
@@ -253,7 +275,9 @@ export function buildHistory(x: HistoryInput): ProjectHistory {
   for (const [address, list] of holders) {
     list.sort((a, b) => a.from - b.from);
     const own = new Set(list.map((h) => h.threadId));
-    const evs = x.events.filter((e) => e.address === address || (e.thread_id !== null && own.has(e.thread_id)));
+    const mine = new Set(byAddress.get(address));
+    for (const id of own) for (const i of byThread.get(id) ?? []) mine.add(i);
+    const evs = [...mine].sort((a, b) => a - b).map((i) => x.events[i]!);
     const marks: HistoryRow["marks"] = [];
     const prState = new Map<string, { number: number | null; state: string }>();
     for (const e of evs) {
@@ -285,8 +309,7 @@ export function buildHistory(x: HistoryInput): ProjectHistory {
       prState.set(p.url, { number: p.number ?? prState.get(p.url)?.number ?? null, state: p.state });
     }
     marks.sort((a, b) => a.at - b.at);
-    const asks = x.decisions
-      .filter((d) => d.level === "person" && d.origin === address)
+    const asks = (asksOf.get(address) ?? [])
       .map((d) => ({ id: d.id, title: d.title, from: d.askedAt, to: d.endedAt }))
       .sort((a, b) => a.from - b.from);
     const first = list[0]!;

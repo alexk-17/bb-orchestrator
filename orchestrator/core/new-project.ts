@@ -3,8 +3,8 @@
 // that is orch_start_lead, which runs the same checks as the owner's Start lead button. Everything is checked before
 // anything is written, and the folder appears in one rename, so a refused or failed brief leaves nothing behind.
 // No bb or zod import, so node --test checks it.
-import { existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { EngineError, PRIORITIES, type Priority, PROJECT_MODES, type ProjectMode, PROJECT_RE } from "./model.ts";
 import { SLUG } from "./memory.ts";
@@ -50,6 +50,8 @@ export type NewProjectPorts = {
   now: number;
   /** Who files it, on the board notice. */
   by: string;
+  /** Where a warning goes (bb's log); console.warn when not given. */
+  log?: (message: string) => void;
 };
 
 const URL_RE = /^(?:[a-z][a-z0-9+.-]*:\/\/|git@)/i;
@@ -139,10 +141,66 @@ export function projectRecordJson(b: ProjectBrief, folder: string, nowIso: strin
 }
 
 /**
+ * Every lead, CoS and Steward folder carries this in .claude/settings.local.json. It wins over the global setting (30%),
+ * so a lead compacts at 50% of its context, as the others do; a new lead without it would compact earlier.
+ */
+export const AUTOCOMPACT_PCT = "50";
+
+/**
+ * Set env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE in <folder>/.claude/settings.local.json, keeping every other key (permissions
+ * included). A file that isn't a JSON object (or whose env isn't one) is left as it is, with one warning. The write is
+ * atomic: a temporary file beside it, renamed over it, with the file's mode (0600 when new). It never throws: any
+ * failure is one warning, and the project is created all the same.
+ */
+export function writeAutocompactSetting(folder: string, warn: (message: string) => void): void {
+  const file = join(folder, ".claude", "settings.local.json");
+  // Best effort: nothing here (a read, a write, a chmod, a rename, the cleanup, the warning itself) may fail the project.
+  const say = (m: string) => {
+    try {
+      warn(m);
+    } catch {
+      // a broken logger costs the warning, never the project
+    }
+  };
+  const tmp = `${file}.${randomBytes(4).toString("hex")}.tmp`;
+  try {
+    let settings: Record<string, unknown> = {};
+    let mode = 0o600;
+    if (existsSync(file)) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(readFileSync(file, "utf8"));
+      } catch {
+        parsed = undefined;
+      }
+      const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+      if (!isObject(parsed) || (parsed.env !== undefined && !isObject(parsed.env))) {
+        say(`${file} isn't a JSON object with an env object: left as it is, without CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`);
+        return;
+      }
+      settings = parsed;
+      mode = statSync(file).mode & 0o7777;
+    }
+    settings.env = { ...((settings.env as Record<string, unknown> | undefined) ?? {}), CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: AUTOCOMPACT_PCT };
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(tmp, `${JSON.stringify(settings, null, 2)}\n`, { mode });
+    chmodSync(tmp, mode); // writeFileSync's mode is masked by the umask
+    renameSync(tmp, file);
+  } catch (e) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // the warning below still goes out
+    }
+    say(`${file}: CLAUDE_AUTOCOMPACT_PCT_OVERRIDE not written (${String(e)})`);
+  }
+}
+
+/**
  * Create the project: refused when the brief is incomplete or malformed, the repo isn't a folder on this machine, or
  * the slug is taken (its folder, a memory project folder, or a project row, archived ones included). Then the folder is
- * built beside the projects folder's entries under a temporary name and renamed into place, and the row is created
- * with its board notice.
+ * built beside the projects folder's entries under a temporary name (with its .claude/settings.local.json) and renamed
+ * into place, and the row is created with its board notice.
  */
 export function newProject(p: NewProjectPorts, raw: ProjectBriefIn): { slug: string; folder: string; files: string[]; priority: Priority; mode: ProjectMode } {
   const b = checkBrief(raw);
@@ -164,6 +222,7 @@ export function newProject(p: NewProjectPorts, raw: ProjectBriefIn): { slug: str
     writeFileSync(join(tmp, "PROJECT.md"), md);
     writeFileSync(join(tmp, p.record), projectRecordJson(b, folder, new Date(p.now).toISOString()));
     for (const d of ["library", "memory", "scratch"]) mkdirSync(join(tmp, d));
+    writeAutocompactSetting(tmp, p.log ?? console.warn);
     if (existsSync(folder)) throw new EngineError("conflict", `${folder} already exists`); // rename would take an empty one
     renameSync(tmp, folder);
   } catch (e) {

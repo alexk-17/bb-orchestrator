@@ -70,6 +70,7 @@ import { GROUPS_KEY, groupPrs, useCollapsed, type PrGroup } from "./pr-groups.ts
 import { Label } from "./ui/label.tsx";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select.tsx";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group.tsx";
+import { useChangeNotice } from "./change-listener.ts";
 
 type Filter = "needs" | "first" | "rereview" | "approved" | "all";
 /** The filters, what each one means, and what it says when empty. Needs review, First review and Re-review have an ask. */
@@ -107,7 +108,7 @@ function useOpenPrs() {
   refetch.current = q.refetch;
   const again = useCallback(() => void refetch.current(), []);
   useRealtime(OPEN_PRS_CHANNEL, again);
-  useRealtime(CHANGED_CHANNEL, again);
+  useChangeNotice(again);
   useEffect(() => {
     const t = setInterval(again, 60_000);
     return () => clearInterval(t);

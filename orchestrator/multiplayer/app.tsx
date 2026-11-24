@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState, type ReactNode } from "react";
 import { experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
 import { ChevronRight, ExternalLink, Lock, Plus, Search } from "lucide-react";
-import { CHANGED_CHANNEL, type Deliverables } from "../contract.ts";
+import { type Deliverables } from "../contract.ts";
 import { DeliverableCard } from "../app/deliverables.tsx";
 import { PR_CHIP_TONES, ROLE_TONES, SLACK_TONES, css, roleOf, tint } from "../app/palette.ts";
 import { useElementWidth } from "../app/panes.tsx";
@@ -20,6 +20,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { ToggleGroup, ToggleGroupItem } from "../app/ui/toggle-group.tsx";
 import { MULTIPLAYER_CHANNEL, MULTIPLAYER_WRITES, multiplayerContract, type BoardView, type PrView, type RecordView } from "./contract.ts";
 import { FILTERS, ago, byDay, clock, counts, filterCounts, healthAt, open, reviewed, settled, shown, span, took, type Filter } from "./core/views.ts";
+import { useChangeNotice } from "../app/change-listener.ts";
 
 const WHERE = "multiplayer";
 const NO_WATCHER = "-";
@@ -115,7 +116,7 @@ export function MultiplayerTab({ deliverables, refetchAll, openCard, initial = n
   refetch.current = q.refetch;
   const again = useCallback(() => void refetch.current(), []);
   useRealtime(MULTIPLAYER_CHANNEL, again);
-  useRealtime(CHANGED_CHANNEL, again);
+  useChangeNotice(again);
   const [width, measure] = useElementWidth();
   const [picked, setPicked] = useState<string | null>(initial);
   const [view, setView] = useState<View>({ t: "now" });

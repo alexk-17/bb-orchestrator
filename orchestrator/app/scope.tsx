@@ -429,6 +429,8 @@ export function ScopeView({ q, projects, deliverables, refetchAll, mons, accents
 
 const pathwaysPathColor = "var(--pathways-path, teal)";
 const pathwaysColors = { ready: "var(--success)", claimed: "var(--pathways-claimed, royalblue)", blocked: "var(--muted-foreground)", unknown: "var(--pathways-unknown, blueviolet)", "needs-you": "var(--warning-text)", done: "color-mix(in srgb, var(--success) 65%, var(--muted-foreground))" } as const;
+// A ticket node shows its state as a light tint of the state colour plus the dot beside its state word (no left bar: the owner's rule).
+const pathwaysTint = (color: string) => `color-mix(in srgb, ${color} 12%, var(--card))`;
 
 function charWidth(ch: string): number {
   const cp = ch.codePointAt(0) ?? 0;
@@ -1659,13 +1661,14 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                     >
                       <span
                         aria-hidden
-                        style={{
-                          background: color,
-                          width: 9,
-                          height: 9,
-                          borderRadius: 2,
-                        }}
-                      />
+                        className="inline-flex size-3 items-center justify-center rounded-[3px] border"
+                        style={{ background: pathwaysTint(color) }}
+                      >
+                        <span
+                          className="size-1.5 rounded-full"
+                          style={{ background: color }}
+                        />
+                      </span>
                       {state === "needs-you" && (
                         <UserRound className="size-3" aria-hidden />
                       )}
@@ -1892,22 +1895,12 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                         width={box.w}
                         height={box.h}
                         rx="6"
-                        fill="var(--card)"
+                        fill={ticket ? pathwaysTint(color) : "var(--card)"}
                         stroke="var(--border)"
                         strokeWidth={1}
                         strokeDasharray={outside ? "5 4" : undefined}
                         opacity={ticket?.displayState === "done" ? 0.68 : 1}
                       />
-                      {ticket && (
-                        <rect
-                          x={box.x + 1}
-                          y={box.y + 5}
-                          width="3"
-                          height={box.h - 10}
-                          rx="1.5"
-                          fill={color}
-                        />
-                      )}
                       <title>{`${box.id}: ${title}`}</title>
                       <text
                         x={box.x + 8}
@@ -2040,7 +2033,7 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                       <circle
                         cx={box.x + 10}
                         cy={box.y + box.h - 24}
-                        r="3"
+                        r="4"
                         fill={color}
                       />
                       <text

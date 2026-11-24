@@ -7,8 +7,9 @@
 // refreshed on the same change signal as the list, so the two sides never disagree.
 import { Fragment, useCallback, useContext, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import type { z } from "zod";
-import { experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
-import { CHANGED_CHANNEL, WRITES, rpcContract, type NeedsYou, type ProjectBook as Book, type Projects, type pinBody } from "../contract.ts";
+import { experimental_useRpcQuery, useBbNavigate } from "@get-bb/plugin-sdk/app";
+import { WRITES, rpcContract, type NeedsYou, type ProjectBook as Book, type Projects, type pinBody } from "../contract.ts";
+import { touches } from "../change-notice.ts";
 import { position } from "../core/status.ts";
 import { outOfDateLine, statusStale, waitLine } from "./command-center.ts";
 import { INLINE_LINK, RefText, RefsContext } from "./ref-text.tsx";
@@ -29,6 +30,7 @@ import { Btn } from "./ui.tsx";
 import { ThreadCards } from "./thread-card.tsx";
 import { PinStrip } from "./pins.tsx";
 import type { OpenCard } from "./projects.tsx";
+import { useChangeNotice } from "./change-listener.ts";
 
 type Project = Projects[number];
 
@@ -345,9 +347,8 @@ export function ProjectBook({
   const q = experimental_useRpcQuery({ contract: rpcContract, method: "projectBook", input: { slug: p.slug, dayStart: dayStart(now) } });
   const refetch = useRef(q.refetch);
   refetch.current = q.refetch;
-  useRealtime(
-    CHANGED_CHANNEL,
-    useCallback(() => void refetch.current(), []),
+  useChangeNotice(
+    useCallback((n: unknown) => void (touches(n, "projectBook") && refetch.current()), []),
   );
   const reload = () => void refetch.current();
   const shared = useContext(RefsContext);

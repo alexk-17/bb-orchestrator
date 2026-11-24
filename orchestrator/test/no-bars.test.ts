@@ -63,3 +63,29 @@ test("each allowed edge is still in its file and is a grey hairline, not a colou
     }
   }
 });
+
+// 2026-11-23: the Pathways graph drew a 3-unit SVG rect in the state colour down each ticket node's left edge, which the
+// CSS pattern above cannot see. A node now shows its state with a tint and a dot. Any SVG rect whose literal width is
+// 4 or less is a vertical bar in the making, so it fails here.
+const SVG_BAR = /<rect\b[^>]*?\swidth=(?:"|\{)\s*(?:[0-4](?:\.\d+)?)\s*(?:"|\})/;
+const rects = (src: string) => src.match(/<rect\b[^>]*>/g) ?? [];
+for (const f of FILES.filter((f) => f.endsWith(".tsx"))) {
+  test(`${f}: no narrow SVG rect (a left bar)`, () => {
+    const src = readFileSync(new URL(`../app/${f}`, import.meta.url), "utf8");
+    assert.deepEqual(rects(src).filter((r) => SVG_BAR.test(r)), [], `${f} draws a narrow SVG bar`);
+  });
+}
+
+test("the SVG pattern catches the Pathways node bar that was there", () => {
+  const old = `<rect
+                          x={box.x + 1}
+                          y={box.y + 5}
+                          width="3"
+                          height={box.h - 10}
+                          rx="1.5"
+                          fill={color}
+                        />`;
+  assert.equal(rects(old).filter((r) => SVG_BAR.test(r)).length, 1);
+  for (const s of [`<rect width={4} height={20} />`, `<rect x="0" width="2.5" />`]) assert.match(s, SVG_BAR, s);
+  for (const s of [`<rect x={box.x} width={box.w} height={box.h} />`, `<rect width="5" height="5" />`, `<rect x="2" y="3" width="12" height="3" />`, `<rect x={x} width={w} height={3} />`]) assert.doesNotMatch(s, SVG_BAR, s);
+});

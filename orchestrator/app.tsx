@@ -16,6 +16,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import type { ExperimentalBadge, PluginNavPanelProps } from "@get-bb/plugin-sdk/app";
 import { definePluginApp, experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
 import { CHANGED_CHANNEL, rpcContract } from "./contract.ts";
+import { touches } from "./change-notice.ts";
 import { DEFAULT_IDENTITY, IdentityContext } from "./app/identity.ts";
 import { CosChat } from "./app/cos-chat.tsx";
 import { FeedView, type FeedFilter } from "./app/feed.tsx";
@@ -51,6 +52,7 @@ import { pickerRowsOf } from "./app/picker-rows.ts";
 import { Button } from "./app/ui/button.tsx";
 import { useTouchPhone } from "./app/phone.ts";
 import { Settings } from "lucide-react";
+import { useChangeNotice } from "./app/change-listener.ts";
 
 // Deliverables first (what the owner reviews); the Board is "Activity", last (process, for when they want to look). Its id
 // and sub-path stay "board", so links keep working.
@@ -112,14 +114,15 @@ function useOrchestratorBadge(): ExperimentalBadge | null {
   drefetch.current = dq.refetch;
   const srefetch = useRef(sq.refetch);
   srefetch.current = sq.refetch;
-  useRealtime(
-    CHANGED_CHANNEL,
-    useCallback(() => {
+  // live while the page is hidden too: the owner watches this badge from bb's other pages (change-listener.ts)
+  useChangeNotice(
+    useCallback((n: unknown) => {
       if (pagesMounted > 0) return;
-      void refetch.current();
-      void drefetch.current();
-      void srefetch.current();
+      if (touches(n, "needsYou")) void refetch.current();
+      if (touches(n, "deliverables")) void drefetch.current();
+      if (touches(n, "scope")) void srefetch.current();
     }, []),
+    { whileHidden: true },
   );
   const c = ownerCounts(q.data, dq.data, sq.data);
   return c.total > 0 ? { count: c.total, label: ownerCountsLabel(c) } : null;
@@ -366,7 +369,10 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
       if (typeof document === "undefined" || document.visibilityState !== "hidden") void feedRefetch.current();
     }, FEED_DEBOUNCE_MS);
   }, []);
-  useRealtime(CHANGED_CHANNEL, refetchFeed);
+  useRealtime(
+    CHANGED_CHANNEL,
+    useCallback((n: unknown) => void (touches(n, "feed") && refetchFeed()), [refetchFeed]),
+  );
   useEffect(() => {
     const back = () => {
       if (document.visibilityState === "visible") void feedRefetch.current();
@@ -386,23 +392,33 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   const scopeWaiting = owner.scope;
   const latest = useRef({ needs, board, projects, agents, shown, deliverables, config, scope });
   latest.current = { needs, board, projects, agents, shown, deliverables, config, scope };
-  const refetchAll = useCallback(() => {
+  // a change notice refetches the reads it touches (change-notice.ts); a write's own refresh (refetchAll) all of them
+  // the badge's reads (ownerCounts: Needs you, Delivered, Scope) stay live while the page is hidden, the rest wait for it
+  const refetchBadge = useCallback((n: unknown) => {
     const l = latest.current;
-    void l.config.refetch();
-    void l.deliverables.refetch();
-    void l.needs.refetch();
-    void l.board.refetch();
-    void l.scope.refetch();
+    if (touches(n, "deliverables")) void l.deliverables.refetch();
+    if (touches(n, "needsYou")) void l.needs.refetch();
+    if (touches(n, "scope")) void l.scope.refetch();
+  }, []);
+  const refetchRest = useCallback((n: unknown) => {
+    const l = latest.current;
+    if (touches(n, "config")) void l.config.refetch();
+    if (touches(n, "board")) void l.board.refetch();
     if (l.shown.has("projects")) {
-      void l.projects.refetch();
-      void l.agents.refetch();
+      if (touches(n, "projects")) void l.projects.refetch();
+      if (touches(n, "agents")) void l.agents.refetch();
     }
   }, []);
+  const refetchAll = useCallback(() => {
+    refetchBadge(null);
+    refetchRest(null);
+  }, [refetchBadge, refetchRest]);
   // each agent's face (app/face.tsx): its Pokémon, and with a personas pack its person (2026-11-18)
   const mons = useMemo(() => new Map((board.data?.agents ?? []).map((a) => [a.address, { mon: a.mon, dex: a.dex, persona: a.persona }] as const)), [board.data]);
   // each project's accent type (accent.ts), from its agents: none with the pokemon setting off
   const accents = useMemo(() => new Map((board.data?.agents ?? []).filter((a) => a.project && a.monType).map((a) => [a.project!, a.monType] as const)), [board.data]);
-  useRealtime(CHANGED_CHANNEL, refetchAll);
+  useChangeNotice(refetchBadge, { whileHidden: true });
+  useChangeNotice(refetchRest);
   // a first board or a first CodeRabbit setup shows its tab without a reload
   const refetchConfig = useCallback(() => void latest.current.config.refetch(), []);
   useRealtime(MULTIPLAYER_CHANNEL, refetchConfig);

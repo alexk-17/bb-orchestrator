@@ -81,6 +81,12 @@ export class BatchInbox {
   }
 
   /** An item's read time (its cursor ack) and its recipient's wake, if one covers it, for receipts. */
+  /** When the recipient read an item (acked it in a batch), null if not yet or dropped: receipt's readAt, without the wake. */
+  readAt(itemId: string): number | null {
+    const e = this.db.prepare(`SELECT acked_at FROM inbox_entries WHERE item_id=?`).get(itemId) as { acked_at: number | null } | undefined;
+    return !e || e.acked_at === DROPPED ? null : e.acked_at;
+  }
+
   receipt(itemId: string): { readAt: number | null; wake: string | null } {
     const e = this.db.prepare(`SELECT recipient, seq, acked_at FROM inbox_entries WHERE item_id=?`).get(itemId) as { recipient: string; seq: number; acked_at: number | null } | undefined;
     if (!e) return { readAt: null, wake: null };

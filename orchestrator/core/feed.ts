@@ -1,5 +1,5 @@
 // The Feed tab's read (D2-D6): one paged list of posts by latest agent activity, reply counts from one grouped query.
-import type { Db } from "./db.ts";
+import { type Db, prepareHinted } from "./db.ts";
 import type { Decision, Deliverable } from "./model.ts";
 import type { LeadStatus } from "./status.ts";
 
@@ -91,6 +91,14 @@ const one = (s: string, n = 280) => s.replace(/\s+/g, " ").trim().slice(0, n);
 
 // A lead's answer is its ack note on the owner's message; the engine's own closures (archive, dead letter) aren't.
 const LEAD_ANSWER = `(kind = 'owner.message' AND state = 'closed' AND note IS NOT NULL AND TRIM(note) != '' AND NOT (outcome = 'superseded' AND note = 'project archived') AND note NOT LIKE 'closed by %')`;
+/** The owner's answered cards, and the time their post is at (cardCand's `at`): db.ts decisions_feed_answered indexes both. */
+const ANSWERED = `state IN ('answered','acked') AND json_extract(json, '$.answer.by') = 'person'`;
+const ANSWERED_AT = `COALESCE(NULLIF(json_extract(json, '$.returned.at'), ''), NULLIF(json_extract(json, '$.ask.at'), ''), json_extract(json, '$.created_at'))`;
+/** A page's upper bound as the cards' ISO time text (all toISOString, so text order is time order); none past the dates. */
+const isoBound = (top: number) => {
+  const d = new Date(top);
+  return Number.isNaN(d.getTime()) ? "~" : d.toISOString();
+};
 const ANSWER_AT = `CASE WHEN kind = 'cos.reply' THEN created_at WHEN ${LEAD_ANSWER} THEN closed_at END`;
 
 interface ItemRow {
@@ -226,6 +234,13 @@ function cardCand(d: Decision, open: boolean, scope: boolean): Cand {
   };
 }
 
+/** A deliverable's post whose JSON is parsed only when the post is built (deliverableCand's `at`, read from the index). */
+function lazyDeliverableCand(db: Db, id: string, at: number): Cand {
+  let c: Cand | null = null;
+  const real = () => (c ??= deliverableCand(JSON.parse((db.prepare(`SELECT json FROM deliverables WHERE id = ?`).get(id) as { json: string }).json) as Deliverable));
+  return { key: `deliverable:${id}`, at, build: () => real().build() };
+}
+
 function deliverableCand(d: Deliverable): Cand {
   const last = d.revisions.at(-1);
   const at = ms(last?.at) || d.createdAt;
@@ -270,9 +285,22 @@ export function feedPage(src: FeedSource, opts: { cursor: string | null; filter:
     for (const d of src.openCards) if (!held(d.project)) (openIds.add(d.id), add(cardCand(d, true, false)));
     for (const d of src.scopeCards) if (!held(d.project)) (openIds.add(d.id), add(cardCand(d, true, true)));
     if (f === "all") {
-      const rows = db.prepare(`SELECT json FROM decisions WHERE state IN ('answered','acked') AND json_extract(json, '$.answer.by') = 'person'`).all() as { json: string }[];
-      const acted = rows.map((r) => JSON.parse(r.json) as Decision).filter((d) => !held(d.project) && !openIds.has(d.id)).map((d) => cardCand(d, false, !!d.orchestrator.scope));
-      for (const c of acted.filter((c) => c.at < top).sort((a, b) => b.at - a.at).slice(0, limit + 1)) add(c);
+      // the newest limit + 1 before the cursor, in post order straight from their index (db.ts decisions_feed_answered):
+      // only those are parsed. Ties keep the order the whole set had before (state, then rowid)
+      const out = [...src.heldProjects];
+      const open = [...openIds];
+      const rows = prepareHinted(
+        db,
+        "decisions_feed_answered",
+        `SELECT json FROM decisions INDEXED BY decisions_feed_answered WHERE ${ANSWERED} AND ${ANSWERED_AT} < ?
+             AND (project IS NULL OR project NOT IN (${out.map(() => "?").join(",")})) AND id NOT IN (${open.map(() => "?").join(",")})
+           ORDER BY ${ANSWERED_AT} DESC, state, rowid LIMIT ?`,
+      ).all(isoBound(top), ...out, ...open, limit + 1) as { json: string }[];
+      for (const r of rows) {
+        const d = JSON.parse(r.json) as Decision;
+        const c = cardCand(d, false, !!d.orchestrator.scope);
+        if (c.at < top) add(c);
+      }
     }
   }
   if (want("prompt"))
@@ -280,13 +308,15 @@ export function feedPage(src: FeedSource, opts: { cursor: string | null; filter:
       add({ key: `prompt:${p.id}`, at: ms(p.since), build: () => ({ ...blank, key: `prompt:${p.id}`, kind: "prompt", author: p.address, project: p.address.startsWith("lead:") ? p.address.slice(5) : null, line: null, title: p.title, text: "Waits on your answer in its thread.", at: ms(p.since), needsOwner: true, prompt: { threadId: p.threadId, id: p.id } }) });
   const revs = new Map<string, { rev: number; at: number }[]>();
   if (want("deliverable")) {
-    const rows = db.prepare(`SELECT json FROM deliverables WHERE state != 'withdrawn' AND json_extract(json, '$.board') IS NULL ORDER BY updated_at DESC LIMIT 500`).all() as { json: string }[];
+    // every column here is in db.ts deliverables_list, so no JSON is read: a post parses its deliverable only when built
+    // (on the page, or lifted). Its revisions for "on rev n" are read for the page's posts below (revsOf).
+    const rows = db
+      .prepare(`SELECT id, project, state, created_at, json_extract(json, '$.revisions[#-1].at') AS last_at FROM deliverables WHERE json_extract(json, '$.board') IS NULL AND state != 'withdrawn' ORDER BY updated_at DESC LIMIT 500`)
+      .all() as { id: string; project: string | null; state: string; created_at: number; last_at: string | null }[];
     for (const r of rows) {
-      const d = JSON.parse(r.json) as Deliverable;
-      if (held(d.project) || (d.state !== "review" && f !== "all" && f !== "delivered")) continue;
-      revs.set(`deliverable:${d.id}`, d.revisions.map((x) => ({ rev: x.rev, at: ms(x.at) })));
-      const c = deliverableCand(d);
-      if (c.at < top || d.state === "review") add(c);
+      if (held(r.project) || (r.state !== "review" && f !== "all" && f !== "delivered")) continue;
+      const at = ms(r.last_at) || r.created_at;
+      if (at < top || r.state === "review") add(lazyDeliverableCand(db, r.id, at));
     }
   }
   if (f === "all") {

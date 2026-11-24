@@ -6,11 +6,12 @@
 // 2026-11-17, every deliverable keeps its own files: a past one shows as PastDeliverable, its files as full items (images
 // and videos inline at full width, the rest as rows) with Open folder; the Files filter lists every file (past-view.tsx).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Markdown, experimental_useRpcQuery, useBbNavigate, useRealtime, useSdk } from "@get-bb/plugin-sdk/app";
+import { Markdown, experimental_useRpcQuery, useBbNavigate, useSdk } from "@get-bb/plugin-sdk/app";
 import { X } from "lucide-react";
 import { manualSectionOrder, sidebarOrder } from "../core/project-order.ts";
 import { z } from "zod";
-import { CHANGED_CHANNEL, PROOF_ROUTE, WRITE_BASE, WRITES, rpcContract, type Deliverables, type Outputs, type ProjectOrder, type approveBody, type requestChangesBody } from "../contract.ts";
+import { PROOF_ROUTE, WRITE_BASE, WRITES, rpcContract, type Deliverables, type Outputs, type ProjectOrder, type approveBody, type requestChangesBody } from "../contract.ts";
+import { touches } from "../change-notice.ts";
 import { ItemGroup } from "./ui/item.tsx";
 import { Button } from "./ui/button.tsx";
 import { Skeleton } from "./ui/skeleton.tsx";
@@ -53,6 +54,7 @@ export const outputSrc = (id: string) => `${WRITE_BASE}${PROOF_ROUTE}?output=${e
 
 export { inReview, inScope, onDeliverablesTab } from "./kit.ts";
 import { onDeliverablesTab } from "./kit.ts";
+import { useChangeNotice } from "./change-listener.ts";
 
 /** A Markdown proof (a .md or .markdown file) is rendered the way bb renders a chat message, not shown as its source. */
 const isMarkdown = (p: { path?: string | null; caption: string }) => /\.(md|markdown)$/i.test(p.path ?? "");
@@ -649,12 +651,12 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
   const folders = experimental_useRpcQuery({ contract: rpcContract, method: "deliverableFolders", input: null });
   const latestOutputs = useRef({ outputs: outputs.refetch, order: order.refetch, folders: folders.refetch });
   latestOutputs.current = { outputs: outputs.refetch, order: order.refetch, folders: folders.refetch };
-  const refetchOutputs = useCallback(() => {
-    void latestOutputs.current.outputs();
-    void latestOutputs.current.order();
-    void latestOutputs.current.folders();
+  const refetchOutputs = useCallback((n?: unknown) => {
+    if (touches(n, "outputs")) void latestOutputs.current.outputs();
+    if (touches(n, "projectOrder")) void latestOutputs.current.order();
+    if (touches(n, "deliverableFolders")) void latestOutputs.current.folders();
   }, []);
-  useRealtime(CHANGED_CHANNEL, refetchOutputs);
+  useChangeNotice(refetchOutputs);
   const sorted = useSidebarOrder(order.data);
   const [view, setView] = useState<View>({ ...START, filter: files ? "files" : "decided" });
   useEffect(() => {

@@ -8,7 +8,7 @@ import { BatchInbox, type MailPolicy } from "./batch-inbox.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { extname, isAbsolute, sep } from "node:path";
-import { type Db, migrate, tx } from "./db.ts";
+import { type Db, migrate, prepareHinted, tx } from "./db.ts";
 import { MON_POOLS, baseOf, builtInMon, familyThreads, formAt, levelFor, monByName, pickMon, pickPackThread, pickType, setPackLines, shownStage, specialtyLines, typeFamily, type Mon, type MonType, type PackLine } from "../mons.ts";
 import { agentPersona, assignPersonas, type AgentPersona, type PersonaPack } from "../personas.ts";
 import { blocksSchema, pointsSchema, type Block, type Point } from "../blocks.ts";
@@ -18,6 +18,7 @@ import { externalBody, externalMailSchema, externalPreview, type ExternalMail } 
 import type { StartedBy } from "./start.ts";
 import { MOOT_MIN_SHARED, MOOT_WINDOW_MS, sharedWords } from "./moot.ts";
 import { cardRefusal } from "./caps.ts";
+import { LIVE } from "../change-notice.ts";
 import { type DirectImage, type ImageType, MAX_IMAGE_BYTES, MAX_IMAGES, withImages, wordsOf } from "./direct-images.ts";
 import { type BbPrReading, PR_URL_RE } from "./open-prs.ts";
 import type { WaitView } from "./watchers.ts";
@@ -125,8 +126,8 @@ export interface Ports {
   deliver(threadId: string, text: string, item: Item): Promise<DeliverResult>;
   /** A decision changed: mirror it for other readers. */
   mirror(d: Decision): void;
-  /** Something the screens show changed. */
-  changed(): void;
+  /** Something the screens show changed; `tables`: what it changed beyond the writes recorded (change-notice.ts). */
+  changed(tables?: readonly string[]): void;
   /** A card just entered the owner's Needs you (asked, escalated, or back from a deferral by time). */
   cardUp?(d: Decision): void;
   /** A lead delivered (or re-delivered) a deliverable: it is in the owner's review. */
@@ -1264,6 +1265,8 @@ export class Engine {
     this.db.prepare(`UPDATE agents SET status = ?, idle_at = ?, last_idle_at = COALESCE(?, last_idle_at) WHERE thread_id = ?`).run(status, idle, idle, threadId);
     // a change only: the startup reconcile re-reports every agent's status
     if (cur.status !== status) this.event({ kind: "status", project: cur.project, address: cur.address, threadId, value: status });
+    // live or not (liveAt): the feed's reply line and an archived lead's persona go by it, not by every status flip
+    if ((cur.status === "archived") !== (status === "archived")) this.ports.changed([LIVE]);
     if (status === "archived" && cur.role === "thread") {
       tx(this.db, () => {
         this.retire(threadId);
@@ -2103,16 +2106,18 @@ export class Engine {
   }
 
   private feedSource(prompts: FeedPrompt[] = []): FeedSource {
+    // a page asks once per post whether its line is live: many posts share a line, so each address is looked up once
+    const live = new Map<string, boolean>();
     return {
       db: this.db,
       now: this.now(),
       seen: this.feedSeen(),
       resendMs: this.settings.resendMs,
       batched: this.settings.batchInbox,
-      batchReadAt: (id) => this.batch.receipt(id).readAt,
+      batchReadAt: (id) => this.batch.readAt(id), // the feed's read receipts: change-notice.ts READS.feed names inbox_entries
       openCards: this.needsYou().cards,
       scopeCards: this.scopeView().flatMap((p) => p.cards),
-      live: (address) => !!this.liveAt(address),
+      live: (address) => live.get(address) ?? (live.set(address, !!this.liveAt(address)), live.get(address)!),
       heldProjects: new Set(this.projects().filter((p) => p.heldAt).map((p) => p.slug)),
       prompts,
     };
@@ -4452,7 +4457,9 @@ export class Engine {
     const t = this.now();
     const since = t - SUMMARY_DONE_MS;
     const projects = this.db.prepare(`SELECT slug, held_at FROM projects WHERE archived_at IS NULL`).all() as { slug: string; held_at: number | null }[];
-    const agents = this.db.prepare(`SELECT thread_id, address, role, project, status, idle_at, retired_at FROM agents WHERE role IN ('lead','thread') AND project IS NOT NULL`).all() as (SummaryInput["agents"][number] & { project: string })[];
+    // every agent row once: the leads' and threads' by project, and every address for what a wait may name (refAgents)
+    const everyAgent = this.db.prepare(`SELECT thread_id, address, role, project, status, idle_at, retired_at FROM agents`).all() as (SummaryInput["agents"][number] & { project: string | null })[];
+    const agents = everyAgent.filter((a): a is SummaryInput["agents"][number] & { project: string } => (a.role === "lead" || a.role === "thread") && a.project !== null);
     const statuses = new Map((this.db.prepare(`SELECT project, json FROM lead_status`).all() as { project: string; json: string }[]).map((r) => [r.project, JSON.parse(r.json) as LeadStatus]));
     const decisions = (
       this.db
@@ -4477,7 +4484,9 @@ export class Engine {
     const later = (project: string | null, text: string, at: number) => {
       if (project && at > (last.get(project)?.at ?? 0)) last.set(project, { text, at });
     };
-    for (const r of this.db.prepare(`SELECT project, title, MAX(at) AS at FROM board WHERE kind IN ('report','pr') AND project IS NOT NULL GROUP BY project`).all() as { project: string; title: string; at: number }[]) later(r.project, r.title, r.at);
+    // read INDEXED BY its partial index of reports only (db.ts board_reports): the planner otherwise walks every report
+    // by kind and sorts them (2026-11-23, lag)
+    for (const r of prepareHinted(this.db, "board_reports", `SELECT project, title, MAX(at) AS at FROM board INDEXED BY board_reports WHERE kind IN ('report','pr') AND project IS NOT NULL GROUP BY project`).all() as { project: string; title: string; at: number }[]) later(r.project, r.title, r.at);
     for (const r of this.db.prepare(`SELECT project, title, MAX(updated_at) AS at FROM deliverables WHERE state = 'approved' GROUP BY project`).all() as { project: string | null; title: string; at: number }[]) later(r.project, `Approved: ${r.title}`, r.at);
     for (const r of this.db.prepare(`SELECT project, note, MAX(at) AS at FROM events WHERE kind = 'pr' AND value = 'merged' AND project IS NOT NULL GROUP BY project`).all() as { project: string; note: string | null; at: number }[]) later(r.project, `PR ${r.note ? `#${r.note} ` : ""}merged`, r.at);
     // the cards the leads' own waits and blockers name, in any state, to drop a wait that was answered
@@ -4504,7 +4513,7 @@ export class Engine {
     const refPrs = new Map<string, { state: string | null; seen_at: number }>();
     for (const x of prs) if (x.url && x.seen_at >= (refPrs.get(x.url)?.seen_at ?? -1)) refPrs.set(x.url, { state: x.state, seen_at: x.seen_at });
     const refAgents = new Map<string, boolean>();
-    for (const a of this.db.prepare(`SELECT address, status, retired_at FROM agents`).all() as { address: string; status: string; retired_at: number | null }[])
+    for (const a of everyAgent)
       refAgents.set(a.address, (refAgents.get(a.address) ?? false) || (a.retired_at === null && a.status !== "archived"));
     const out = new Map<string, ProjectSummary>();
     for (const p of projects) {

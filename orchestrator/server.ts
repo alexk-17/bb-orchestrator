@@ -23,6 +23,10 @@ import { CARD_CAPS, DELIVER_BUDGET, deliverBudgetRefusal } from "./core/caps.ts"
 import { ignoredTopLevelUpdate, statusParams, statusLine } from "./core/status.ts";
 import { type DirectImage, MAX_IMAGE_BYTES, imageInput, safeName, sniff } from "./core/direct-images.ts";
 import { checkAnswers, toQuestions } from "./interactions.ts";
+import { BB, type ChangeNotice, KNOWN_TABLES } from "./change-notice.ts";
+import { ReadCache, shareReads } from "./core/read-cache.ts";
+import { loopDelay, timeReads } from "./core/slow-reads.ts";
+import { ChangeTables, recordWrites } from "./core/write-log.ts";
 
 /** A pending interaction as bb lists it (only the fields read here). */
 type RawInteraction = { id: string; createdAt?: number; kind?: string; status?: string; payload?: { kind?: string } };
@@ -266,18 +270,37 @@ export default async function plugin(bb: BbPluginApi) {
   /** When each timed job last ran (the Watchers list, core/watchers.ts JOBS ids); in memory, so empty after a reload. */
   const ran: Record<string, number> = {};
   const mark = (job: string) => void (ran[job] = Date.now());
-  const db = bb.storage.database() as unknown as Db;
+  // every write is recorded as it runs (core/write-log.ts): the change notice names its tables, and a read in flight
+  // when one lands is not joined by a later read (core/read-cache.ts)
+  const notices = new ChangeTables(KNOWN_TABLES);
+  // bb's thread reads for the page's reads: kept 5 s, forgotten when bb says the thread changed (the events below)
+  const reads = new ReadCache(5_000, Date.now);
+  // the event loop's delay, sampled while the services run (the memory service's start and stop)
+  const loop = loopDelay();
+  const db = recordWrites(bb.storage.database() as unknown as Db, (tables) => {
+    notices.wrote(tables);
+    reads.bump();
+  });
 
   // ---------------------------------------------------------------- engine ports
   // The page's change notice waits for the services: bb starts them only once activation succeeded, so a timer is
   // never left running by an activation that throws (bb then runs no dispose hook). They announce once on start.
+  // The notice names the tables written since the last one (change-notice.ts): each screen refetches only the reads
+  // that read them. `tables`: what changed outside the database (BB), or EVERYTHING (core/write-log.ts ChangeTables).
+  // Coalesced for 150 ms, kept (2026-11-23): a burst (a status flip, its flush and its mail) is one notice, and the
+  // owner's answer still shows at once; with only the dependent reads refetched and bb's reads kept, a notice no longer
+  // costs a refetch of everything.
   let announcing = false;
   let changeTimer: ReturnType<typeof setTimeout> | null = null;
-  const changed = () => {
+  const EVERYTHING = ["*"];
+  const changed = (tables?: readonly string[]) => {
+    notices.call(tables);
     if (!announcing || changeTimer) return;
     changeTimer = setTimeout(() => {
       changeTimer = null;
-      bb.realtime.publish(CHANGED_CHANNEL, {});
+      // sent even when it names no mapped read: the listeners that refetch on every notice (open PRs, multiplayer,
+      // the reads of files on disk) still do, as before
+      bb.realtime.publish(CHANGED_CHANNEL, { tables: notices.take() } satisfies ChangeNotice);
     }, 150);
   };
 
@@ -388,7 +411,7 @@ export default async function plugin(bb: BbPluginApi) {
     const notifyFlip = next.notifyOnlyOrchestrator !== cfg.notifyOnlyOrchestrator;
     cfg = next;
     reviewQueue.changed(); // the queue page re-reads dry-run
-    changed(); // the page re-reads its config (owner name, CoS title) and the agents (Pokémon on or off)
+    changed(EVERYTHING); // the page re-reads its config (owner name, CoS title) and the agents (Pokémon on or off)
     engine.settings = { escalateMs: next.escalateMinutes * 60_000, resendMs: next.resendMinutes * 60_000, owner: next.ownerName, pokemon: next.pokemon, batchInbox: next.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, next.inboxDebounceMs || 2000)), personas: loadPack(next.personaPack) };
     reloadMemory();
     if (notifyFlip) void notifyOnly();
@@ -417,9 +440,11 @@ export default async function plugin(bb: BbPluginApi) {
   bb.background.service("memory", {
     async start(signal) {
       announcing = true;
-      changed();
+      loop.start();
+      changed(EVERYTHING); // a reload: the open screens read everything again
       signal.addEventListener("abort", () => {
         announcing = false;
+        loop.stop();
         if (changeTimer) clearTimeout(changeTimer);
         changeTimer = null;
       }, { once: true });
@@ -1702,7 +1727,9 @@ export default async function plugin(bb: BbPluginApi) {
       bb.log.warn(`auto-register ${thread.id}: ${errText(e)}`);
     }
   });
+  // bb's news of a thread drops what the reads kept of it (core/read-cache.ts)
   bb.events.on("thread.active", ({ thread }) => {
+    reads.forget(thread.id);
     if (!engine.agentByThread(thread.id)) return;
     engine.setStatus(thread.id, "active");
     void flush();
@@ -1710,6 +1737,7 @@ export default async function plugin(bb: BbPluginApi) {
   const bbParent = (t: unknown) => (t as { parentThreadId?: string | null }).parentThreadId ?? null;
   const bbNotify = (t: unknown) => (t as { parentNotifications?: string }).parentNotifications;
   bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
+    reads.forget(thread.id);
     const a = engine.agentByThread(thread.id);
     if (!a) return;
     engine.setStatus(thread.id, "idle");
@@ -1719,6 +1747,7 @@ export default async function plugin(bb: BbPluginApi) {
     void flush();
   });
   bb.events.on("thread.failed", ({ thread, error }) => {
+    reads.forget(thread.id);
     const a = engine.agentByThread(thread.id);
     if (!a) return;
     engine.setStatus(thread.id, "error");
@@ -1734,9 +1763,15 @@ export default async function plugin(bb: BbPluginApi) {
     void flush();
   });
   bb.events.on("thread.archived", ({ thread }) => {
+    reads.forget(thread.id);
     if (engine.agentByThread(thread.id)) engine.setStatus(thread.id, "archived");
   });
+  bb.events.on("thread.unarchived", ({ thread }) => reads.forget(thread.id));
+  bb.events.on("thread.deleted", ({ thread }) => reads.forget(thread.id));
+  // read in bb: the agents read's unread dot
+  bb.events.on("experimental_thread.read", ({ thread }) => reads.forget(thread.id));
   bb.events.on("interaction.pending", ({ thread, interaction }) => {
+    reads.forget(thread.id);
     const a = engine.agentByThread(thread.id);
     if (!a) return;
     // a thread bb doesn't report on every turn (spawned "stuck") can sit blocked on a prompt: its lead is woken once
@@ -1744,7 +1779,7 @@ export default async function plugin(bb: BbPluginApi) {
       engine.notifySupervisor(a, "is waiting on a prompt in its bb thread (a permission or a question); it can't go on until it is answered.", true, `pending:${interaction.id}`);
       void flush();
     }
-    changed();
+    changed([BB]);
   });
   bb.events.on("message.dispatched", ({ entry }) => engine.dispatched(entry.id));
   bb.events.on("message.cancelled", ({ entry }) => engine.cancelled(entry.id));
@@ -2139,7 +2174,20 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
   let feedPrompts: FeedPrompt[] = [];
-  bb.rpc.register(rpcContract, {
+  // bb's reads of one thread, kept and shared (core/read-cache.ts); a failure is kept as null, like any answer
+  type ThreadRead = ThreadInfo & { environment?: { branchName?: string | null } | null };
+  const threadRead = (threadId: string) =>
+    reads.thread(threadId, "get", () => (bb.sdk.threads.get({ threadId, include: "environment" } as Parameters<typeof bb.sdk.threads.get>[0]) as Promise<unknown> as Promise<ThreadRead>).catch(() => null));
+  const contextRead = (threadId: string) => reads.thread(threadId, "context", () => bb.sdk.threads.context({ threadId }).catch(() => null));
+  const interactionsRead = (threadId: string) =>
+    reads.thread(threadId, "interactions", () => (bb.sdk.threads.interactions.list({ threadId }) as Promise<unknown> as Promise<RawInteraction[]>).catch(() => null));
+  // concurrent reads of these with the same input wait on one computation (several screens mount and refetch them)
+  // each read slower than 500 ms is logged, with the event loop's delay (core/slow-reads.ts)
+  const onSlowRead = (name: string, ms: number) => {
+    const d = loop.take();
+    bb.log.warn(`slow read ${name}: ${Math.round(ms)} ms (event loop delay since the last slow read: ${d ? `p99 ${d.p99} ms, max ${d.max} ms` : "no new samples"})`);
+  };
+  bb.rpc.register(rpcContract, timeReads(shareReads(reads, ["needsYou", "agents", "scope"], {
     async howItWorks() {
       return { markdown: readFileSync(join(import.meta.dirname, "USAGE.md"), "utf8") };
     },
@@ -2163,17 +2211,15 @@ export default async function plugin(bb: BbPluginApi) {
       const perAgent: NeedsYou["interactions"][] = new Array(list.length);
       let next = 0;
       const one = async (a: (typeof list)[number]): Promise<NeedsYou["interactions"]> => {
-        try {
-          const rows = ((await bb.sdk.threads.interactions.list({ threadId: a.threadId })) as unknown as RawInteraction[]).filter((r) => (r.status ?? "pending") === "pending");
-          if (!rows.length) return [];
-          const t = await bb.sdk.threads.get({ threadId: a.threadId });
-          return rows.map((r) => {
-            const kind = r.kind ?? r.payload?.kind ?? "prompt";
-            return { id: r.id, threadId: a.threadId, address: a.address, title: t.title ?? a.address, kind, since: r.createdAt ? new Date(r.createdAt).toISOString() : null, questions: kind === "user_question" ? toQuestions(r.payload) : [] };
-          });
-        } catch {
-          return []; // a thread that is gone has nothing pending
-        }
+        // a thread that is gone (either read failed) has nothing pending
+        const rows = ((await interactionsRead(a.threadId)) ?? []).filter((r) => (r.status ?? "pending") === "pending");
+        if (!rows.length) return [];
+        const t = await threadRead(a.threadId);
+        if (!t) return [];
+        return rows.map((r) => {
+          const kind = r.kind ?? r.payload?.kind ?? "prompt";
+          return { id: r.id, threadId: a.threadId, address: a.address, title: t.title ?? a.address, kind, since: r.createdAt ? new Date(r.createdAt).toISOString() : null, questions: kind === "user_question" ? toQuestions(r.payload) : [] };
+        });
       };
       await Promise.all(
         Array.from({ length: Math.min(8, list.length) }, async () => {
@@ -2185,7 +2231,11 @@ export default async function plugin(bb: BbPluginApi) {
       );
       const interactions: NeedsYou["interactions"] = perAgent.flat();
       // the feed reuses this read's prompts (the CoS's, the Steward's and the leads'), never asking bb again itself
+      const was = feedPrompts.map((p) => p.id).join();
       feedPrompts = interactions.filter((i) => !i.address.startsWith("thread:")).map((i) => ({ id: i.id, threadId: i.threadId, address: i.address, title: i.title, since: i.since }));
+      // the feed refetches on bb's news only (change-notice.ts): a prompt answered in bb itself reaches the page as a
+      // status flip, which refetches this read but not the feed. The refetch this causes finds the same prompts.
+      if (feedPrompts.map((p) => p.id).join() !== was) changed([BB]);
       return {
         cards: v.cards.map((d) => card(d, v.held)),
         deferred: v.deferred.map((d) => card(d)),
@@ -2249,10 +2299,8 @@ export default async function plugin(bb: BbPluginApi) {
       const assigned = engine.personaAssignments();
       return Promise.all(
         engine.agents().map(async (a) => {
-          const t = (await bb.sdk.threads.get({ threadId: a.threadId, include: "environment" } as Parameters<typeof bb.sdk.threads.get>[0]).catch(() => null)) as
-            | (ThreadInfo & { environment?: { branchName?: string | null } | null })
-            | null;
-          const ctx = await bb.sdk.threads.context({ threadId: a.threadId }).catch(() => null);
+          const t = await threadRead(a.threadId);
+          const ctx = await contextRead(a.threadId);
           const pr = engine.prFor(a.environmentId);
           const proj = a.project ? engine.project(a.project) : null;
           return {
@@ -2293,7 +2341,7 @@ export default async function plugin(bb: BbPluginApi) {
       const planner = async (taskId: string) => {
         const a = engine.taskPlanner(taskId);
         if (!a) return null;
-        const t = (await bb.sdk.threads.get({ threadId: a.threadId }).catch(() => null)) as { title?: string | null } | null;
+        const t = await threadRead(a.threadId);
         const at = engine.lastReportAt(a.address);
         const text = at === null ? null : engine.lastReport(a.address);
         return { address: a.address, threadId: a.threadId, title: t?.title?.trim() || null, status: a.status, idleAt: a.idleAt, report: text !== null && at !== null ? { text, at } : null };
@@ -2560,7 +2608,7 @@ export default async function plugin(bb: BbPluginApi) {
         ...(d.board ? { board: { id: d.board.id, record: d.board.record ?? null, flag: d.board.flag ?? null } } : {}),
       }));
     },
-  });
+  }), onSlowRead));
 
   // ---------------------------------------------------------------- the owner's writes (HTTP, browser Origin required)
   // bb's "local" auth already refuses a foreign Origin but lets a request with none through; this also wants the page's
@@ -2904,6 +2952,7 @@ export default async function plugin(bb: BbPluginApi) {
     if ((ix.kind ?? ix.payload?.kind) !== "user_question") throw new EngineError("bad_state", "Only questions can be answered here: open the thread");
     const checked = checkAnswers(toQuestions(ix.payload), answers);
     await bb.sdk.threads.interactions.resolve({ threadId, interactionId, resolution: { kind: "user_answer", answers: checked } });
+    reads.forget(threadId); // answered: the page's refetch must not find it still pending
     return { threadId };
   });
 
@@ -2993,7 +3042,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (a.role !== "cos") throw new EngineError("forbidden", "CoS only");
         if (!p.brief || typeof p.brief !== "object") throw new EngineError("invalid", "give brief: {slug, title, repo, goal, repo_url?, base?, constraints?, priority?, mode?}");
         const r = await oneAtATime(async () =>
-          newProject({ engine, root: projectsDir(), record: projectRecord(), memoryFolder: (slug) => memoryProjectsNow.get(slug), now: Date.now(), by: "cos" }, p.brief!),
+          newProject({ engine, root: projectsDir(), record: projectRecord(), memoryFolder: (slug) => memoryProjectsNow.get(slug), now: Date.now(), by: "cos", log: (m) => bb.log.warn(m) }, p.brief!),
         );
         void flush();
         return ok(`Created ${r.slug} (priority ${r.priority}${r.mode === "scoping" ? ", scoping mode" : ""}) in ${r.folder}: ${r.files.map((f) => basename(f)).join(", ")}. No lead yet: start it with orch_start_lead(slug="${r.slug}").`);

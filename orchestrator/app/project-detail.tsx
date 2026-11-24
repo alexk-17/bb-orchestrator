@@ -8,8 +8,9 @@
 // Projects tab's own reads. 2026-11-17 (the shadcn pass): the Range is a ToggleGroup, the chips Badges in the
 // palette's tones; the diagrams keep their own geometry.
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
-import { CHANGED_CHANNEL, rpcContract, type ProjectHistory, type Projects } from "../contract.ts";
+import { experimental_useRpcQuery, useBbNavigate } from "@get-bb/plugin-sdk/app";
+import { rpcContract, type ProjectHistory, type Projects } from "../contract.ts";
+import { touches } from "../change-notice.ts";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group.tsx";
@@ -29,6 +30,7 @@ import { useIdentity } from "./identity.ts";
 import { PathwaysSection } from "./scope.tsx";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collapsible.tsx";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { useChangeNotice } from "./change-listener.ts";
 
 type Hist = ProjectHistory;
 type Row = Hist["rows"][number];
@@ -530,9 +532,8 @@ export function ProjectSections({ project, lanes, openCard, ownerName }: { proje
   const q = experimental_useRpcQuery({ contract: rpcContract, method: "projectHistory", input: { slug: project.slug } });
   const refetch = useRef(q.refetch);
   refetch.current = q.refetch;
-  useRealtime(
-    CHANGED_CHANNEL,
-    useCallback(() => void refetch.current(), []),
+  useChangeNotice(
+    useCallback((n: unknown) => void (touches(n, "projectHistory") && refetch.current()), []),
   );
   const box = useRef<HTMLDivElement>(null);
   const width = useWidth(box);

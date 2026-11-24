@@ -490,6 +490,28 @@ export const MIGRATIONS: string[] = [
    CREATE TABLE slack_watch_events (key TEXT PRIMARY KEY, profile TEXT NOT NULL, channel TEXT NOT NULL,
      json TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0);
    CREATE INDEX slack_watch_pending ON slack_watch_events(profile,done)`,
+  // The slow reads (2026-11-23, lag): each index serves one read's query, so a LIMIT stops early instead of sorting a
+  // whole table. board: the Board tab, the feed's alarms and counts, the Projects tab's latest report (board_reports,
+  // read INDEXED BY). items: the feed's reply,
+  // last-message and left-out lookups. events: the Projects tab's merged PRs, a project page's thread ids. decisions:
+  // the feed's answered cards in post order (core/feed.ts ANSWERED_AT, read INDEXED BY), a project page's cards, open
+  // plans. deliverables: the Deliverables list and the feed's, newest first; the feed's columns are all in the index.
+  `CREATE INDEX IF NOT EXISTS board_at ON board (at);
+   CREATE INDEX IF NOT EXISTS board_kind_at ON board (kind, at);
+   CREATE INDEX IF NOT EXISTS board_reports ON board (project, at, title) WHERE kind IN ('report','pr');
+   CREATE INDEX IF NOT EXISTS items_kind_ref ON items (kind, ref);
+   CREATE INDEX IF NOT EXISTS items_created ON items (created_at);
+   CREATE INDEX IF NOT EXISTS items_sender ON items (sender, created_at);
+   CREATE INDEX IF NOT EXISTS events_merged_project ON events (project, at, note) WHERE kind = 'pr' AND value = 'merged';
+   CREATE INDEX IF NOT EXISTS events_project_thread ON events (project, thread_id);
+   CREATE INDEX IF NOT EXISTS decisions_asker ON decisions (asker);
+   CREATE INDEX IF NOT EXISTS decisions_project_state ON decisions (project, state);
+   CREATE INDEX IF NOT EXISTS agents_project ON agents (project);
+   CREATE INDEX IF NOT EXISTS decisions_feed_answered ON decisions (COALESCE(NULLIF(json_extract(json, '$.returned.at'), ''), NULLIF(json_extract(json, '$.ask.at'), ''), json_extract(json, '$.created_at')))
+     WHERE state IN ('answered','acked') AND json_extract(json, '$.answer.by') = 'person';
+   CREATE INDEX IF NOT EXISTS deliverables_list ON deliverables (updated_at, id, state, project, created_at, json_extract(json, '$.revisions[#-1].at'))
+     WHERE json_extract(json, '$.board') IS NULL;
+   CREATE INDEX IF NOT EXISTS deliverables_board_list ON deliverables (updated_at, id) WHERE json_extract(json, '$.board') IS NOT NULL`,
 ];
 
 export function migrate(db: Db): void {
@@ -502,6 +524,20 @@ export function migrate(db: Db): void {
       db.prepare(`INSERT INTO _migrations (id) VALUES (?)`).run(i);
     });
   });
+}
+
+/**
+ * Prepares `sql`, which reads a table `INDEXED BY index`. SQLite refuses a hint on a missing index ("no such index" at
+ * prepare), so when the index is gone (dropped, or never built) this prepares the same query without the hint: slower,
+ * same rows, never a failed read (2026-11-23, lag review).
+ */
+export function prepareHinted(db: Db, index: string, sql: string): Stmt {
+  try {
+    return db.prepare(sql);
+  } catch (e) {
+    if (!String((e as Error)?.message ?? e).includes(`no such index: ${index}`)) throw e;
+    return db.prepare(sql.replace(` INDEXED BY ${index}`, ""));
+  }
 }
 
 let depth = 0;

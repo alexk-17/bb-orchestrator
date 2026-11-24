@@ -14,8 +14,9 @@
 // (image-attach.tsx) and the stick-bottom wiring are as they were, and nothing about what a send is changed.
 import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import type { z } from "zod";
-import { Markdown, ThreadChat, experimental_useRpcQuery, useRealtime } from "@get-bb/plugin-sdk/app";
-import { CHANGED_CHANNEL, WRITES, rpcContract, type Projects, type directSeenBody, type resendBody } from "../contract.ts";
+import { Markdown, ThreadChat, experimental_useRpcQuery } from "@get-bb/plugin-sdk/app";
+import { WRITES, rpcContract, type Projects, type directSeenBody, type resendBody } from "../contract.ts";
+import { touches } from "../change-notice.ts";
 import { chatOrder, chatPreview, directState, followUpOf, seenUpTo } from "./command-center.ts";
 import { directWrite, imageWrite, leadChatView, messageStates } from "./lead-chat.ts";
 import { admit, canSend, imageFiles } from "./lead-images.ts";
@@ -32,6 +33,7 @@ import { Checkbox } from "./ui/checkbox.tsx";
 import { Label } from "./ui/label.tsx";
 import { cn } from "./ui/utils.ts";
 import { ChevronRight, Image as ImageIcon } from "lucide-react";
+import { useChangeNotice } from "./change-listener.ts";
 
 type Project = Projects[number];
 const MAX = 4000;
@@ -221,7 +223,7 @@ function ChatPage({ project, before, now, cos, busy, refetchAll, oldest, onOlder
   again.current = q.refetch;
   const latest = before === null;
   // the newest page follows the line live (a send, the lead's ack); older pages don't change
-  useRealtime(CHANGED_CHANNEL, () => latest && void again.current());
+  useChangeNotice((n) => latest && touches(n, "directHistory") && void again.current());
   const ms = chatOrder(q.data?.messages ?? []);
   // an older page on its way holds the button's place (2026-11-17): the button leaving first, at the top of the log, would
   // shift the message being read up by its height, where no scroll can make up for it

@@ -3,12 +3,14 @@
 // priority, drawn by app/row-line.tsx; the sprite itself replaces the row's provider icon (useRowIcons). bb draws the line only with the threadRowMetadata experiment on and Organize → Rows → Metadata checked.
 // Plain inline styles: the sidebar is outside the app's [data-orch] scope, so the app's CSS doesn't reach it.
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { experimental_useRpcQuery, useRealtime } from "@get-bb/plugin-sdk/app";
+import { experimental_useRpcQuery } from "@get-bb/plugin-sdk/app";
 import type { ExperimentalThreadRowMetadataProps } from "@get-bb/plugin-sdk/app";
-import { CHANGED_CHANNEL, rpcContract, type Agents } from "../contract.ts";
+import { rpcContract, type Agents } from "../contract.ts";
+import { touches } from "../change-notice.ts";
 import { rowIconCss } from "./faces.ts";
 import { sectionCss } from "./accent.ts";
 import { RowLine } from "./row-line.tsx";
+import { useChangeNotice } from "./change-listener.ts";
 
 type Agent = Agents[number];
 export type RowData = Map<string, Agent>;
@@ -20,9 +22,9 @@ export function useRowData(): RowData {
   // the agents read asks bb about every agent's thread: at most one refresh per 15 s however busy the orchestrator is
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => void (timer.current && clearTimeout(timer.current)), []);
-  useRealtime(
-    CHANGED_CHANNEL,
-    useCallback(() => {
+  useChangeNotice(
+    useCallback((n: unknown) => {
+      if (!touches(n, "agents")) return;
       timer.current ??= setTimeout(() => {
         timer.current = null;
         void refetch();
