@@ -108,12 +108,14 @@ export interface Settings {
   pokemon: boolean;
   batchInbox: boolean; // on by default, in the server setting and here (2026-11-20, tokens): off is per-message delivery
   inboxDebounceMs: number;
+  // A lead's least time between two inbox wakes (2026-11-24, the owner's card: "Build all four, 2-min gap"); 0 is off.
+  inboxGapMs?: number;
   // The personas hook (2026-11-18, personas.ts): the pack the personaPack setting names, already checked; an error when
   // the path is set but the pack failed (nothing shows, nothing moves); null when none is set. Picks follow a loaded pack
   // whatever the pokemon setting (so switching it moves nothing); what shows needs pokemon on too.
   personas?: PersonaPack | { error: string } | null;
 }
-export const DEFAULT_SETTINGS: Settings = { escalateMs: 5 * 60_000, resendMs: 10 * 60_000, owner: "", pokemon: false, batchInbox: true, inboxDebounceMs: 2000, personas: null };
+export const DEFAULT_SETTINGS: Settings = { escalateMs: 5 * 60_000, resendMs: 10 * 60_000, owner: "", pokemon: false, batchInbox: true, inboxDebounceMs: 2000, inboxGapMs: 120_000, personas: null };
 const packOf = (x: Settings["personas"]): PersonaPack | null => (x && !("error" in x) ? x : null);
 
 export type DeliverResult = { delivery: "sent" } | { delivery: "queued"; queuedMessageId: string } | { delivery: "held"; why: string };
@@ -1459,19 +1461,44 @@ export class Engine {
     return `${it.body}\n\n[orchestrator] ${o.Name}'s message ${it.id}${re ? `, re ${re}` : ""}${it.ref ? `, a follow-up of ${it.ref}` : ""}${again ? " (again)" : ""}. Answer it with orch_reply_owner(ref=${it.id}, text): your reply shows under it in ${o.name}'s feed. It approves nothing.`;
   }
 
+  /** The last flush stopped at its pass limit with a deadline crossed in its last pass: flush again at once. */
+  flushAgain = false;
+
+  /** When the wake timer must next flush (batched inbox): a pending wake or an unread deadline still to come, or null. */
+  nextWakeAt(): number | null {
+    return this.batch.nextDue(this.now(), (itemId) => this.importPaused(itemId));
+  }
+
   /** Send every pending item whose recipient can take it. Safe to call often. */
   async flush(): Promise<void> {
     if (this.settings.batchInbox) {
-      await this.batch.flush({
+      const paused = (itemId: string) => this.importPaused(itemId);
+      const pass = () => this.batch.flush({
         debounceMs: this.settings.inboxDebounceMs,
         retryMs: this.settings.resendMs,
+        gapMs: this.settings.inboxGapMs ?? 0,
         agent: (address) => this.agentByAddress(address),
         held: (a) => !!(a.project && this.project(a.project)?.heldAt),
         deliver: (a, text, token, bare) => this.ports.deliver(a.threadId, text, { id: `wake:${token}`, sender: "orchestrator", recipient: a.address, kind: "notice", body: bare } as Item),
         log: (text) => this.ports.log(text),
         dead: (recipient, _token, note) => this.wakeDead(recipient, note),
-        paused: (itemId) => this.importPaused(itemId),
+        paused,
       });
+      // A pass waits on each delivery; a deadline or a wake that came due meanwhile was judged with the time from before
+      // it, and the wake timer leaves out what is already due. So pass again at once while something came due (Codex,
+      // 2026-11-24: an overdue lead wake sat behind its gap for 57 s), up to five passes. If the fifth had something come
+      // due too, flushAgain says so, and the server runs another flush at once from its wake timer, after yielding.
+      // Cleared first: a pass that throws must not leave it set, or the server's 0 ms timer would retry in a hot loop.
+      this.flushAgain = false;
+      let crossed = false;
+      for (let i = 0, since = this.now(); i < 5; i++) {
+        await pass();
+        const now = this.now();
+        crossed = this.batch.cameDue(since, now, paused);
+        if (!crossed) break;
+        since = now;
+      }
+      this.flushAgain = crossed;
       this.changedSinceFlush();
       return;
     }
@@ -2669,6 +2696,15 @@ export class Engine {
    * publish (projectChangedSince), at most once per change, and never twice within STATUS_STALE_MS. One info item to
    * the lead, never a card. Only a lead that published once is nudged (it has the tool); a held project isn't.
    */
+  /**
+   * Status nudges only after a real turn (2026-11-24, the owner's call): a lead that no inbox
+   * wake has woken since it published can't have moved on, so a nudge would only ride along as noise. Per-message mode
+   * keeps no wake record, so there every nudge goes as before.
+   */
+  private hadRealTurnSince(lead: string, since: number): boolean {
+    return !this.settings.batchInbox || this.batch.wokenSince(lead, since);
+  }
+
   statusNudges(): Item[] {
     const t = this.now();
     const rows = this.db.prepare(`SELECT project, json, updated_at, nudged_at FROM lead_status WHERE updated_at < ? AND (nudged_at IS NULL OR nudged_at < ?)`).all(t - STATUS_STALE_MS, t - STATUS_STALE_MS) as {
@@ -2681,6 +2717,7 @@ export class Engine {
     for (const r of rows) {
       const lead = this.agentByAddress(`lead:${r.project}`);
       if (!lead || lead.status === "archived" || this.project(r.project)?.heldAt != null) continue;
+      if (!this.hadRealTurnSince(lead.address, r.updated_at)) continue; // checked before nudged_at moves: deferred, not lost
       const changed = this.projectChangedSince(r.project, lead.address, Math.max(r.updated_at, r.nudged_at ?? 0));
       if (changed === null) continue;
       const s = JSON.parse(r.json) as LeadStatus;
@@ -2717,6 +2754,7 @@ export class Engine {
       const lead = `lead:${slug}`;
       const s = this.leadStatus(slug);
       if (!s || !this.liveAt(lead)) continue;
+      if (!this.hadRealTurnSince(lead, s.updatedAt)) continue; // before the key or nudged_at is spent: deferred, not lost
       const key = `status-outdated:${slug}:${s.updatedAt}`;
       if (this.db.prepare(`SELECT 1 FROM items WHERE sender = 'orchestrator' AND send_key = ?`).get(key)) continue;
       // the stale nudge already asked for a new status within its window: one ask is enough

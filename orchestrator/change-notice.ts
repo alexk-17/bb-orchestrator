@@ -57,7 +57,7 @@ export type ChangeRead = keyof typeof READS;
  */
 export const UNREAD_TABLES = [
   "_migrations",
-  "inbox_reads", "inbox_wakes", // the agents' batched inbox (its entries: the feed's read receipts)
+  "inbox_reads", "inbox_wakes", "inbox_wake_log", // the agents' batched inbox (its entries: the feed's read receipts; the wake log: the lead wake gap)
   "xp_cursor", "thread_numbers", "alarms", "memchecks", "dream_batches",
   "slack_watch_events", "slack_watch_profiles", "slack_watch_roots", // read by multiplayer, which refetches on every change
   "multiplayer_beats", "multiplayer_records", "review_queue_lease",

@@ -41,11 +41,19 @@ function setup() {
   e.setStatus("T-w2", "idle");
   const sum = () => e.projectSummaries().get("kite")!;
   const publish = (raw: unknown) => e.publishStatus(lead, statusParams.parse(raw));
+  // the owner's answer wakes the lead and it reads its digest: a status nudge waits for such a real turn (2026-11-24)
+  const wakeLead = async () => {
+    await e.flush();
+    clock.t += 2000;
+    await e.flush();
+    const r = e.batch.read(lead);
+    if (r.cursor) e.batch.ack(lead, r.cursor);
+  };
   const toOwner = (by: Agent, title: string) => {
     const d = e.ask(by, { title, question: `${title} Go?`, options: [{ label: "Go" }, { label: "Wait" }] });
     return by.role === "lead" ? e.triageAskPerson(cos, d.id, { question: `${title} Go?`, options: [{ label: "Go" }, { label: "Wait" }], allowText: true }) : d;
   };
-  return { e, db, cos, lead, w1, w2, sum, publish, toOwner, advance: (ms: number) => (clock.t += ms), now: () => clock.t };
+  return { e, db, cos, lead, w1, w2, sum, publish, toOwner, wakeLead, advance: (ms: number) => (clock.t += ms), now: () => clock.t };
 }
 
 test("a wait line is a wait outside the project: mail to its own agents and a thread's question to its own lead are not", () => {
@@ -223,12 +231,13 @@ test("a blocker naming an answered card drops", () => {
 });
 
 // The engine asks the lead to republish, once per status, and never the owner (2026-11-16).
-test("a contradicted status nudges its lead once per status, never the owner, not when held", () => {
+test("a contradicted status nudges its lead once per status, never the owner, not when held", async () => {
   const s = setup();
   const card = s.toOwner(s.lead, "Pick a name?");
   s.publish({ goal: "g", steps: ["Build"], waiting_on: [{ kind: "owner", ref: card.id, label: "the name" }] });
   assert.equal(s.e.statusOutOfDateNudges().length, 0, "nothing contradicts it yet");
   s.e.personAnswer(card.id, card.rev, "1", null, "desktop");
+  await s.wakeLead();
   const first = s.e.statusOutOfDateNudges();
   assert.equal(first.length, 1);
   assert.equal(first[0]!.recipient, "lead:kite");
@@ -241,6 +250,7 @@ test("a contradicted status nudges its lead once per status, never the owner, no
   const card2 = s.toOwner(s.lead, "Pick a colour?");
   s.publish({ goal: "g", steps: ["Build"], waiting_on: [{ kind: "owner", ref: card2.id, label: "the colour" }] });
   s.e.personAnswer(card2.id, card2.rev, "1", null, "desktop");
+  await s.wakeLead();
   s.e.setHold("kite", true);
   assert.equal(s.e.statusOutOfDateNudges().length, 0, "held: the lead isn't asked");
   s.e.setHold("kite", false);
@@ -292,12 +302,13 @@ test("a lead's wait on another project's PR or thread drops once that one merged
   void other;
 });
 
-test("one status gets one ask through the tick: the out-of-date notice, not also the stale one", () => {
+test("one status gets one ask through the tick: the out-of-date notice, not also the stale one", async () => {
   const s = setup();
   const card = s.toOwner(s.lead, "Pick a name?");
   s.publish({ goal: "g", steps: ["Build"], waiting_on: [{ kind: "owner", ref: card.id, label: "the name" }] });
   s.advance(3 * HOUR);
   s.e.personAnswer(card.id, card.rev, "1", null, "desktop");
+  await s.wakeLead();
   s.e.tick();
   s.advance(2 * 60_000);
   s.e.tick();

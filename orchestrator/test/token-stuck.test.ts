@@ -142,10 +142,36 @@ test("a thread spawned under auto is left as it was: bb tells its lead, the plug
   assert.equal(w.e.batch.read(w.lead).count, 0);
 });
 
-test("only a new spawn uses stuck; a handoff's successor and an adopted thread keep auto", () => {
+// 2026-11-24, the lead's call: handed-off successors and adopted threads kept "auto", and
+// bb woke the lead with "… completed" at every turn end of them, outside the plugin's inbox and its wake gap. They now
+// get the spawn path's "stuck" (resolve.test.ts, adopt.test.ts and cos-start-lead.test.ts pin the calls). At that
+// level a turn end must wake no one, and a prompt or a failure must still reach the lead.
+for (const kind of ["handed-off successor", "adopted thread"] as const)
+  test(`a ${kind} at the spawn path's level: a turn end wakes no one, a prompt wakes the lead, a failure is told by bb`, async () => {
+    const w = await world();
+    const a =
+      kind === "handed-off successor"
+        ? w.e.takeOver(w.worker.threadId, "T-succ", "codex; handoff.md", { from: "claude-code", to: "codex" })
+        : w.e.adopt({ threadId: "T-adopted", role: "thread", project: "kite", parentThreadId: w.lead.threadId, approval: "owner-approved" }, "env-a", "bbp-1");
+    w.e.setStatus(a.threadId, "idle");
+    const t = { id: a.threadId, parentThreadId: w.lead.threadId, parentNotifications: "stuck" };
+    assert.equal(w.e.bbTellsSupervisor(a, w.lead.threadId, "stuck", "turn"), false, "bb says nothing at a turn end under stuck");
+    await w.emit("thread.idle", { thread: t, lastAssistantText: "done for now" });
+    await w.settle();
+    assert.equal(w.leadWakes().length, 0, "a turn end wakes no one");
+    assert.match(w.unread(), /INFO\n[^\n]*finished a turn\. Last words: "done for now"/, "it rides in the next digest");
+    await w.emit("interaction.pending", { thread: t, interaction: { id: "int-s" } });
+    await w.settle();
+    assert.equal(w.leadWakes().length, 1, "a thread blocked on a prompt still wakes its lead");
+    assert.match(w.leadWakes()[0]!.text, /is waiting on a prompt in its bb thread/);
+    assert.equal(w.e.bbTellsSupervisor(a, w.lead.threadId, "stuck", "failure"), true, "a failure is told by bb under stuck");
+  });
+
+test("nothing in the server sets auto any more: spawn, handoff and the startup reconcile set stuck, adopt takes its level from the role", () => {
   const src = readFileSync(new URL("../server.ts", import.meta.url), "utf8");
   const spawn = src.slice(src.indexOf('name: "orch_spawn_thread"'), src.indexOf('name: "orch_resolve"'));
   assert.match(spawn, /parentNotifications: "stuck"/);
-  assert.doesNotMatch(spawn, /parentNotifications: "auto"/);
-  assert.equal(src.match(/parentNotifications: "auto"/g)?.length, 2, "handoff and adopt");
+  assert.equal(src.match(/parentNotifications: "auto"/g), null);
+  assert.equal(src.match(/parentNotifications: "stuck"/g)?.length, 3, "spawn, handoff and the startup reconcile (notify-level.test.ts)");
+  assert.match(src, /parent: async \(id, parentThreadId, notify\) => \{ await bb\.sdk\.threads\.update\(\{ threadId: id, parentThreadId, parentNotifications: notify \}\)/);
 });

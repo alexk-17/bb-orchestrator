@@ -81,6 +81,7 @@ import { type DeliverResult, Engine, OUTPUT_KINDS, parseSince, type PrResult, ty
 import { PINS_MAX } from "./core/pins.ts";
 import { DAY_MS, prune, pruneSummary } from "./core/retention.ts";
 import { GONE_CHECK_MS, lookThreads } from "./core/gone.ts";
+import { autoUnderLead, type BbNotify } from "./core/notify-level.ts";
 import { readThreadPrs } from "./core/pr-links.ts";
 import { AlarmState, describe as describeAlarm, sample, type Snapshot, type Thresholds } from "./core/host.ts";
 import {
@@ -144,6 +145,11 @@ function errText(e: unknown): string {
   return String(e instanceof Error ? e.message : e);
 }
 
+/** The lead wake gap setting: 0 is off (so no `|| default`), at most 30 minutes, 120 s when unset or not a number. */
+function gapMs(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? Math.min(30 * 60_000, Math.max(0, v)) : 120_000;
+}
+
 function ok(text: string) {
   return { content: [{ type: "text" as const, text }] };
 }
@@ -159,6 +165,7 @@ export default async function plugin(bb: BbPluginApi) {
     escalateMinutes: { type: "number", label: "Untriaged decisions go to you after (minutes)", default: 5 },
     batchInbox: { type: "boolean", label: "Batched inbox: one debounced wake per recipient instead of each message into a turn (on, the default; off: per-message delivery)", default: true },
     inboxDebounceMs: { type: "number", label: "Inbox wake debounce (milliseconds)", default: 2000 },
+    inboxGapMs: { type: "number", label: "Lead wake gap: least time between two inbox wakes of the same lead; the owner's items and overdue items skip it (milliseconds, 0 = off)", default: 120000 },
     resendMinutes: { type: "number", label: "Unacked items are re-sent after the recipient idles (minutes)", default: 10 },
     diskPct: { type: "number", label: "Disk alarm (%)", default: 85 },
     swapPct: { type: "number", label: "Swap alarm (%)", default: 50 },
@@ -362,7 +369,7 @@ export default async function plugin(bb: BbPluginApi) {
       try { allowImport(effectiveRoutes(), source, to); return true; }
       catch { return false; }
     }, deliver, mirror, changed, log: (m) => bb.log.warn(m), cardUp: (d) => void pushCard(d), delivered: (d) => void pushDelivered(d), files: () => ({ dir: join(stateDir(), "deliverables"), kept: join(stateDir(), "threads") }) },
-    { escalateMs: cfg.escalateMinutes * 60_000, resendMs: cfg.resendMinutes * 60_000, owner: cfg.ownerName, pokemon: cfg.pokemon, batchInbox: cfg.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, cfg.inboxDebounceMs || 2000)), personas: loadPack(cfg.personaPack) },
+    { escalateMs: cfg.escalateMinutes * 60_000, resendMs: cfg.resendMinutes * 60_000, owner: cfg.ownerName, pokemon: cfg.pokemon, batchInbox: cfg.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, cfg.inboxDebounceMs || 2000)), inboxGapMs: gapMs(cfg.inboxGapMs), personas: loadPack(cfg.personaPack) },
   );
   const openPrs = registerOpenPrs(bb, engine, () => cfg);
   // after the engine, whose migrations made its tables; dry-run unless the setting is exactly false
@@ -412,7 +419,10 @@ export default async function plugin(bb: BbPluginApi) {
     cfg = next;
     reviewQueue.changed(); // the queue page re-reads dry-run
     changed(EVERYTHING); // the page re-reads its config (owner name, CoS title) and the agents (Pokémon on or off)
-    engine.settings = { escalateMs: next.escalateMinutes * 60_000, resendMs: next.resendMinutes * 60_000, owner: next.ownerName, pokemon: next.pokemon, batchInbox: next.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, next.inboxDebounceMs || 2000)), personas: loadPack(next.personaPack) };
+    const before = engine.settings;
+    engine.settings = { escalateMs: next.escalateMinutes * 60_000, resendMs: next.resendMinutes * 60_000, owner: next.ownerName, pokemon: next.pokemon, batchInbox: next.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, next.inboxDebounceMs || 2000)), inboxGapMs: gapMs(next.inboxGapMs), personas: loadPack(next.personaPack) };
+    // a new gap applies to wakes it already held: the flush works their due times out again, then the timer re-arms
+    if (engine.settings.inboxGapMs !== before.inboxGapMs) void flush();
     reloadMemory();
     if (notifyFlip) void notifyOnly();
   });
@@ -509,21 +519,28 @@ export default async function plugin(bb: BbPluginApi) {
   // live wakes went up to 112 s late. Armed only while the clock service runs (bb starts it after a good activation;
   // its abort clears the timer), for the earliest wake still to come due; one that is due already waits on its
   // recipient (busy, held), whose turn ending flushes.
+  const MAX_TIMER_MS = 2_147_483_647; // setTimeout's largest delay; a longer one fires after 1 ms
   let wakeTimers = false;
   let wakeTimer: ReturnType<typeof setTimeout> | null = null;
   let wakeAt = Infinity;
   function armWake(): void {
     if (!wakeTimers || !engine.settings.batchInbox) return;
     const now = Date.now();
-    const next = engine.batch.wakes().find((w) => w.state === "pending" && w.due_at > now);
-    if (!next || (wakeTimer && wakeAt <= next.due_at)) return;
+    // the last flush stopped at its pass limit with a deadline just crossed: flush again at once, on this one timer
+    const again = engine.flushAgain;
+    // a pending wake, or an unread deadline (2026-11-24: one inside a lead's wake gap waited for the gap's end)
+    const next = again ? now : engine.nextWakeAt();
+    if (next === null || (!again && next <= now) || (wakeTimer && wakeAt <= next)) return;
     if (wakeTimer) clearTimeout(wakeTimer);
-    wakeAt = next.due_at;
+    // at most Node's longest timer: a deadline weeks ahead overflowed it into a 1 ms loop (Codex, 2026-11-24); a timer
+    // that fires early flushes nothing due and arms again for what is left
+    const delay = again ? 0 : Math.min(next - now + 20, MAX_TIMER_MS);
+    wakeAt = now + delay;
     wakeTimer = setTimeout(() => {
       wakeTimer = null;
       wakeAt = Infinity;
       void flush();
-    }, next.due_at - now + 20);
+    }, delay);
   }
 
   // ---------------------------------------------------------------- agent tools
@@ -1292,7 +1309,8 @@ export default async function plugin(bb: BbPluginApi) {
           await bb.sdk.threads.stop({ threadId: n.id }).catch((x: unknown) => bb.log.warn(`handoff: stop orphan ${n.id}: ${errText(x)}`));
           throw new Error(`${errText(e)} (the new thread ${n.id} was stopped; ${p.to} is unchanged)`);
         }
-        await bb.sdk.threads.update({ threadId: n.id, parentThreadId: a.threadId, parentNotifications: "auto" } as Parameters<typeof bb.sdk.threads.update>[0]);
+        // the spawn path's level: bb no longer wakes the lead at every turn end, only when the thread fails or is blocked on a prompt
+        await bb.sdk.threads.update({ threadId: n.id, parentThreadId: a.threadId, parentNotifications: "stuck" } as Parameters<typeof bb.sdk.threads.update>[0]);
         await bb.sdk.threads.updatePluginMetadata({ threadId: n.id, set: { address: succ.address, role: succ.role } });
         await bb.sdk.threads.stop({ threadId: t.threadId }).catch((e: unknown) => bb.log.warn(`handoff: stop ${t.threadId}: ${errText(e)}`));
         // hidden at once, not archived: it shares the successor's worktree, and resolving the successor archives both
@@ -1975,6 +1993,16 @@ export default async function plugin(bb: BbPluginApi) {
             if (a.status === "stopped" && !archived) continue;
             engine.setStatus(a.threadId, archived ? "archived" : t.status);
             if (!a.environmentId) engine.setEnvironment(a.threadId, (t as unknown as ThreadInfo).environmentId ?? null);
+          }
+          // threads made before handoff and adoption set "stuck" (core/notify-level.ts): bb woke their lead at every turn end
+          for (const { agent, leadThreadId } of autoUnderLead(engine, threads as unknown as Map<string, BbNotify>)) {
+            if (signal.aborted) return;
+            try {
+              await bb.sdk.threads.update({ threadId: agent.threadId, parentThreadId: leadThreadId, parentNotifications: "stuck" } as Parameters<typeof bb.sdk.threads.update>[0]);
+              bb.log.info(`notify level: ${agent.address} (${agent.threadId}) auto -> stuck under its lead ${leadThreadId}, as orch_spawn_thread sets`);
+            } catch (e) {
+              bb.log.warn(`notify level: ${agent.address} (${agent.threadId}): ${errText(e)}`);
+            }
           }
         } catch (e) {
           bb.log.warn(`reconcile: ${errText(e)}`);
@@ -3183,7 +3211,7 @@ export default async function plugin(bb: BbPluginApi) {
               engine,
               get: async (id) => await bb.sdk.threads.get({ threadId: id }) as unknown as AdoptThread,
               queued: async (id) => (await bb.sdk.threads.queuedMessages.list({ threadId: id })).length > 0,
-              parent: async (id, parentThreadId) => { await bb.sdk.threads.update({ threadId: id, parentThreadId, parentNotifications: "auto" }); },
+              parent: async (id, parentThreadId, notify) => { await bb.sdk.threads.update({ threadId: id, parentThreadId, parentNotifications: notify }); },
               mirror: async (id, address, role) => { await bb.sdk.threads.updatePluginMetadata({ threadId: id, set: { address, role } }); },
             }, { threadId, role: role as Role, project: flag("project"), parentThreadId: flag("parent"), approval: flag("approval") ?? "" }));
             return out(`${a.threadId} is ${a.address}; parent=${a.parentThreadId ?? "none"}`);

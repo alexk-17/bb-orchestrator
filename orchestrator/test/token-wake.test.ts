@@ -28,7 +28,8 @@ function setup() {
       changed: () => {},
       log: () => {},
     },
-    { batchInbox: true, inboxDebounceMs: 2000, resendMs: 600_000 },
+    // gap 0: these tests are about the digest and its cursor; the lead wake gap has its own (test/wake-gap.test.ts)
+    { batchInbox: true, inboxDebounceMs: 2000, resendMs: 600_000, inboxGapMs: 0 },
   );
   const cos = e.register("T-cos", "cos", null);
   const lead = e.register("T-la", "lead", "kite");

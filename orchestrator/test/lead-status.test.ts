@@ -15,12 +15,23 @@ function setup() {
   const clock = { t: T0 };
   const db = new DatabaseSync(":memory:");
   const e = new Engine(db as never, { now: () => clock.t, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} }, { owner: "Robin" });
-  e.register("T-cos", "cos", null);
+  const cos = e.register("T-cos", "cos", null);
   const lead = e.register("T-lead", "lead", "demo");
   // what the tool does: the registered schema parses the raw arguments, then the engine stores them
   const publish = (raw: unknown) => e.publishStatus(lead, statusParams.parse(raw));
   const nudges = () => e.items(500).filter((i) => i.recipient === lead.address && i.body.startsWith("Your status on the project page"));
-  return { e, db, lead, clock, publish, nudges, advance: (ms: number) => (clock.t += ms) };
+  // A real turn: mail that needs the lead wakes it, and it reads its digest (2026-11-24: a lead nobody woke since its
+  // publish gets no status nudge, since it can't have moved on).
+  const realTurn = async (mail = true) => {
+    e.setStatus(lead.threadId, "idle");
+    if (mail) e.send(cos, lead.address, "next step", null);
+    await e.flush();
+    clock.t += 2000;
+    await e.flush();
+    const r = e.batch.read(lead);
+    if (r.cursor) e.batch.ack(lead, r.cursor);
+  };
+  return { e, db, lead, clock, publish, nudges, realTurn, advance: (ms: number) => (clock.t += ms) };
 }
 
 const FIVE = [
@@ -121,10 +132,11 @@ test("a lead waiting a day on a PR that doesn't change gets no nudge: nothing ha
   assert.equal(s.nudges().length, 0, "every nudge wakes the lead and costs tokens");
 });
 
-test("a change in the project after the publish nudges a stale status once per change, as an info item", () => {
+test("a change in the project after the publish nudges a stale status once per change, as an info item", async () => {
   const s = setup();
   const thread = s.e.register("T-1", "thread", "demo", "T-lead");
   s.publish({ steps: FIVE, waiting_on: { kind: "pr", ref: PR } });
+  await s.realTurn();
   s.advance(30 * 60_000);
   s.e.setStatus(thread.threadId, "active"); // a thread's state changed
   s.advance(STATUS_STALE_MS - 31 * 60_000);
@@ -148,7 +160,7 @@ test("a change in the project after the publish nudges a stale status once per c
   assert.equal(s.nudges().length, 2);
 });
 
-test("an answered card counts as a change; the lead's own state changes don't", () => {
+test("an answered card counts as a change; the lead's own state changes don't", async () => {
   const s = setup();
   s.publish({ steps: FIVE, waiting_on: "Robin" });
   s.advance(10 * 60_000);
@@ -161,6 +173,7 @@ test("an answered card counts as a change; the lead's own state changes don't", 
   s.e.triageAskPerson(s.e.agentByAddress("cos")!, card.id, { question: "Go ahead?", options: [{ label: "Yes" }, { label: "No" }], allowText: true });
   s.advance(60_000);
   s.e.personAnswer(card.id, s.e.decision(card.id)!.rev, "1", null, "desktop");
+  await s.realTurn(false); // the answer itself wakes the lead
   s.e.tick();
   assert.equal(s.nudges().length, 1, "the owner answered: what it waits on likely moved");
 });

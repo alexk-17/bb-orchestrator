@@ -41,6 +41,10 @@ export const WAKE_DIGEST_CAP = 16_000;
 
 /** acked_at of a dead letter's entry: out of the unread, but never read. */
 const DROPPED = -1;
+/** A wake's note when the owner's Resend or the CoS's retry_wake restarted it: it goes now, gap or not. */
+const RESTARTED = "restarted";
+/** Who the wake gap holds (2026-11-24, the owner's call): leads only. */
+const gapped = (recipient: string) => recipient.startsWith("lead:");
 
 export class BatchInbox {
   private inflight = new Set<string>();
@@ -63,6 +67,10 @@ export class BatchInbox {
       CREATE TABLE IF NOT EXISTS inbox_wakes (
       recipient TEXT PRIMARY KEY, token TEXT NOT NULL, state TEXT NOT NULL, due_at INTEGER NOT NULL,
       attempts INTEGER NOT NULL DEFAULT 0, last_at INTEGER, queued_id TEXT, through_seq INTEGER NOT NULL, note TEXT);
+      CREATE TABLE IF NOT EXISTS inbox_wake_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, recipient TEXT NOT NULL, thread_id TEXT NOT NULL, token TEXT NOT NULL,
+      attempt INTEGER NOT NULL, at INTEGER NOT NULL, delivery TEXT NOT NULL, queued_id TEXT, items INTEGER NOT NULL, actionable INTEGER NOT NULL);
+      CREATE INDEX IF NOT EXISTS inbox_wake_log_by ON inbox_wake_log(recipient, at);
 `);
   }
 
@@ -177,6 +185,11 @@ export class BatchInbox {
       this.db.prepare(`UPDATE inbox_entries SET acked_at=? WHERE recipient=? AND seq<=? AND acked_at IS NULL`).run(this.now(), a.address, r.through_seq);
       // Do not cancel a queued wake: the same queue row can wake for remaining/new mail.
       this.db.prepare(`DELETE FROM inbox_wakes WHERE recipient=? AND through_seq<=? AND state NOT IN ('queued','sending')`).run(a.address, r.through_seq);
+      // A cursor ack that read something answers the wake that went out, even when it left mail unread (a digest past its
+      // cap): what is left gets a fresh wake, after the lead gap, instead of the retry resendMs later (2026-11-24: an
+      // ACTION item behind many held notices waited 10 minutes). Leads only: the CoS, the Steward and threads have no gap,
+      // so for them this would be a fresh wake 2 s later, and they keep the wakes they had.
+      if (rows.length && gapped(a.address)) this.db.prepare(`DELETE FROM inbox_wakes WHERE recipient=? AND state='sent'`).run(a.address);
       return rows.length;
     });
   }
@@ -218,16 +231,18 @@ export class BatchInbox {
   /** The owner's Resend: a wake that went out, is unsure or died starts again now, so the recipient is woken for its unread. */
   rewake(address: string): void {
     this.db
-      .prepare(`UPDATE inbox_wakes SET state='pending',attempts=0,due_at=?,queued_id=NULL,note=NULL WHERE recipient=? AND state IN ('dead','sent','uncertain')`)
-      .run(this.now(), address);
+      .prepare(`UPDATE inbox_wakes SET state='pending',attempts=0,due_at=?,queued_id=NULL,note=? WHERE recipient=? AND state IN ('dead','sent','uncertain')`)
+      .run(this.now(), RESTARTED, address);
   }
   retry(address: string): void {
     this.db
-      .prepare(`UPDATE inbox_wakes SET state='pending',attempts=0,due_at=?,queued_id=NULL,note=NULL WHERE recipient=? AND state='dead'`)
-      .run(this.now(), address);
+      .prepare(`UPDATE inbox_wakes SET state='pending',attempts=0,due_at=?,queued_id=NULL,note=? WHERE recipient=? AND state='dead'`)
+      .run(this.now(), RESTARTED, address);
   }
   dispatched(id: string): void {
     this.db.prepare(`UPDATE inbox_wakes SET state='sent',last_at=?,queued_id=NULL WHERE queued_id=? AND state='queued'`).run(this.now(), id);
+    // a queued wake starts its turn when bb dispatches it: that is the wake's time for the gap and the counts
+    this.db.prepare(`UPDATE inbox_wake_log SET delivery='dispatched',at=? WHERE queued_id=? AND delivery='queued'`).run(this.now(), id);
     this.clearAcknowledgedWakes();
   }
   /** A queued wake was removed before it went: it is dead. Returns the wake, for the engine to tell the CoS. */
@@ -235,6 +250,7 @@ export class BatchInbox {
     const w = this.db.prepare(`SELECT recipient, token FROM inbox_wakes WHERE queued_id=? AND state!='dead'`).get(id) as { recipient: string; token: string } | undefined;
     const note = "queued wake cancelled; unread mail retained";
     this.db.prepare(`UPDATE inbox_wakes SET state='dead',note=? WHERE queued_id=?`).run(note, id);
+    this.db.prepare(`UPDATE inbox_wake_log SET delivery='cancelled' WHERE queued_id=? AND delivery='queued'`).run(id);
     return w ? { ...w, note } : null;
   }
   missingQueue(id: string): void {
@@ -242,6 +258,64 @@ export class BatchInbox {
     this.db
       .prepare(`UPDATE inbox_wakes SET state='uncertain',last_at=?,queued_id=NULL,note='queue absent after downtime' WHERE queued_id=?`)
       .run(this.now(), id);
+  }
+
+  /**
+   * The last wake that went to this address's current thread (sent, queued or dispatched), or null. Per thread, so a
+   * successor after a handoff starts with no gap to wait out.
+   */
+  lastWake(address: string, threadId: string): number | null {
+    const r = this.db.prepare(`SELECT MAX(at) AS at FROM inbox_wake_log WHERE recipient=? AND thread_id=? AND delivery!='cancelled'`).get(address, threadId) as { at: number | null };
+    return r.at;
+  }
+
+  /** Whether a wake started a turn for this address after `since` (a real turn: wakes only go for actionable mail). */
+  wokenSince(address: string, since: number): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM inbox_wake_log WHERE recipient=? AND at>? AND delivery IN ('sent','dispatched') LIMIT 1`).get(address, since);
+  }
+
+  /**
+   * Unread that skips the wake gap: anything from the owner (a direct message, a card answer, a deliverable approved,
+   * changes asked or a next action) and anything whose deadline has passed. An INFO item from the owner (an approval
+   * with no next action) still wakes no one alone, since flush only wakes for actionable mail, but it brings a held
+   * wake forward.
+   */
+  private urgent(address: string, now: number, paused?: (itemId: string) => boolean): boolean {
+    const rows = this.db
+      .prepare(
+        `SELECT e.item_id FROM inbox_entries e JOIN items i ON i.id=e.item_id WHERE e.recipient=? AND e.acked_at IS NULL
+      AND (i.sender='person' OR (e.due_at IS NOT NULL AND e.due_at<=?))`,
+      )
+      .all(address, now) as { item_id: string }[];
+    return rows.some((r) => !paused?.(r.item_id));
+  }
+
+  /**
+   * When the wake timer must next run a flush: the earliest pending wake still to come due, or the earliest unread
+   * deadline still to come (an item whose deadline passes makes its wake urgent, or actionable when it is INFO), or
+   * null. Without the deadlines, an item due inside a lead's wake gap waited for the gap's end or a clock pass.
+   */
+  nextDue(now: number, paused?: (itemId: string) => boolean): number | null {
+    const wake = this.db.prepare(`SELECT MIN(due_at) AS at FROM inbox_wakes WHERE state='pending' AND due_at>?`).get(now) as { at: number | null };
+    let next = wake.at;
+    for (const r of this.db.prepare(`SELECT item_id, due_at FROM inbox_entries WHERE acked_at IS NULL AND due_at IS NOT NULL AND due_at>? ORDER BY due_at`).all(now) as { item_id: string; due_at: number }[]) {
+      if (paused?.(r.item_id)) continue;
+      if (next === null || r.due_at < next) next = r.due_at;
+      break;
+    }
+    return next;
+  }
+
+  /**
+   * Whether something came due in (since, now], while a flush waited on a delivery: an unread, unpaused deadline, or a
+   * pending wake. That flush judged it with the time from before, and nextDue leaves out what is already due.
+   */
+  cameDue(since: number, now: number, paused?: (itemId: string) => boolean): boolean {
+    if (this.db.prepare(`SELECT 1 FROM inbox_wakes WHERE state='pending' AND due_at>? AND due_at<=? LIMIT 1`).get(since, now)) return true;
+    const rows = this.db
+      .prepare(`SELECT item_id FROM inbox_entries WHERE acked_at IS NULL AND due_at IS NOT NULL AND due_at>? AND due_at<=?`)
+      .all(since, now) as { item_id: string }[];
+    return rows.some((r) => !paused?.(r.item_id));
   }
 
   private clearAcknowledgedWakes(): void {
@@ -256,6 +330,8 @@ export class BatchInbox {
   async flush(o: {
     debounceMs: number;
     retryMs: number;
+    /** A lead's least time between two wakes; 0 is off. Urgent unread, restarts and retries of the same wake skip it. */
+    gapMs?: number;
     agent(address: string): Agent | null;
     held(a: Agent): boolean;
     /** bare: the wake without its digest, for a recipient bb will queue it behind (a turn under way) */
@@ -300,6 +376,20 @@ export class BatchInbox {
           o.dead?.(recipient, w.token, w.note ?? "wake unacknowledged after two attempts");
         }
       }
+      // The wake gap (2026-11-24): a new wake for a lead goes no sooner than gapMs after its last one, so a burst of mail
+      // is one turn. The deferral is written to due_at, so the wake timer fires for it. It is worked out again at every
+      // flush from the wake's own debounce (a due_at never later than now + debounce), never from an earlier deferral:
+      // urgent unread pulls it back whatever the gap, and a gap lowered or turned off shortens a deferral already made.
+      const gap = o.gapMs ?? 0;
+      if (w.state === "pending" && w.attempts === 0 && w.note !== RESTARTED && gapped(recipient)) {
+        const base = Math.min(w.due_at, now + o.debounceMs);
+        const last = gap > 0 ? this.lastWake(recipient, a.threadId) : null;
+        const due = this.urgent(recipient, now, o.paused) || last === null ? base : Math.max(base, last + gap);
+        if (due !== w.due_at) {
+          this.db.prepare(`UPDATE inbox_wakes SET due_at=? WHERE recipient=? AND token=? AND state='pending'`).run(due, recipient, w.token);
+          w = { ...w, due_at: due };
+        }
+      }
       if (w.state !== "pending" || w.due_at > now) continue;
       this.inflight.add(recipient);
       // Persist before the async SDK boundary: crash recovery retries only this wake, never the messages.
@@ -323,16 +413,19 @@ export class BatchInbox {
           this.db
             .prepare(`UPDATE inbox_wakes SET state='pending',attempts=attempts-1,due_at=? WHERE recipient=? AND token=?`)
             .run(this.now() + o.debounceMs, recipient, w.token);
-        else
+        else {
+          const queuedId = result.delivery === "queued" ? result.queuedMessageId : null;
           this.db
             .prepare(`UPDATE inbox_wakes SET state=?,queued_id=?,last_at=? WHERE recipient=? AND token=?`)
-            .run(
-              result.delivery === "queued" ? "queued" : "sent",
-              result.delivery === "queued" ? result.queuedMessageId : null,
-              this.now(),
-              recipient,
-              w.token,
-            );
+            .run(queuedId ? "queued" : "sent", queuedId, this.now(), recipient, w.token);
+          // The wake's durable record (inbox_wakes rows go on ack): the gap, the status nudges and count-wakes read it.
+          const actionable = this.db
+            .prepare(`SELECT COUNT(*) AS n FROM inbox_entries WHERE recipient=? AND acked_at IS NULL AND (severity!='INFO' OR needs_reply=1 OR (due_at IS NOT NULL AND due_at<=?))`)
+            .get(recipient, now) as { n: number };
+          this.db
+            .prepare(`INSERT INTO inbox_wake_log(recipient,thread_id,token,attempt,at,delivery,queued_id,items,actionable) VALUES(?,?,?,?,?,?,?,?,?)`)
+            .run(recipient, a.threadId, w.token, w.attempts + 1, this.now(), queuedId ? "queued" : "sent", queuedId, d.count, actionable.n);
+        }
       } catch (e) {
         this.db.prepare(`UPDATE inbox_wakes SET state='uncertain',note=? WHERE recipient=? AND token=?`).run(String(e), recipient, w.token);
         o.log(`inbox wake failed for ${recipient}; unread retained`);

@@ -61,6 +61,7 @@ async function server(settings: Record<string, unknown> = {}) {
   let instructions: (c: { threadId: string }) => string | null = () => null;
   const threadRows = new Map<string, any>();
   const metadata: any[] = [];
+  const updates: any[] = [];
   const noop: any = new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : noop), apply: () => noop });
   const sdk = {
     environments: { get: async () => ({ hostId: "host-1" }) },
@@ -75,6 +76,7 @@ async function server(settings: Record<string, unknown> = {}) {
       send: async (input: Record<string, any>) => { sends.push(input); return { delivery: "sent" }; },
       queuedMessages: { list: async () => [] },
       updatePluginMetadata: async (p: any) => { metadata.push(p); return {}; },
+      update: async (u: any) => { updates.push(u); Object.assign(threadRows.get(u.threadId) ?? {}, { parentThreadId: u.parentThreadId, parentNotifications: u.parentNotifications }); return {}; },
       get: async ({ threadId }: { threadId: string }) => threadRows.get(threadId) ?? ({ id: threadId, projectId: "bbp-1", environmentId: "env-lead", status: "idle", archivedAt: null, parentThreadId: null }),
       list: async () => [],
     },
@@ -120,7 +122,7 @@ async function server(settings: Record<string, unknown> = {}) {
     const r = await t.execute(t.parameters.parse(raw), { threadId });
     return { ok: !r.isError, text: r.content[0]!.text };
   };
-  return { root, projects, repo, engine, tools, spawns, sends, db, button, call, instructions: (threadId: string) => instructions({ threadId }), threadRows, metadata, cli: (args: string[], threadId: string | null = null) => cli(args, { threadId, cwd: root }) };
+  return { root, projects, repo, engine, tools, spawns, sends, db, button, call, instructions: (threadId: string) => instructions({ threadId }), threadRows, metadata, updates, cli: (args: string[], threadId: string | null = null) => cli(args, { threadId, cwd: root }) };
 }
 
 const cosStarted = (e: Engine, address: string) => e.board().find((b) => b.title === `cos started ${address}`);
@@ -558,7 +560,7 @@ test("integration CLI is opt-in, rejects agent callers and preserves idempotent 
 test("operator adopts existing parented lead and worker through the CLI without spawning or reparenting", async () => {
   const s = await server();
   s.engine.register("T-cos", "cos", null);
-  for (const [id, parent] of [["T-lead", "T-cos"], ["T-worker", "T-lead"]]) s.threadRows.set(id, { id, parentThreadId: parent, projectId: "bbp-1", environmentId: `env-${id}`, status: "idle", archivedAt: null });
+  for (const [id, parent] of [["T-lead", "T-cos"], ["T-worker", "T-lead"]]) s.threadRows.set(id, { id, parentThreadId: parent, parentNotifications: "auto", projectId: "bbp-1", environmentId: `env-${id}`, status: "idle", archivedAt: null });
   for (const [id, role, parent] of [["T-lead", "lead", "T-cos"], ["T-worker", "thread", "T-lead"]]) {
     const args = ["adopt", id!, role!, "--project", "alpha", "--parent", parent!, "--approval", "approved-map"];
     const first = await s.cli(args);
@@ -571,6 +573,9 @@ test("operator adopts existing parented lead and worker through the CLI without 
   assert.equal(s.engine.board().filter((b) => b.title.startsWith("Adopted ")).length, 2);
   assert.equal(s.metadata.length, 4);
   assert.match((await s.cli(["status"])).stdout, /T-worker parent=T-lead/);
+  // the worker gets the level orch_spawn_thread sets, once: under bb's "auto" every turn end of it woke the lead
+  // outside the plugin's inbox (seen live after adoptions, 2026-11-24); the lead under the CoS is left as it was
+  assert.deepEqual(s.updates, [{ threadId: "T-worker", parentThreadId: "T-lead", parentNotifications: "stuck" }]);
 });
 
 // ---------------------------------------------------------------- scoping mode (1.11.0)

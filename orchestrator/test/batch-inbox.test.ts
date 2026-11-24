@@ -21,7 +21,8 @@ function setup(db = new DatabaseSync(":memory:")) {
     changed: () => {},
     log: () => {},
   };
-  const e = new Engine(db as never, ports, { batchInbox: true, inboxDebounceMs: 2000, resendMs: 10000 });
+  // gap 0: these tests pin the wake mechanics; the lead wake gap has its own (test/wake-gap.test.ts)
+  const e = new Engine(db as never, ports, { batchInbox: true, inboxDebounceMs: 2000, resendMs: 10000, inboxGapMs: 0 });
   const cos = e.agentByAddress("cos") ?? e.register("T-cos", "cos", null);
   const lead = e.agentByAddress("lead:demo") ?? e.register("T-lead", "lead", "demo");
   e.setStatus(lead.threadId, "idle");

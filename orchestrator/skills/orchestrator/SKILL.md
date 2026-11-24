@@ -117,7 +117,7 @@ bb orchestrator host
 bb orchestrator decision <id>
 ```
 
-Settings (`bb plugin config orchestrator set <key> <value>`): `batchInbox` (true), `inboxDebounceMs` (2000, capped at 60000), `escalateMinutes` (5), `resendMinutes` (10),
+Settings (`bb plugin config orchestrator set <key> <value>`): `batchInbox` (true), `inboxDebounceMs` (2000, capped at 60000), `inboxGapMs` (120000: a lead's least time between two wakes; the owner's items and overdue items skip it; 0 = off, capped at 30 min), `escalateMinutes` (5), `resendMinutes` (10),
 `diskPct` (85), `swapPct` (50), `memPct` (90), `cpuPct` (95), `sustainSeconds` (300), `sampleSeconds` (60),
 `diskPath` (/), `cosCompactTokens` (0 = off, the default: Claude Code compacts on its own; a token count opts in), `stateDir` (empty: state/ in the plugin's data folder),
 `ownerName` (empty: agents say "the owner"), `cosTitle` (Chief of Staff), `projectsDir`, `projectRecord` (project.json),

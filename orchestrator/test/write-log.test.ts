@@ -86,3 +86,25 @@ test("the notice: the tables written; an unmapped table, or a call naming everyt
   n.call(["*"]);
   assert.equal(n.take(), null);
 });
+
+// The lead wake gap (2026-11-24) logs each wake in inbox_wake_log. An unmapped table makes the notice null, and every
+// open screen refetches everything: at each wake, the cost the read map was built to remove.
+test("a lead's wake and its gap's log keep the notice to named tables, not everything", async () => {
+  const { db, seen } = recorded();
+  let t = 1_000;
+  const e = new Engine(db, { now: () => t, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} }, { owner: "Robin", batchInbox: true, inboxDebounceMs: 2000, inboxGapMs: 120_000 });
+  const cos = e.register("T-cos", "cos", null);
+  const lead = e.register("T-lead", "lead", "kite");
+  e.setStatus("T-lead", "idle");
+  seen.length = 0;
+  e.send(cos, lead.address, "first", null);
+  await e.flush();
+  t += 3000;
+  await e.flush(); // the wake goes and is logged
+  const written = new Set(seen.flat());
+  assert.ok(written.has("inbox_wake_log"), "the wake was logged");
+  const n = new ChangeTables(KNOWN_TABLES);
+  n.wrote([...written]);
+  n.call();
+  assert.notEqual(n.take(), null, `every table written is mapped: ${[...written].filter((x) => !KNOWN_TABLES.has(x)).join(", ")}`);
+});
