@@ -400,6 +400,7 @@ function Now({ b, records, now, wide, show, openCard }: { b: BoardView; records:
             <Row
               key={r.id}
               data-record={r.id}
+              data-prefetch-deliverable={r.deliverable?.id}
               face={<Face address={r.thread?.address ?? r.lead} />}
               main={
                 <>
@@ -444,7 +445,7 @@ function Now({ b, records, now, wide, show, openCard }: { b: BoardView; records:
                       Open card
                     </Btn>
                   ) : null}
-                  <Btn size="sm" tone="ghost" icon={<ChevronRight />} aria-label="Open the review" onClick={() => show(r)} />
+                  <Btn size="sm" tone="ghost" icon={<ChevronRight />} aria-label="Open the review" onClick={() => show(r)} data-prefetch-deliverable={r.deliverable?.id} />
                 </>
               }
             />
@@ -548,7 +549,7 @@ function Timeline({ records, now, show }: { records: RecordView[]; now: number; 
           {d.records.map((r) => {
             const t = took(r);
             return (
-              <div key={r.id} className="flex flex-col gap-2" data-record={r.id}>
+              <div key={r.id} className="flex flex-col gap-2" data-record={r.id} data-prefetch-deliverable={r.deliverable?.id}>
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
                   <span className="text-xs text-muted-foreground tabular-nums">{clock(r.askedAt ?? r.createdAt)}</span>
                   <b className="font-semibold">{asker(r)}</b>
@@ -563,7 +564,7 @@ function Timeline({ records, now, show }: { records: RecordView[]; now: number; 
                     <ul className="m-0 list-none divide-y p-0">
                       {r.prs.map((p) => (
                         <li key={p.url}>
-                          <Btn tone="ghost" className="h-auto w-full flex-wrap justify-start gap-x-3 gap-y-1 rounded-none px-4 py-2.5 text-left font-normal whitespace-normal" onClick={() => show(r, p.url)} data-pr={p.url}>
+                          <Btn tone="ghost" className="h-auto w-full flex-wrap justify-start gap-x-3 gap-y-1 rounded-none px-4 py-2.5 text-left font-normal whitespace-normal" onClick={() => show(r, p.url)} data-pr={p.url} data-prefetch-deliverable={r.deliverable?.id}>
                             <span className="flex min-w-48 flex-1 items-baseline gap-2">
                               <span className="font-medium underline underline-offset-2">{p.name}</span>
                               <span className="min-w-0 [overflow-wrap:anywhere]">{p.title ?? ""}</span>

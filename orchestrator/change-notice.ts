@@ -38,6 +38,10 @@ export const READS = {
   scope: ["agents", STATUS, "board", "decisions", "deliverables", "projects", "prs", "scoping_tasks", "spawns", BB],
   // a next move's state is its item's (the lead's ack); PR proof shows the PR's state; an archived lead shows no persona
   deliverables: ["agents", LIVE, "deliverables", "items", "projects", "prs", "xp"],
+  // one card whole, as the list shows it (lag 2: the list sends only the cards in review whole)
+  deliverable: ["agents", LIVE, "deliverables", "items", "projects", "prs", "xp"],
+  // every card's revisions, for Delivered's search, Files and file counts: kept warm at idle (deliverable-prefetch.tsx)
+  deliverableIndex: ["deliverables"],
   outputs: null, // whether each file is still there
   projectOrder: ["projects"],
   deliverableFolders: null,

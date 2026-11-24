@@ -76,7 +76,8 @@ test("on a phone the Needs you list doesn't repeat the header row's 'Needs you N
 
 test("a deliverable on a phone opens closed: title, project, state, a small shot and the two answers; a tap opens all of it", () => {
   const d = src("app/deliverables.tsx");
-  assert.match(fn(d, "DeliverableCard"), /if \(closed && phone && !opened\) return <CompactCard/, "one card used to fill the whole screen (2,692 px)");
+  // WholeCard: DeliverableCard once its deliverable is whole (a row in review always is)
+  assert.match(fn(d, "WholeCard"), /if \(closed && phone && !opened\) return <CompactCard/, "one card used to fill the whole screen (2,692 px)");
   // only Delivered's own list starts closed: where a deliverable is already the opened item it must be whole, or a tap
   // in the feed would open the closed card again
   assert.equal(d.match(/<DeliverableCard [^>]*\bclosed\b/g)?.length, 1, "Delivered's narrow list only");

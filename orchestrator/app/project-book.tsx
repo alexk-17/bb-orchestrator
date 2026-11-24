@@ -71,13 +71,13 @@ export function OpenRef({ open, children, title, data, className = "ref" }: { op
     if (plainClick(e) && openInBb(nav, open)) e.preventDefault();
   };
   return open.url ? (
-    <a className={className} href={open.url} target="_blank" rel="noopener noreferrer" data-ref={data} data-open-in-bb="" title={title} onClick={click}>
+    <a className={className} href={open.url} target="_blank" rel="noopener noreferrer" data-ref={data} data-open-in-bb="" data-prefetch-deliverable={open.panel?.deliverable} title={title} onClick={click}>
       {children}
     </a>
   ) : (
     // in a row beside a pill it gives way and ends in an ellipsis (2026-11-18: shadcn's Button never shrinks, so a long
     // deliverable title pushed the pill out of the Scope tab's status card; the ellipsis needs a block, not the flex button)
-    <Button variant="link" className={cn(className, INLINE_LINK, "min-w-0 shrink justify-start")} data-ref={data} data-open-in-bb="" title={title} onClick={click}>
+    <Button variant="link" className={cn(className, INLINE_LINK, "min-w-0 shrink justify-start")} data-ref={data} data-open-in-bb="" data-prefetch-deliverable={open.panel?.deliverable} title={title} onClick={click}>
       <span className="min-w-0 truncate">{children}</span>
     </Button>
   );

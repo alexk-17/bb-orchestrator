@@ -27,6 +27,7 @@ import { NeedsYouView, ZONE } from "./app/needs-you.tsx";
 import { ProjectsView } from "./app/projects.tsx";
 import type { SharedRefs } from "./app/ref-text.tsx";
 import { DeliverablesView, inReview, inScope } from "./app/deliverables.tsx";
+import { expand } from "./app/deliverable-data.ts";
 import { ReviewsView } from "./app/reviews.tsx";
 import { ReviewQueueView } from "./app/review-queue.tsx";
 import { ownerCounts, ownerCountsLabel, scopeEntryOf } from "./app/kit.ts";
@@ -53,6 +54,7 @@ import { Button } from "./app/ui/button.tsx";
 import { useTouchPhone } from "./app/phone.ts";
 import { Settings } from "lucide-react";
 import { useChangeNotice } from "./app/change-listener.ts";
+import { DeliverableIndexProvider, DeliverablePrefetch } from "./app/deliverable-prefetch.tsx";
 
 // Deliverables first (what the owner reviews); the Board is "Activity", last (process, for when they want to look). Its id
 // and sub-path stay "board", so links keep working.
@@ -124,7 +126,7 @@ function useOrchestratorBadge(): ExperimentalBadge | null {
     }, []),
     { whileHidden: true },
   );
-  const c = ownerCounts(q.data, dq.data, sq.data);
+  const c = ownerCounts(q.data, expand(dq.data), sq.data);
   return c.total > 0 ? { count: c.total, label: ownerCountsLabel(c) } : null;
 }
 
@@ -341,6 +343,8 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   // the Projects tab's lanes read the agents too
   const agents = experimental_useRpcQuery({ contract: rpcContract, method: "agents", input: null, enabled: shown.has("projects") });
   const deliverables = useDeliverables();
+  // the list's slim rows as Deliverables (app/deliverable-data.ts): a card opened reads its deliverable whole
+  const deliverablesAll = useMemo(() => expand(deliverables.data), [deliverables.data]);
   const scope = useScope();
   // the panes with an item open full screen (a phone): there the bottom bar and the pages row step aside
   const itemOpen = useRef(new Set<string>());
@@ -386,7 +390,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   const cloud = experimental_useRpcQuery({ contract: pageContract, method: "cs.available", input: null, enabled: shown.has("cloud") });
   const cloudOn = cloud.data?.available === true;
   // every count the page draws is a part of the rail badge's number (kit.ts ownerCounts), so they add up to it
-  const owner = ownerCounts(needs.data, deliverables.data, scope.data);
+  const owner = ownerCounts(needs.data, deliverablesAll, scope.data);
   const reviewCount = owner.delivered;
   // what waits in the Scope tab, as it lists it: its open cards and its projects' scoping deliverables to review
   const scopeWaiting = owner.scope;
@@ -488,10 +492,10 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
       linearWorkspace: config.data?.linearWorkspace ?? "",
       linearTeams: config.data?.linearTeams ?? [],
       cards,
-      deliverables: new Set((deliverables.data ?? []).map((d) => d.id)),
+      deliverables: new Set((deliverablesAll ?? []).map((d) => d.id)),
       threads: live,
     };
-  }, [board.data, needs.data, projects.data, config.data, deliverables.data]);
+  }, [board.data, needs.data, projects.data, config.data, deliverablesAll]);
   // Requested 2026-11-17: the hiddenTabs setting drops tabs by id or label (lower-cased by the server); it never hides them all
   const inUse = new Set(config.data?.shown ?? []);
   const visible = shownTabs(VIEWS, new Set(config.data?.hiddenTabs ?? []), scopeWaiting, new Set(panes(layout.root).map((p) => p.route.view)), inUse, PLACES);
@@ -754,7 +758,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
             width={width}
             agents={board.data?.agents}
             needs={needs.data}
-            deliverables={deliverables.data}
+            deliverables={deliverablesAll}
             refetch={() => void feed.refetch()}
             refetchAll={refetchAll}
             onOpenProject={(slug) => to({ view: "projects", path: [slug], params: {} })}
@@ -765,13 +769,13 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
       case "chat":
         return <CosChat agents={board.data?.agents} width={width} />;
       case "projects":
-        return <ProjectsView q={projects} refetchAll={refetchAll} agents={board.data?.agents} lanesFrom={agents.data} needs={needs.data} openCard={openCard} detail={route.path[0] ?? null} picked={route.params.open ?? null} onPick={(slug) => to({ view: "projects", path: [], params: slug ? { open: slug } : {} })} onDetail={(slug) => to({ view: "projects", path: slug ? [slug] : [], params: {} })} refs={refs} scope={scope} scopeOpen={route.params.scope ?? null} onScope={(key) => to({ view: "projects", path: [], params: key ? { scope: key } : {} })} pathwaysOpen={route.params.pathways === "1"} deliverables={deliverables.data} mons={mons} accents={accents} />;
+        return <ProjectsView q={projects} refetchAll={refetchAll} agents={board.data?.agents} lanesFrom={agents.data} needs={needs.data} openCard={openCard} detail={route.path[0] ?? null} picked={route.params.open ?? null} onPick={(slug) => to({ view: "projects", path: [], params: slug ? { open: slug } : {} })} onDetail={(slug) => to({ view: "projects", path: slug ? [slug] : [], params: {} })} refs={refs} scope={scope} scopeOpen={route.params.scope ?? null} onScope={(key) => to({ view: "projects", path: [], params: key ? { scope: key } : {} })} pathwaysOpen={route.params.pathways === "1"} deliverables={deliverablesAll} mons={mons} accents={accents} />;
       case "open-prs":
         return <ReviewsView shown={new Set(visible.map((v) => v.id))} multiplayer={() => <TeamBoards onOpen={(board) => to({ view: "multiplayer", path: [board], params: {} })} />} coderabbit={() => <ReviewQueueView />} />;
       case "multiplayer": {
         // a board's own page: multiplayer/<id>, as Reviews' Team boards link it
         const boardLink = route.path[0] ?? null;
-        return <MultiplayerTab key={boardLink ?? ""} initial={boardLink} deliverables={deliverables.data} refetchAll={refetchAll} openCard={(card) => openCard(`[data-card="${CSS.escape(card)}"]`)} />;
+        return <MultiplayerTab key={boardLink ?? ""} initial={boardLink} deliverables={deliverablesAll} refetchAll={refetchAll} openCard={(card) => openCard(`[data-card="${CSS.escape(card)}"]`)} />;
       }
       case "coderabbit":
         return <ReviewQueueView />;
@@ -804,6 +808,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
     <IdentityContext.Provider value={config.data ?? DEFAULT_IDENTITY}>
     {/* one provider for every shadcn Tooltip on the page (2026-11-17) */}
     <TooltipProvider>
+    <DeliverableIndexProvider>
     <div ref={root} data-orch="" data-view={focusedView} data-phone={phone || undefined} onPointerDownCapture={pointerPressed} onClickCapture={(e) => (besideNext.current = !compact && (e.metaKey || e.ctrlKey) ? Date.now() : 0)} className="flex h-full min-h-0 flex-1 flex-col">
       <Look />
       <style href={styleHref("orch-panes", paneCss)} precedence="default">
@@ -811,6 +816,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
       </style>
       <VisualBlocksStyle />
       <ShortcutUi />
+      <DeliverablePrefetch />
       <div className="flex min-h-0 flex-1">
         {!compact ? <PageSidebar nav={nav} view={picking?.mode === "split" ? "" : focusedView} filter={focusedFilter ?? "all"} filterCounts={filterCounts} counts={counts} rail={rail} onToggle={() => {
               setRailChoice(!rail);
@@ -854,6 +860,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
         </div>
       </div>
     </div>
+    </DeliverableIndexProvider>
     </TooltipProvider>
     </IdentityContext.Provider>
   );

@@ -11,7 +11,7 @@ import { cliRun, setupSidebar } from "./core/sidebar.ts";
 // deliverables
 import { chmodSync, closeSync, cpSync, createReadStream, openSync, readdirSync, readSync, rmSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
-import { approveBody, type DeliverableFolders, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody, type Pathways, type PathwaysErrorKind } from "./contract.ts";
+import { approveBody, type DeliverableFolders, type DeliverableRows, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody, type Pathways, type PathwaysErrorKind } from "./contract.ts";
 import { projectIssues, pathwaysMap, linkPathwaysDecisions, attachPathwaysPreflight, draftPathwaysDecision, summarizePathwaysRetro, pathwaysDecisionKey, submitPathwaysDecision, mapPathwaysLimited, selectPathwaysMap, type PathwaysIssue } from "./core/pathways.ts";
 import { collectPathwaysProofRecords, reducePathwaysPr, reducePathwaysProof, reducePathwaysWaitLane } from "./core/pathways-pr.ts";
 import { createPathwaysSnapshots, type PathwaysSnapshot, type PathwaysView } from "./core/pathways-snapshot.ts";
@@ -77,6 +77,7 @@ import {
   type Watchers,
 } from "./contract.ts";
 import type { Db } from "./core/db.ts";
+import { deliverableIndex, deliverableRows, deliverableWhole } from "./core/deliverables-view.ts";
 import { type DeliverResult, Engine, OUTPUT_KINDS, parseSince, type PrResult, type Settings, WAIT_WHEN } from "./core/engine.ts";
 import { PINS_MAX } from "./core/pins.ts";
 import { DAY_MS, prune, pruneSummary } from "./core/retention.ts";
@@ -2591,50 +2592,14 @@ export default async function plugin(bb: BbPluginApi) {
     deliverableFolders(): DeliverableFolders {
       return engine.deliverableFolders();
     },
-    deliverables(): Deliverables {
-      const assigned = engine.personaAssignments();
-      const leadOf = (address: string) => {
-        const a = engine.agentByAddress(address);
-        return a ? engine.personaOf(a, assigned) : null;
-      };
-      // each its own 200, so a busy board never pushes past deliverables off the Deliverables tab
-      const all = [...engine.deliverables(200, false), ...engine.deliverables(200, true)].sort((a, b) => b.updatedAt - a.updatedAt || (a.id < b.id ? 1 : -1));
-      return all.map((d) => ({
-        id: d.id,
-        project: d.project,
-        lead: d.lead,
-        leadMon: engine.agentByAddress(d.lead)?.mon ?? null,
-        leadPersona: leadOf(d.lead), // 2026-11-18: the lead's person
-        title: d.title,
-        summary: d.summary,
-        state: d.state,
-        rev: d.rev,
-        createdAt: d.createdAt,
-        updatedAt: d.updatedAt,
-        revisions: d.revisions.map((r) => ({
-          rev: r.rev,
-          summary: r.summary,
-          at: r.at,
-          blocks: r.blocks ?? [],
-          points: r.points ?? [],
-          prs: (r.blocks ?? []).flatMap((b) => {
-            if (b.kind !== "pr") return [];
-            const pr = engine.prByUrl(b.url);
-            return pr ? [{ ...pr, url: b.url }] : [];
-          }),
-          proof: r.proof.map((x) => {
-            const pr = x.kind === "pr" && x.url ? engine.prByUrl(x.url) : null;
-            return { ...x, pr: pr ? { url: pr.url, number: pr.number, state: pr.state, attention: pr.attention, checks: pr.checks } : null };
-          }),
-        })),
-        feedback: d.feedback,
-        withdrawn: d.withdrawn,
-        next: engine.deliverableNext(d),
-        ...(d.scope ? { scope: true } : {}),
-        ...(d.scope_task ? { scopeTask: d.scope_task } : {}),
-        ...(d.folder ? { folder: d.folder } : {}),
-        ...(d.board ? { board: { id: d.board.id, record: d.board.record ?? null, flag: d.board.flag ?? null } } : {}),
-      }));
+    deliverables(): DeliverableRows {
+      return deliverableRows(engine); // core/deliverables-view.ts: slim rows; a card opened reads `deliverable`
+    },
+    deliverable({ id }) {
+      return deliverableWhole(engine, id);
+    },
+    deliverableIndex() {
+      return deliverableIndex(engine);
     },
   }), onSlowRead));
 

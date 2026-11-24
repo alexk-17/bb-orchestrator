@@ -457,7 +457,7 @@ function PostView({ p, now, faces, cosTitle, opened, armed, check, after, onOpen
   ) : null;
   const tone = p.needsOwner || p.kind === "alarm" || p.kind === "dead" ? "border-(--orch-danger)/30 bg-(--orch-danger)/10 text-(--orch-danger)" : "bg-muted text-muted-foreground";
   const title = p.title ? (
-    <Button type="button" variant="link" className={phone ? cx("h-auto p-0 font-normal whitespace-normal mt-1 block w-full text-left text-sm leading-snug font-semibold text-foreground", p.text ? "line-clamp-1" : "line-clamp-2") : "h-auto p-0 font-normal whitespace-normal mt-1 block w-full text-left text-[15px] leading-snug font-semibold text-foreground"} onClick={onOpen} data-open-post={p.key}>
+    <Button type="button" variant="link" className={phone ? cx("h-auto p-0 font-normal whitespace-normal mt-1 block w-full text-left text-sm leading-snug font-semibold text-foreground", p.text ? "line-clamp-1" : "line-clamp-2") : "h-auto p-0 font-normal whitespace-normal mt-1 block w-full text-left text-[15px] leading-snug font-semibold text-foreground"} onClick={onOpen} data-open-post={p.key} data-prefetch-deliverable={p.kind === "deliverable" ? p.deliverable?.id : undefined}>
       {p.title}
     </Button>
   ) : null;
@@ -476,6 +476,7 @@ function PostView({ p, now, faces, cosTitle, opened, armed, check, after, onOpen
       data-post={p.key}
       data-kind={p.kind}
       data-card={p.card?.id ?? p.deliverable?.id ?? p.key}
+      data-prefetch-deliverable={p.kind === "deliverable" ? p.deliverable?.id : undefined}
       data-rev={String(p.card?.rev ?? p.deliverable?.rev ?? 0)}
       data-read={p.isNew ? undefined : ""}
       data-opened={opened || undefined}

@@ -358,35 +358,57 @@ export const proofSchema = z.object({
   stored: z.enum(["copied", "too_big", "missing", "failed"]).optional(),
   bytes: z.number().optional(),
 });
-export const deliverablesSchema = z.array(
-  z.object({
-    id: z.string(),
-    project: z.string().nullable(),
-    lead: z.string(), // the delivering lead's address
-    leadMon: z.string().nullable(),
-    leadPersona: personaSchema.nullish(), // the lead's person (2026-11-18): null with the setting off, no pack, or the lead gone
-    title: z.string(),
-    summary: z.string(),
-    state: z.enum(["review", "approved", "changes", "withdrawn"]),
-    rev: z.number(), // the revision the owner's writes must carry
-    createdAt: z.number(),
-    updatedAt: z.number(),
-    revisions: z.array(z.object({ rev: z.number(), summary: z.string(), at: z.string(), proof: z.array(proofSchema), blocks: z.array(blockSchema), points: z.array(pointSchema), prs: z.array(prSchema) })),
-    feedback: z.array(z.object({ rev: z.number(), by: z.string(), text: z.string().nullable(), at: z.string(), outcome: z.enum(["approved", "changes"]) })),
-    withdrawn: z.object({ at: z.string(), reason: z.string().nullable() }).nullable(),
-    // the owner's next action for the lead, and the outcome and note the lead closed it with (state closed)
-    next: z
-      .object({ text: z.string(), rev: z.number(), at: z.string(), item: z.string(), state: z.enum(["open", "closed", "dead"]), outcome: z.string().nullable(), note: z.string().nullable(), closedAt: z.number().nullable() })
-      .nullable(),
-    // delivered while its project was scoping: reviewed in the Scope tab, not on Deliverables (1.11.0)
-    scope: z.boolean().optional(),
-    scopeTask: z.string().optional(), // the scoping task it is reviewed under (1.12.0)
-    folder: z.string().optional(), // its own folder of files and README.md (2026-11-17)
-    // a Multiplayer board's review: reviewed on that board, never on Deliverables
-    board: z.object({ id: z.string(), record: z.string().nullable(), flag: z.string().nullable() }).optional(),
-  }),
+/** A revision as a whole card draws it: its proof with the PRs' live state, its typed blocks and its points. */
+const revisionSchema = z.object({ rev: z.number(), summary: z.string(), at: z.string(), proof: z.array(proofSchema), blocks: z.array(blockSchema), points: z.array(pointSchema), prs: z.array(prSchema) });
+/** One deliverable whole: what a card draws (the `deliverable` read; the list's rows in review carry it inline). */
+export const deliverableSchema = z.object({
+  id: z.string(),
+  project: z.string().nullable(),
+  lead: z.string(), // the delivering lead's address
+  leadMon: z.string().nullable(),
+  leadPersona: personaSchema.nullish(), // the lead's person (2026-11-18): null with the setting off, no pack, or the lead gone
+  title: z.string(),
+  summary: z.string(),
+  state: z.enum(["review", "approved", "changes", "withdrawn"]),
+  rev: z.number(), // the revision the owner's writes must carry
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  revisions: z.array(revisionSchema),
+  feedback: z.array(z.object({ rev: z.number(), by: z.string(), text: z.string().nullable(), at: z.string(), outcome: z.enum(["approved", "changes"]) })),
+  withdrawn: z.object({ at: z.string(), reason: z.string().nullable() }).nullable(),
+  // the owner's next action for the lead, and the outcome and note the lead closed it with (state closed)
+  next: z
+    .object({ text: z.string(), rev: z.number(), at: z.string(), item: z.string(), state: z.enum(["open", "closed", "dead"]), outcome: z.string().nullable(), note: z.string().nullable(), closedAt: z.number().nullable() })
+    .nullable(),
+  // delivered while its project was scoping: reviewed in the Scope tab, not on Deliverables (1.11.0)
+  scope: z.boolean().optional(),
+  scopeTask: z.string().optional(), // the scoping task it is reviewed under (1.12.0)
+  folder: z.string().optional(), // its own folder of files and README.md (2026-11-17)
+  // a Multiplayer board's review: reviewed on that board, never on Deliverables
+  board: z.object({ id: z.string(), record: z.string().nullable(), flag: z.string().nullable() }).optional(),
+});
+export type Deliverables = z.infer<typeof deliverableSchema>[];
+/**
+ * The Deliverables list (2026-11-23, lag: the whole list was 743 KB for 200 deliverables): each row without its
+ * revisions, plus its shown revision's summary, time, proof count and first screenshot (a closed card's look). A row in
+ * review carries its revisions too: the cards the owner acts on draw at once. So does the card Delivered shows on its
+ * own when nothing there is in review (its newest), so it never draws loading. The rest load with `deliverable` when
+ * one is opened, and search and Files read `deliverableIndex` (app/deliverable-data.ts puts them back together).
+ */
+export const deliverableRowSchema = deliverableSchema.omit({ revisions: true }).extend({
+  latest: z.object({ rev: z.number(), summary: z.string(), at: z.string(), proofs: z.number(), shot: proofSchema.nullable() }).nullable(),
+  revisions: z.array(revisionSchema).nullable(),
+});
+export const deliverablesSchema = z.array(deliverableRowSchema);
+export type DeliverableRows = z.infer<typeof deliverablesSchema>;
+/**
+ * What search and Files read of every listed deliverable: each revision's summary, points and proof (no PR state). `rev`
+ * and `updatedAt` are the deliverable's when it was read, so a cached index can tell it is older than the list.
+ */
+export const deliverableIndexSchema = z.array(
+  z.object({ id: z.string(), rev: z.number(), updatedAt: z.number(), revisions: z.array(z.object({ rev: z.number(), summary: z.string(), at: z.string(), points: z.array(pointSchema), proof: z.array(proofSchema.omit({ pr: true })) })) }),
 );
-export type Deliverables = z.infer<typeof deliverablesSchema>;
+export type DeliverableIndex = z.infer<typeof deliverableIndexSchema>;
 
 // Each deliverable's own folder (2026-11-17), listed for the Deliverables tab: its files by kind, proof copies and the
 // rest (a thread's notes and outputs), and its README. `hostId`: the bb host the folders are on, for bb's preview.
@@ -541,6 +563,9 @@ export const rpcContract = defineRpcContract({
   outputs: { input: z.null(), output: outputsSchema },
   deliverableFolders: { input: z.null(), output: deliverableFoldersSchema },
   deliverables: { input: z.null(), output: deliverablesSchema },
+  // one deliverable whole, when a card is opened (null: gone)
+  deliverable: { input: z.object({ id: z.string().min(1).max(80) }).strict(), output: deliverableSchema.nullable() },
+  deliverableIndex: { input: z.null(), output: deliverableIndexSchema },
   scope: { input: z.null(), output: scopeSchema },
   pathways: { input: z.object({ slug: z.string().min(1).max(40), refresh: z.boolean().optional() }).strict(), output: pathwaysViewSchema },
   projectOrder: { input: z.null(), output: projectOrderSchema },

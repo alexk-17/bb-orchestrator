@@ -311,7 +311,7 @@ export function feedPage(src: FeedSource, opts: { cursor: string | null; filter:
     // every column here is in db.ts deliverables_list, so no JSON is read: a post parses its deliverable only when built
     // (on the page, or lifted). Its revisions for "on rev n" are read for the page's posts below (revsOf).
     const rows = db
-      .prepare(`SELECT id, project, state, created_at, json_extract(json, '$.revisions[#-1].at') AS last_at FROM deliverables WHERE json_extract(json, '$.board') IS NULL AND state != 'withdrawn' ORDER BY updated_at DESC LIMIT 500`)
+      .prepare(`SELECT id, project, state, created_at, json_extract(json, '$.revisions[#-1].at') AS last_at FROM deliverables WHERE json_extract(json, '$.board') IS NULL AND state != 'withdrawn' ORDER BY updated_at DESC, rowid ASC LIMIT 500`)
       .all() as { id: string; project: string | null; state: string; created_at: number; last_at: string | null }[];
     for (const r of rows) {
       if (held(r.project) || (r.state !== "review" && f !== "all" && f !== "delivered")) continue;
@@ -340,7 +340,7 @@ export function feedPage(src: FeedSource, opts: { cursor: string | null; filter:
     }
   }
   if (want("alarm")) {
-    const rows = db.prepare(`SELECT id, kind, from_address, project, title, body, ref, at FROM board WHERE kind IN ('alarm','dead') AND at < ? ORDER BY at DESC LIMIT ?`).all(top, limit + 1) as { id: string; kind: string; from_address: string | null; project: string | null; title: string; body: string; at: number }[];
+    const rows = db.prepare(`SELECT id, kind, from_address, project, title, body, ref, at FROM board WHERE kind IN ('alarm','dead') AND at < ? ORDER BY at DESC, rowid ASC LIMIT ?`).all(top, limit + 1) as { id: string; kind: string; from_address: string | null; project: string | null; title: string; body: string; at: number }[];
     for (const b of rows)
       add({ key: `board:${b.id}`, at: b.at, build: () => ({ ...blank, key: `board:${b.id}`, kind: b.kind === "dead" ? "dead" : "alarm", author: b.kind === "dead" ? (b.from_address ?? "cos") : "steward", project: b.project, line: b.kind === "dead" ? "cos" : null, title: b.title, text: one(b.kind === "alarm" ? "" : b.body.split("\n")[0] ?? ""), at: b.at }) });
   }

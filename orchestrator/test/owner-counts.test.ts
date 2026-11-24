@@ -36,9 +36,9 @@ test("the owner's repro: 0 waiting, 5 in review, 1 scope card makes 6, and the p
 test("the rail badge, the Sidebar and the phone bar all read ownerCounts", () => {
   const app = readFileSync(new URL("../app.tsx", import.meta.url), "utf8");
   const badge = app.slice(app.indexOf("function useOrchestratorBadge("), app.indexOf("const LAYOUT_KEY ="));
-  assert.match(badge, /const c = ownerCounts\(q\.data, dq\.data, sq\.data\);/);
+  assert.match(badge, /const c = ownerCounts\(q\.data, expand\(dq\.data\), sq\.data\);/);
   assert.match(badge, /count: c\.total, label: ownerCountsLabel\(c\)/);
-  assert.match(app, /const owner = ownerCounts\(needs\.data, deliverables\.data, scope\.data\);/);
+  assert.match(app, /const owner = ownerCounts\(needs\.data, deliverablesAll, scope\.data\);/);
   assert.match(app, /counts=\{\{ needs: owner\.needs, delivered: owner\.delivered, projects: owner\.scope \}\}/);
   assert.match(readFileSync(new URL("../app/page-nav.tsx", import.meta.url), "utf8"), /count: counts\.projects, active: place === "projects"/, "the phone's Projects shows Scope's count");
 });

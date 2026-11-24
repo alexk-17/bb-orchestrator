@@ -352,6 +352,7 @@ export function PastRows({
           aria-level={level}
           data-tree-key={n.key}
           data-past={n.d.id}
+          data-prefetch-deliverable={n.d.id}
           data-state={n.d.state}
           aria-expanded={pick ? undefined : !!r.open}
           aria-selected={pick ? picked : undefined}

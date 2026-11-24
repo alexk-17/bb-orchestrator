@@ -53,7 +53,7 @@ function RefLink({ t, chip = true }: { t: Exclude<Token, { kind: "text" }>; chip
       {t.text}
     </a>
   ) : (
-    <Button variant="link" className={`ref ${INLINE_LINK}`} data-ref={t.kind} data-open-in-bb="" title={t.kind === "card" ? (t.answered ? "Open the answered card in Activity" : "Open the card in Needs you") : t.kind === "deliverable" ? "Open in Deliverables" : "Open the thread"} onClick={open}>
+    <Button variant="link" className={`ref ${INLINE_LINK}`} data-ref={t.kind} data-open-in-bb="" data-prefetch-deliverable={t.kind === "deliverable" ? t.open.panel?.deliverable : undefined} title={t.kind === "card" ? (t.answered ? "Open the answered card in Activity" : "Open the card in Needs you") : t.kind === "deliverable" ? "Open in Deliverables" : "Open the thread"} onClick={open}>
       {t.text}
     </Button>
   );

@@ -10,7 +10,7 @@ import { Markdown, experimental_useRpcQuery, useBbNavigate, useSdk } from "@get-
 import { X } from "lucide-react";
 import { manualSectionOrder, sidebarOrder } from "../core/project-order.ts";
 import { z } from "zod";
-import { PROOF_ROUTE, WRITE_BASE, WRITES, rpcContract, type Deliverables, type Outputs, type ProjectOrder, type approveBody, type requestChangesBody } from "../contract.ts";
+import { PROOF_ROUTE, WRITE_BASE, WRITES, rpcContract, type DeliverableRows, type Deliverables, type Outputs, type ProjectOrder, type approveBody, type requestChangesBody } from "../contract.ts";
 import { touches } from "../change-notice.ts";
 import { ItemGroup } from "./ui/item.tsx";
 import { Button } from "./ui/button.tsx";
@@ -40,12 +40,14 @@ import { START, deliverablesTab, fold, offBoards, shownDeliverable, shownRevisio
 import { FilesAndWithdrawn, OFF_PAGE, PastControls, PastRows, STATE_WORD, type FoldersState } from "./past-view.tsx";
 import { useElementWidth } from "./panes.tsx";
 import { requestDeliverable } from "./reveal.ts";
+import { useCardRead, useDeliverableIndex } from "./deliverable-prefetch.tsx";
 import { isWide } from "./source.ts";
+import { expand, isPartial } from "./deliverable-data.ts";
 
 type Deliverable = Deliverables[number];
 type Proof = Deliverable["revisions"][number]["proof"][number];
 type Output = Outputs[number];
-type Query = { data: Deliverables | undefined; error: { message: string } | null; refetch: () => Promise<void> };
+type Query = { data: DeliverableRows | undefined; error: { message: string } | null; refetch: () => Promise<void> };
 
 const TEXT_LINES = 200;
 export const proofSrc = (id: string) => `${WRITE_BASE}${PROOF_ROUTE}?id=${encodeURIComponent(id)}`;
@@ -386,7 +388,46 @@ function Settled({ d }: { d: Deliverable }) {
   );
 }
 
-export function DeliverableCard({ d, refetchAll, outputs, outputsAfter, closed = false }: { d: Deliverable; refetchAll: () => void; outputs: Output[]; outputsAfter: () => void; closed?: boolean }) {
+/**
+ * A deliverable whole (2026-11-23, lag): a list row in review is whole already, and so is the card Delivered shows on
+ * its own (core/deliverables-view.ts shownWhole); any other is read with the `deliverable` read when its card draws,
+ * and again on each change while it is shown (its PRs' live state). The row's
+ * own fields (state, feedback, next) are the list's, which is never older; the revisions are the last whole ones seen,
+ * so a card approved in place keeps drawing while it is read again. Null only before its first whole read.
+ */
+// the last whole read of each deliverable, kept across mounts (2026-11-24): a card approved in place moves from the
+// in-review card to the past one, a new component, and must not draw loading in between
+const wholeSeen = new Map<string, Deliverable>();
+function useWhole(d: Deliverable): Deliverable | null {
+  const need = isPartial(d);
+  // read by its one owner at the app's root (deliverable-prefetch.tsx): drawn from the cached copy at once and read
+  // again behind it on each opening, then after each notice that touches it (its PRs' live state)
+  const data = useCardRead(d.id, need);
+  const whole = need ? (data ?? wholeSeen.get(d.id) ?? null) : d;
+  if (whole) wholeSeen.set(d.id, whole);
+  return useMemo(() => (!need || !whole ? whole : { ...whole, ...d, revisions: whole.revisions }), [need, whole, d]);
+}
+
+/** A card while its deliverable loads whole: its head as it will be, the body held by skeletons. */
+function CardLoading({ d }: { d: Deliverable }) {
+  return (
+    <Card role="article" data-shown={d.id} aria-busy="true" className="gap-4 py-5">
+      <Head d={d} />
+      <CardContent className="grid gap-3 px-5" role="status">
+        <span className="sr-only">Loading…</span>
+        <Skeleton className="h-4 w-56" />
+        <Skeleton className="aspect-video w-full" />
+      </CardContent>
+    </Card>
+  );
+}
+
+export function DeliverableCard(props: { d: Deliverable; refetchAll: () => void; outputs: Output[]; outputsAfter: () => void; closed?: boolean }) {
+  const whole = useWhole(props.d);
+  return whole ? <WholeCard {...props} d={whole} /> : <CardLoading d={props.d} />;
+}
+
+function WholeCard({ d, refetchAll, outputs, outputsAfter, closed = false }: { d: Deliverable; refetchAll: () => void; outputs: Output[]; outputsAfter: () => void; closed?: boolean }) {
   const latest = d.revisions.find((r) => r.rev === d.rev) ?? d.revisions[d.revisions.length - 1];
   const proof = latest?.proof ?? [];
   const media = proof.filter((p) => p.kind === "image" || p.kind === "video");
@@ -469,7 +510,12 @@ function CompactCard({ d, summary, shot, refetchAll, onOpen }: { d: Deliverable;
  * it was settled), then its files as full items: images and videos inline at full width, the rest as rows with name,
  * kind and size, and Open folder; then its links and PRs, and its history.
  */
-export function PastDeliverable({ d, files, folders, refetchAll, outputsAfter }: { d: Deliverable; files: FileItem[]; folders: FoldersState; refetchAll: () => void; outputsAfter: () => void }) {
+export function PastDeliverable(props: { d: Deliverable; files: FileItem[]; folders: FoldersState; refetchAll: () => void; outputsAfter: () => void }) {
+  const whole = useWhole(props.d);
+  return whole ? <PastWhole {...props} d={whole} /> : <CardLoading d={props.d} />;
+}
+
+function PastWhole({ d, files, folders, refetchAll, outputsAfter }: { d: Deliverable; files: FileItem[]; folders: FoldersState; refetchAll: () => void; outputsAfter: () => void }) {
   if (d.state === "review") return <DeliverableCard d={d} refetchAll={refetchAll} outputs={[]} outputsAfter={outputsAfter} />;
   const rev = shownRevision(d);
   const host = folders.data?.hostId ?? null;
@@ -662,6 +708,14 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
   useEffect(() => {
     if (files) setView((v) => ({ ...v, filter: "files" }));
   }, [files]);
+  // Search, Files and the rows' file counts read every revision (the index read, 2026-11-23). Delivered first draws once
+  // an index is in, as it drew from the whole list before (2026-11-24: drawing sooner showed counts and search change
+  // under the owner); if it fails, from the rows alone. Its owner reads it again after a notice that touches it, and
+  // only then (deliverable-reads.ts): it is never judged against the list, which may answer after it (Codex, round 2).
+  // the app root's index read, kept warm at idle (deliverable-prefetch.tsx): a read of its own here would read it again
+  const index = useDeliverableIndex();
+  const drawn = index.error !== null || index.data !== undefined;
+  const data = useMemo(() => expand(q.data, index.data), [q.data, index.data]);
   // Keys (2026-11-16): J/K select a deliverable; A, twice within APPROVE_MS, is "Done, nothing more". It clicks the card's own
   // button, so the page lock applies; with words in the next-move box the button is "Send to lead", which A never presses.
   // Only in-review cards carry data-deliverable, so J/K never select a past row.
@@ -687,10 +741,10 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
     }
     return true;
   });
-  if (!q.data) return <ReadState q={q} what="the deliverables" />;
+  if (!data || !drawn) return <ReadState q={data ? { ...q, data: undefined, error: null } : q} what="the deliverables" />;
   // a scoping project's deliverables in review are reviewed in the Scope tab; once decided they file here as usual
-  const all = q.data.filter(onDeliverablesTab);
-  const tab = deliverablesTab(all, offBoards(q.data, outputs.data ?? []), view, sorted, folders.data?.folders ?? {});
+  const all = data.filter(onDeliverablesTab);
+  const tab = deliverablesTab(all, offBoards(data, outputs.data ?? []), view, sorted, folders.data?.folders ?? {});
   const review = tab.review;
   const filesState = { loaded: outputs.data !== undefined, error: outputs.error?.message ?? null };
   const foldersState: FoldersState = { data: folders.data, error: folders.error?.message ?? null };

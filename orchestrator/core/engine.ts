@@ -3919,7 +3919,7 @@ export class Engine {
   }
 
   board(limit = 200): BoardRow[] {
-    return (this.db.prepare(`SELECT * FROM board ORDER BY at DESC LIMIT ?`).all(limit) as { id: string; kind: string; from_address: string | null; project: string | null; title: string; body: string; ref: string | null; at: number }[]).map((r) => ({
+    return (this.db.prepare(`SELECT * FROM board ORDER BY at DESC, rowid ASC LIMIT ?`).all(limit) as { id: string; kind: string; from_address: string | null; project: string | null; title: string; body: string; ref: string | null; at: number }[]).map((r) => ({
       id: r.id,
       kind: r.kind,
       from: r.from_address,
@@ -4459,7 +4459,7 @@ export class Engine {
     const events = this.db.prepare(`SELECT * FROM events WHERE project = ? ORDER BY at, seq`).all(slug) as unknown as EventRow[];
     const addresses = new Set([...agents.map((a) => a.address), ...events.map((e) => e.address).filter((x): x is string => !!x)]);
     const ours = (addr: string) => addresses.has(addr);
-    const decisions: DecisionLite[] = (this.db.prepare(`SELECT json FROM decisions WHERE project = ? OR asker IN (SELECT address FROM agents WHERE project = ?)`).all(slug, slug) as { json: string }[]).map((r) => {
+    const decisions: DecisionLite[] = (this.db.prepare(`SELECT json FROM decisions WHERE project = ? OR asker IN (SELECT address FROM agents WHERE project = ?) ORDER BY rowid`).all(slug, slug) as { json: string }[]).map((r) => {
       const d = JSON.parse(r.json) as Decision;
       const end = d.answer?.at ?? d.withdrawn?.at ?? (d.state === "merged" || d.state === "acked" ? d.updated_at : null);
       return {
@@ -4515,18 +4515,24 @@ export class Engine {
     const waits = this.db.prepare(`SELECT id, owner, pr_url, cond, created_at FROM waits WHERE closed_at IS NULL`).all() as HistoryInput["waits"];
     const prs = this.db.prepare(`SELECT thread_id, url, number, state, checks, sig, attention, seen_at FROM prs`).all() as SummaryInput["prs"];
     const deliverables = this.db.prepare(`SELECT id, project, title, state, updated_at FROM deliverables WHERE state = 'review' OR (state = 'approved' AND updated_at >= ?)`).all(since) as { id: string; project: string | null; title: string; state: string; updated_at: number }[];
-    const merged = this.db.prepare(`SELECT project, at, ref, note FROM events WHERE kind = 'pr' AND value = 'merged' AND at >= ? AND project IS NOT NULL`).all(since) as { project: string; at: number; ref: string | null; note: string | null }[];
-    const reports = this.db.prepare(`SELECT project, title, at FROM board WHERE kind IN ('report','pr') AND at >= ? AND project IS NOT NULL AND from_address LIKE 'thread:%'`).all(since) as { project: string; title: string; at: number }[];
+    const merged = this.db.prepare(`SELECT project, at, ref, note FROM events WHERE kind = 'pr' AND value = 'merged' AND at >= ? AND project IS NOT NULL ORDER BY project, at, rowid`).all(since) as { project: string; at: number; ref: string | null; note: string | null }[];
+    const reports = this.db.prepare(`SELECT project, title, at FROM board WHERE kind IN ('report','pr') AND at >= ? AND project IS NOT NULL AND from_address LIKE 'thread:%' ORDER BY rowid`).all(since) as { project: string; title: string; at: number }[];
     // the latest finished thing at any age, for a quiet row: a report, an approved deliverable or a merged PR
     const last = new Map<string, { text: string; at: number }>();
     const later = (project: string | null, text: string, at: number) => {
       if (project && at > (last.get(project)?.at ?? 0)) last.set(project, { text, at });
     };
     // read INDEXED BY its partial index of reports only (db.ts board_reports): the planner otherwise walks every report
-    // by kind and sorts them (2026-11-23, lag)
-    for (const r of prepareHinted(this.db, "board_reports", `SELECT project, title, MAX(at) AS at FROM board INDEXED BY board_reports WHERE kind IN ('report','pr') AND project IS NOT NULL GROUP BY project`).all() as { project: string; title: string; at: number }[]) later(r.project, r.title, r.at);
+    // by kind and sorts them (2026-11-23, lag). Of the rows at a project's latest time, the first written (lowest rowid)
+    // is the one, as before the index; and so for merges (2026-11-24: the indexes broke such ties by title or PR number).
+    for (const r of prepareHinted(
+      this.db,
+      "board_reports",
+      `SELECT m.project, (SELECT title FROM board WHERE kind IN ('report','pr') AND project = m.project AND at = m.at ORDER BY rowid LIMIT 1) AS title, m.at FROM (SELECT project, MAX(at) AS at FROM board INDEXED BY board_reports WHERE kind IN ('report','pr') AND project IS NOT NULL GROUP BY project) m`,
+    ).all() as { project: string; title: string; at: number }[])
+      later(r.project, r.title, r.at);
     for (const r of this.db.prepare(`SELECT project, title, MAX(updated_at) AS at FROM deliverables WHERE state = 'approved' GROUP BY project`).all() as { project: string | null; title: string; at: number }[]) later(r.project, `Approved: ${r.title}`, r.at);
-    for (const r of this.db.prepare(`SELECT project, note, MAX(at) AS at FROM events WHERE kind = 'pr' AND value = 'merged' AND project IS NOT NULL GROUP BY project`).all() as { project: string; note: string | null; at: number }[]) later(r.project, `PR ${r.note ? `#${r.note} ` : ""}merged`, r.at);
+    for (const r of this.db.prepare(`SELECT m.project, (SELECT note FROM events WHERE kind = 'pr' AND value = 'merged' AND project = m.project AND at = m.at ORDER BY rowid LIMIT 1) AS note, m.at FROM (SELECT project, MAX(at) AS at FROM events WHERE kind = 'pr' AND value = 'merged' AND project IS NOT NULL GROUP BY project) m`).all() as { project: string; note: string | null; at: number }[]) later(r.project, `PR ${r.note ? `#${r.note} ` : ""}merged`, r.at);
     // the cards the leads' own waits and blockers name, in any state, to drop a wait that was answered
     const active = new Set(projects.map((p) => p.slug));
     const named = [...statuses].filter(([slug]) => active.has(slug)).flatMap(([, s]) => [...waitsOf(s).filter((w) => w.kind === "owner" && w.ref?.startsWith("d-")).map((w) => w.ref!), ...s.blockers.flatMap((b) => b.match(/\bd-[0-9A-Za-z-]+/g) ?? [])]);

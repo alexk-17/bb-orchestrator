@@ -171,6 +171,8 @@ const INPUTS: Record<ChangeRead, unknown> = {
   agents: null,
   scope: null,
   deliverables: null,
+  deliverable: null, // its id is the seed's (inputOf)
+  deliverableIndex: null,
   outputs: null,
   projectOrder: null,
   deliverableFolders: null,
@@ -180,6 +182,10 @@ const INPUTS: Record<ChangeRead, unknown> = {
   feed: { cursor: null, filter: "all" },
 };
 
+/** A read's input: the one card read whole is the seed's deliverable with a PR and a next move (its PR's state shows). */
+const inputOf = (h: { raw: unknown }, m: ChangeRead) =>
+  m === "deliverable" ? { id: ((h.raw as { prepare: (q: string) => { get: (t: string) => unknown } }).prepare("SELECT id FROM deliverables WHERE title = ?").get("Made-up deliverable with a next move") as { id: string }).id } : INPUTS[m];
+
 for (const batchInbox of [false, true])
 test(`every read reads only the tables its READS entry declares${batchInbox ? " (batched inbox on)" : ""}`, async () => {
   const h = await host({ batchInbox });
@@ -188,7 +194,7 @@ test(`every read reads only the tables its READS entry declares${batchInbox ? " 
     const declared = READS[m];
     if (!declared) continue; // refetched on every change
     h.reads.clear();
-    await h.read(m, INPUTS[m]);
+    await h.read(m, inputOf(h, m));
     for (const t of h.reads) if (!(declared as readonly string[]).includes(t)) missing.push(`${m} reads ${t}`);
   }
   h.stop.abort();
@@ -196,7 +202,7 @@ test(`every read reads only the tables its READS entry declares${batchInbox ? " 
 });
 
 /** What the screen shows: the read's answer, without the clock it was read at (and Needs you's presets, from the clock). */
-const shownOf = (h: Awaited<ReturnType<typeof host>>, m: ChangeRead) => h.read(m, INPUTS[m]).then((o) => JSON.stringify(o, (k, v) => (k === "now" || k === "presets" ? undefined : v)));
+const shownOf = (h: Awaited<ReturnType<typeof host>>, m: ChangeRead) => h.read(m, inputOf(h, m)).then((o) => JSON.stringify(o, (k, v) => (k === "now" || k === "presets" ? undefined : v)));
 
 test("a read whose answer shows a thread's status declares STATUS, or LIVE when it shows only archived or not", async () => {
   const h = await host();
@@ -390,7 +396,7 @@ test("each change's notice touches every read whose answer it changed", async (t
   const clockFree = (k: string, v: unknown) => (k === "now" || k === "presets" ? undefined : typeof v === "number" && v >= since && v < since + 3_600_000 ? "t" : v);
   const snap = async () => {
     const out = {} as Record<ChangeRead, string>;
-    for (const m of reads) out[m] = JSON.stringify(await h.read(m, INPUTS[m]), clockFree);
+    for (const m of reads) out[m] = JSON.stringify(await h.read(m, inputOf(h, m)), clockFree);
     return out;
   };
   const first = await snap();
@@ -475,13 +481,14 @@ test("which change refetches which read", () => {
   // outputs, deliverableFolders and projectBook read the disk too: every notice
   assert.deepEqual(touched({ tables: [] }), ["outputs", "deliverableFolders", "projectBook"]);
   assert.deepEqual(touched({ tables: [STATUS] }), reads("needsYou", "board", "projects", "agents", "scope", "projectHistory"));
-  assert.deepEqual(touched({ tables: ["deliverables"] }), reads("projects", "scope", "deliverables", "feed"));
+  assert.deepEqual(touched({ tables: ["deliverables"] }), reads("projects", "scope", "deliverables", "deliverable", "deliverableIndex", "feed"));
+  // only a deliverable written changes the index of every card's revisions (Delivered's search and Files)
   assert.deepEqual(touched({ tables: ["decisions"] }), reads("needsYou", "board", "projects", "scope", "projectHistory", "feed"));
   assert.deepEqual(touched({ tables: [BB] }), reads("needsYou", "agents", "scope", "feed"));
   // mail: a lead's ack of a next move shows on Delivered; Needs you shows no mail
-  assert.deepEqual(touched({ tables: ["items"] }), reads("board", "projects", "deliverables", "directHistory", "projectHistory", "feed"));
+  assert.deepEqual(touched({ tables: ["items"] }), reads("board", "projects", "deliverables", "deliverable", "directHistory", "projectHistory", "feed"));
   // a PR's reading: the cards about it, a wait's PR, the sidebar's and a project's PRs, PR proof
-  assert.deepEqual(touched({ tables: ["prs"] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "projectHistory"));
+  assert.deepEqual(touched({ tables: ["prs"] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "deliverable", "projectHistory"));
   // an agent archived or back: besides the status flip's reads, the feed's reply line and Delivered's lead persona
-  assert.deepEqual(touched({ tables: [STATUS, LIVE] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "projectHistory", "feed"));
+  assert.deepEqual(touched({ tables: [STATUS, LIVE] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "deliverable", "projectHistory", "feed"));
 });
