@@ -79,6 +79,20 @@ test("Projects asks its pane to fit only while it draws the list that fits: the 
   assert.deepEqual(earlyReturns("\n  if (board)\n    return (\n  if (!all) return <ReadState />;\n  const x = () => {\n    if (y) return 1;\n  };"), ["board", "!all"]);
 });
 
+test("the board's open-card panel never holds the wheel it can't use: over a short panel, the board scrolls", () => {
+  // the owner, 2026-11-24: "the workboard is literally not scrollable". After the pane fix one place still was: with a
+  // card open, its panel covers the board's right-hand columns (400 px of a pane of about 820). overscroll-behavior: contain on a box that is overflow-y: auto
+  // stops the wheel there even when the box has nothing to scroll, so half the board ignored the wheel
+  const side = rule(src("app/work-board.tsx"), ".wb-side");
+  assert.ok(side, "the panel's rule is found");
+  assert.doesNotMatch(side, /overscroll-behavior(-y)?:\s*(contain|none)/, "the panel would keep the board still under the pointer");
+  // it still scrolls itself when it is long, and stays in sight while the board scrolls under it
+  assert.match(side, /overflow-y: auto;/);
+  assert.match(side, /position: sticky;/);
+  // the check reads the rule it should: the old line is the fixture
+  assert.match(rule(".wb-side { position: sticky; overflow-y: auto; overscroll-behavior: contain; }", ".wb-side"), /overscroll-behavior(-y)?:\s*(contain|none)/);
+});
+
 test("Projects, wide: the list and the project's header stay put, only the cards scroll", () => {
   const projects = src("app/projects.tsx");
   // only the wide layout opts in: one column keeps the pane's one scroll, a project opening as its own page

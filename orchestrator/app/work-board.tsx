@@ -51,7 +51,9 @@ const boardCss = /* css */ `
 .wb-card .flag { align-self: flex-start; }
 .wb-body { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
 .wb-body > * { grid-area: 1 / 1; }
-.wb-side { justify-self: end; align-self: start; position: sticky; top: 8px; z-index: 2; width: min(400px, 100%); max-height: calc(100dvh - 140px); overflow-y: auto; overscroll-behavior: contain; padding: 16px; border-radius: 12px; background: var(--popover, var(--card)); color: var(--popover-foreground, var(--card-foreground)); border: 1px solid var(--border); box-shadow: 0 8px 24px color-mix(in srgb, var(--foreground) 14%, transparent); }
+/* the open card's panel scrolls itself when it is long; otherwise a wheel over it scrolls the board (overscroll-behavior:
+   contain kept the board still under a panel with nothing to scroll, half of a pane's width) */
+.wb-side { justify-self: end; align-self: start; position: sticky; top: 8px; z-index: 2; width: min(400px, 100%); max-height: calc(100dvh - 140px); overflow-y: auto; padding: 16px; border-radius: 12px; background: var(--popover, var(--card)); color: var(--popover-foreground, var(--card-foreground)); border: 1px solid var(--border); box-shadow: 0 8px 24px color-mix(in srgb, var(--foreground) 14%, transparent); }
 .wb-sheet { padding: 16px; border-radius: 12px; background: var(--card); border: 1px solid var(--border); box-shadow: 0 4px 16px color-mix(in srgb, var(--foreground) 10%, transparent); min-width: 0; }
 .wb-card .drop { font-size: 12px; font-weight: 600; line-height: 16px; }
 .wb-card .drop:empty { display: none; }
