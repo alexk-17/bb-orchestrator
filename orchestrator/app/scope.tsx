@@ -936,23 +936,28 @@ function fileDecision(slug: string, draft: PathwaysDecisionDraft, after: () => v
   );
 }
 
+type PathwaysAskState = { running: boolean; report: PathwaysAskResult | null };
+
 function PathwaysAskAll({
   slug,
   drafts,
+  state,
+  setState,
+  starting,
   onAsked,
 }: {
   slug: string;
   drafts: PathwaysDecisionDraft[];
+  state: PathwaysAskState;
+  setState: (next: PathwaysAskState) => void;
+  starting: { current: boolean };
   onAsked: () => void;
 }) {
-  const [running, setRunning] = useState(false);
-  const [report, setReport] = useState<PathwaysAskResult | null>(null);
-  const starting = useRef(false);
+  const { running, report } = state;
   const askAll = async () => {
     if (starting.current) return;
     starting.current = true;
-    setRunning(true);
-    setReport(null);
+    setState({ running: true, report: null });
     const result = await askPathwaysDecisions(drafts, async (draft) => {
       const waitUntil = Date.now() + 10_000;
       while (gate.lock) {
@@ -965,8 +970,7 @@ function PathwaysAskAll({
       return typeof out.result === "string" ? out.result : null;
     });
     starting.current = false;
-    setRunning(false);
-    setReport(result);
+    setState({ running: false, report: result });
     onAsked();
   };
   return (
@@ -1146,6 +1150,8 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
   const zoomTransformRef = useRef(zoomIdentity);
   const [zoomBounds, setZoomBounds] = useState({ k: 1, min: 0.1, max: 2 });
   const [refresh, setRefresh] = useState(false);
+  const [askState, setAskState] = useState<PathwaysAskState>({ running: false, report: null });
+  const askStarting = useRef(false);
   const refreshSeen = useRef(false);
   const [retroOpen, setRetroOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -2185,6 +2191,9 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                   <PathwaysAskAll
                     slug={slug}
                     drafts={aheadRows.flatMap(({ row }) => (row.draft ? [row.draft] : []))}
+                    state={askState}
+                    setState={setAskState}
+                    starting={askStarting}
                     onAsked={() => {
                       setRefresh(true);
                       void q.refetch();
