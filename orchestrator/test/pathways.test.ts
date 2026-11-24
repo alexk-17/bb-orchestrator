@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Engine } from "../core/engine.ts";
-import { attachPathwaysPreflight, fogBullets, linkPathwaysDecisions, mapPathwaysLimited, pathwaysMap, projectIssues, selectPathwaysMap, summarizePathwaysRetro, type PathwaysIssue } from "../core/pathways.ts";
+import { attachPathwaysPreflight, draftPathwaysDecision, fogBullets, linkPathwaysDecisions, mapPathwaysLimited, pathwaysAhead, pathwaysDecisionKey, pathwaysMap, projectIssues, selectPathwaysMap, submitPathwaysDecision, summarizePathwaysRetro, type PathwaysIssue } from "../core/pathways.ts";
+import { askPathwaysDecisions } from "../core/pathways-ask.ts";
 import { createPathwaysSnapshots, type PathwaysSnapshot } from "../core/pathways-snapshot.ts";
 import { pathwaysViewSchema, type Pathways } from "../contract.ts";
 import plugin from "../server.ts";
@@ -195,6 +196,13 @@ test("Pathways detail reads cap concurrency and preserve order; the last map is 
     assert.equal(local.map.ownerActions[0]?.identifier, cardTicket.identifier);
     assert.equal(local.map.ownerActions[0]?.next, "STEP-3");
     assert.equal(local.map.ownerActions[0]?.neededBefore, 1);
+    const { ahead, ...legacyMap } = local.map;
+    assert.equal(ahead?.[0]?.kind, "owner-action");
+    assert.equal(ahead?.[0]?.ticketId, cardTicket.identifier);
+    assert.deepEqual(ahead?.[0]?.unblocks, ["STEP-3", "STEP-4", "STEP-5"]);
+    assert.equal(ahead?.[0]?.neededBefore, 1);
+    assert.ok(ahead?.every((row) => row.kind !== "decision" && row.draft === undefined));
+    assert.equal(pathwaysViewSchema.parse({ ...local, map: legacyMap }).map?.ahead, undefined);
     assert.deepEqual(local.map.fog, ["Waiting on staging key"]);
     assert.ok(local.map.tickets.every((t) => t.decisionDraft === null));
     assert.ok(local.retro);
@@ -354,14 +362,35 @@ test("frontier readiness keeps research and missing proof plans distinct", () =>
 
 test("owner actions name explicit work and reach two dependent steps", () => {
   const map = issue("MAP-1", { parent: null });
-  const result = pathwaysMap(map, [
+  const children = [
     issue("Y-1", { title: "Sign in to staging", labels: { nodes: [{ name: "wayfinder:needs-you" }, { name: "wayfinder:task" }] }, relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "Y-2", state: { type: "started" } } }] } }),
     issue("Y-2", { inverseRelations: { nodes: [blockedBy("Y-1")] }, relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "Y-3", state: { type: "started" } } }] } }),
-    issue("Y-3", { inverseRelations: { nodes: [blockedBy("Y-2")] } }),
+    issue("Y-3", { description: "## Acceptance criteria\nDecided.\n## Verification\nEnvironment: Dev AWS\nVerifier: dashboard UI\nOwner action: the owner signs in", inverseRelations: { nodes: [blockedBy("Y-2")] } }),
     issue("Y-4", { title: "Bring the answer", labels: { nodes: [{ name: "wayfinder:needs-you" }] } }),
-  ]);
+    issue("P-1", { title: "Approve the pilot", labels: { nodes: [{ name: "wayfinder:needs-you" }, { name: "wayfinder:task" }] }, relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "Y-3", state: { type: "started" } } }] } }),
+    issue("P-2", { title: "Approve the budget", labels: { nodes: [{ name: "wayfinder:needs-you" }, { name: "wayfinder:task" }] }, relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "Y-3", state: { type: "started" } } }] } }),
+  ];
+  const result = pathwaysMap(map, children);
+  attachPathwaysPreflight(result, children);
   assert.deepEqual(result.ownerActions.find((action) => action.identifier === "Y-1"), { identifier: "Y-1", url: "https://linear.app/test/issue/Y-1", action: "Sign in to staging", kind: "sign-in", affected: ["Y-2", "Y-3"], next: "Y-2", neededBefore: 2, onlyOpenBlocker: true });
   assert.equal(result.ownerActions.find((action) => action.identifier === "Y-4")?.kind, "other");
+  const ahead = pathwaysAhead(result);
+  assert.deepEqual(ahead.map((row) => [row.kind, row.ticketId, row.unblocks.length, row.neededBefore]), [
+    ["owner-action", "Y-1", 2, 2],
+    ["owner-action", "P-1", 1, 3],
+    ["owner-action", "P-2", 1, 3],
+    ["access", "Y-3", 0, 3],
+    ["owner-action", "Y-4", 0, null],
+  ]);
+  assert.deepEqual(pathwaysAhead(result, 2).map((row) => [row.kind, row.ticketId, row.neededBefore]), [
+    ["owner-action", "Y-1", 2],
+    ["owner-action", "P-1", null],
+    ["owner-action", "P-2", null],
+    ["owner-action", "Y-4", null],
+  ]);
+  assert.deepEqual(pathwaysAhead({ ...result, firstPath: ["Y-1", "Y-2", "Y-1"] }).map((row) => [row.ticketId, row.neededBefore]), [["Y-1", 2], ["P-1", null], ["P-2", null], ["Y-4", null]]);
+  assert.deepEqual(pathwaysAhead({ ...result, firstPath: [] }).map((row) => [row.ticketId, row.neededBefore]), [["Y-1", null], ["P-1", null], ["P-2", null], ["Y-4", null]]);
+  assert.equal(pathwaysAhead({ ...result, ownerActions: [...result.ownerActions, ...result.ownerActions] }).length, ahead.length);
 });
 
 test("ticket PR linkage comes only from explicit attachment or description URLs", () => {
@@ -500,9 +529,9 @@ test("an explicit linked PR block links the same card in decision preview and ti
 });
 
 test("decision preview is read-only and submit is idempotent for the ticket question", async () => {
-  const { draftPathwaysDecision, submitPathwaysDecision } = await import("../core/pathways.ts");
   const child = issue("T-1", { labels: { nodes: [{ name: "wayfinder:research" }] }, description: "## Question\nWhich source?" });
-  const map = pathwaysMap(issue("MAP-1", { parent: null }), [child]);
+  const second = issue("T-2", { labels: { nodes: [{ name: "wayfinder:research" }] }, description: "## Question\nWhich cost?", inverseRelations: { nodes: [blockedBy("T-1")] } });
+  const map = pathwaysMap(issue("MAP-1", { parent: null }), [child, second]);
   const ticket = map.tickets[0]!;
   let created = 0;
   const draft = draftPathwaysDecision(ticket);
@@ -522,6 +551,21 @@ test("decision preview is read-only and submit is idempotent for the ticket ques
   assert.equal(submitPathwaysDecision(draft, deps), "d-one");
   assert.equal(created, 1);
   assert(draft.context.includes(child.url));
+  const ahead = pathwaysAhead(map).flatMap((row) => (row.draft ? [row.draft] : []));
+  assert.deepEqual(ahead.map((item) => item.ticketId), ["T-1", "T-2"]);
+  const filed = new Map<string, string>();
+  let creates = 0;
+  const batch = { existing: (key: string) => filed.get(key) ?? null, create: (key: string) => { creates++; const id = `d-${creates}`; filed.set(key, id); return id; } };
+  const askAll = (drafts: typeof ahead) => askPathwaysDecisions(drafts, async (item) => submitPathwaysDecision(item, batch));
+  assert.deepEqual(await askAll(ahead), { asked: 2, failed: [] });
+  assert.deepEqual(await askAll(ahead), { asked: 2, failed: [] });
+  assert.equal(creates, 2);
+  filed.delete(pathwaysDecisionKey(ahead[1]!.ticketId, ahead[1]!.question));
+  assert.deepEqual(await askAll(ahead), { asked: 2, failed: [] });
+  assert.equal(creates, 3);
+  const flaky = { existing: () => null, create: (_key: string, value: { ticketId: string }) => { if (value.ticketId === "T-2") throw new Error("card service timed out"); return `d-${value.ticketId}`; } };
+  assert.deepEqual(await askPathwaysDecisions(ahead, async (item) => submitPathwaysDecision(item, flaky)), { asked: 1, failed: [{ ticketId: "T-2", reason: "card service timed out" }] });
+  assert.deepEqual(await askPathwaysDecisions(ahead, async () => null), { asked: 0, failed: [{ ticketId: "T-1", reason: "no decision was filed" }, { ticketId: "T-2", reason: "no decision was filed" }] });
 });
 
 test("linked decision replaces the missing-decision reason", () => {
