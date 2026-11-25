@@ -1,4 +1,4 @@
-import { seedTaskPrs, seedTasks } from "./tasks.ts";
+import { seedPrOwners, seedTaskPrs, seedTasks } from "./tasks.ts";
 
 // The SQL surface the engine needs. better-sqlite3 (bb.storage.database()) and node:sqlite (tests) both fit it.
 export interface Stmt {
@@ -571,6 +571,32 @@ export const MIGRATIONS: string[] = [
   // one address's task (core/tasks.ts addressTask: a PR link's task, its card's or wait's) over every holder, retired
   // ones too; agents_live_address covers live ones only, so the lookup scanned agents (Codex's review of fec268d)
   `CREATE INDEX agents_address_created ON agents (address, created_at)`,
+  // The CoS's board tidy (2026-11-23, core/board-tidy.ts): merged_into is the task a merged task now is (it stays
+  // dropped, and its id redirects there); stale_flag_at is when the lead was last told the task looks done but a
+  // thread idles on it (at most once a day).
+  `ALTER TABLE tasks ADD COLUMN merged_into TEXT;
+   ALTER TABLE tasks ADD COLUMN stale_flag_at INTEGER`,
+  // Every owner of a PR link (2026-11-24, the owner's call on the CoS tidy; core/tasks.ts linkPr): task_prs keeps one
+  // row per PR and task, the link the board reads, and this keeps each reason it is there, one row per address (by;
+  // '' for none) and path (via). A tidy that moves an attachment moves its owner rows, and a link goes only when its
+  // last owner leaves: the evidence that made it (reports, readings) can be pruned, so owners are stored, not
+  // re-derived. The links already there get their own owner from the link itself, then every owner the DB can
+  // still recover (SEEDS: seedPrOwners).
+  `CREATE TABLE task_pr_owners (
+     url TEXT NOT NULL,
+     task TEXT NOT NULL,
+     by TEXT NOT NULL,
+     via TEXT NOT NULL,
+     first_at INTEGER NOT NULL,
+     PRIMARY KEY (url, task, by, via)
+   );
+   CREATE INDEX task_pr_owners_task ON task_pr_owners (task);
+   CREATE INDEX task_pr_owners_by ON task_pr_owners (by);
+   INSERT OR IGNORE INTO task_pr_owners (url, task, by, via, first_at) SELECT url, task, coalesce(by, ''), via, first_at FROM task_prs`,
+  // PRs the CoS's tidy was refused for because nobody has read them yet (2026-11-24, the lead's call; core/board-tidy.ts):
+  // the next PR pass reads each by URL with the linked ones (Engine.linkedPrsToRead), so the CoS can file it again after
+  // it. No task link. A request goes once its PR is linked, or after a day.
+  `CREATE TABLE pr_read_requests (url TEXT PRIMARY KEY, at INTEGER NOT NULL)`,
 ];
 
 /**
@@ -580,6 +606,7 @@ export const MIGRATIONS: string[] = [
 export const SEEDS: ReadonlyMap<number, (db: Db) => void> = new Map([
   [MIGRATIONS.findIndex((m) => m.startsWith("CREATE TABLE tasks (")), (db: Db) => seedTasks(db, Date.now())],
   [MIGRATIONS.findIndex((m) => m.startsWith("CREATE TABLE task_prs (")), (db: Db) => seedTaskPrs(db, Date.now())],
+  [MIGRATIONS.findIndex((m) => m.startsWith("CREATE TABLE task_pr_owners (")), (db: Db) => seedPrOwners(db)],
 ]);
 
 export function migrate(db: Db): void {

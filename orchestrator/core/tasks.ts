@@ -39,6 +39,9 @@ export interface TaskRow {
   hand_sig: string | null;
   col: string | null;
   col_at: number | null;
+  /** The task the CoS merged this one into (core/board-tidy.ts): its id redirects there. */
+  merged_into?: string | null;
+  stale_flag_at?: number | null;
 }
 /** What a drop moved to Unfiled: bb thread ids, deliverable ids and card ids. */
 export interface Unfiled {
@@ -58,6 +61,16 @@ export function newTaskId(db: Db): string {
 
 export const taskRow = (db: Db, id: string): TaskRow | null => (db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(id) as TaskRow | undefined) ?? null;
 
+/** A task the CoS merged away stands for the task it was merged into (followed to the end of the chain). */
+export function followMerge(db: Db, t: TaskRow): TaskRow {
+  for (let i = 0; t.merged_into && i < 20; i++) {
+    const next = taskRow(db, t.merged_into);
+    if (!next) break;
+    t = next;
+  }
+  return t;
+}
+
 /** The state a step's state puts its task in: done ships it, skipped drops it, current and next keep it open. */
 const stateOf = (s: StepState): TaskState => (s === "done" ? "shipped" : s === "skipped" ? "dropped" : "open");
 
@@ -71,6 +84,7 @@ export function assignTasks(db: Db, project: string, steps: LeadStatus["steps"],
   const byId = new Map(rows.map((r) => [r.id, r]));
   const claimed = new Set<string>();
   const out: (TaskRow | null)[] = steps.map(() => null);
+  const viaMerge = new Map<string, string>(); // a task claimed through an id the CoS merged into it: that old id
   // explicit ids first, so a title match never takes a task a later step names by id
   for (const [i, s] of steps.entries()) {
     if (!s.id) continue;
@@ -79,8 +93,18 @@ export function assignTasks(db: Db, project: string, steps: LeadStatus["steps"],
       const other = db.prepare(`SELECT project FROM tasks WHERE id = ?`).get(s.id) as { project: string } | undefined;
       throw new TaskError(`step ${i + 1}'s id ${s.id} ${other ? `is a task of ${other.project}, not ${project}` : `is no task of ${project}`}: leave id out to match by title, or use an id a reply gave you`);
     }
-    claimed.add(t.id);
-    out[i] = t;
+    const to = followMerge(db, t);
+    if (claimed.has(to.id)) {
+      const via = viaMerge.get(to.id);
+      throw new TaskError(
+        to !== t || via
+          ? `steps ${via ?? to.id} and ${to !== t ? s.id : to.id} are one task: the CoS merged ${to !== t ? s.id : via} into ${to.id}. Send that task once, with id ${to.id}`
+          : `step ${i + 1}'s id ${s.id} is another step's too: send each task once`,
+      );
+    }
+    if (to !== t) viaMerge.set(to.id, t.id);
+    claimed.add(to.id);
+    out[i] = to;
   }
   // then the task the stored list already holds under that title, in any state (a done step sent again without its id
   // is the same Shipped task, and a done step marked current again reopens it); a task that shipped and left the list
@@ -105,9 +129,12 @@ export function assignTasks(db: Db, project: string, steps: LeadStatus["steps"],
       (matches(k, s) ? k : undefined) ??
       rows.find((r) => r.state === "open" && r.norm === n && !claimed.has(r.id)) ??
       rows.filter((r) => r.state === "dropped" && r.norm === n && !claimed.has(r.id) && matches(r, s)).sort(newest)[0];
-    if (t) {
-      claimed.add(t.id);
-      out[i] = t;
+    // a task the CoS merged away stands for the one it was merged into: a re-sent old title never un-merges it
+    const to = t ? followMerge(db, t) : undefined;
+    if (to && to !== t && claimed.has(to.id)) throw new TaskError(`step ${i + 1} ${JSON.stringify(s.title)} was merged into ${to.id} ${JSON.stringify(to.title)}, which another step already is: send that task once, with id ${to.id}`);
+    if (to) {
+      claimed.add(to.id);
+      out[i] = to;
     }
   }
   const result: LeadStatus["steps"] = [];
@@ -185,6 +212,18 @@ export function linkPr(db: Db, url: string, task: string | null, via: PrVia, by:
   const key = prKey(url);
   if (!task || !PR_URL_RE.test(key)) return;
   db.prepare(`INSERT OR IGNORE INTO task_prs (url, task, project, via, by, first_at) SELECT ?, id, project, ?, ?, ? FROM tasks WHERE id = ?`).run(key, via, by, at, task);
+  // and its owner, every one (task_pr_owners): a link shared by two threads, or a thread and the CoS, keeps both, so
+  // one leaving never takes the link from the other. The upgrade's own seed runs before that table exists.
+  if (hasOwners(db)) db.prepare(`INSERT OR IGNORE INTO task_pr_owners (url, task, by, via, first_at) SELECT ?, id, ?, ?, ? FROM tasks WHERE id = ?`).run(key, by ?? "", via, at, task);
+}
+
+const withOwners = new WeakSet<Db>();
+/** Whether task_pr_owners exists yet (only the upgrade's task_prs seed runs before it; once there, it stays). */
+function hasOwners(db: Db): boolean {
+  if (withOwners.has(db)) return true;
+  if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_pr_owners'`).get()) return false;
+  withOwners.add(db);
+  return true;
 }
 
 /**
@@ -285,11 +324,25 @@ export function seedTaskPrs(db: Db, now: number): void {
 }
 
 /**
+ * The owners migration's backfill (with it, in its transaction): each link's own owner is copied by the migration;
+ * then every owner the DB can still recover (two threads' reports of one PR, a card's and a deliverable's) is added
+ * through the same pass, onto the links already there only. Retention may prune that evidence later, so it is
+ * stored now, while it can be read. No link is added or removed.
+ */
+export function seedPrOwners(db: Db): void {
+  db.exec(`CREATE TEMP TABLE seed_links AS SELECT url, task FROM task_prs`);
+  linkRetained(db, null);
+  db.exec(`DELETE FROM task_prs WHERE NOT EXISTS (SELECT 1 FROM temp.seed_links k WHERE k.url = task_prs.url AND k.task = task_prs.task)`);
+  db.exec(`DELETE FROM task_pr_owners WHERE NOT EXISTS (SELECT 1 FROM task_prs k WHERE k.url = task_pr_owners.url AND k.task = task_pr_owners.task)`);
+  db.exec(`DROP TABLE temp.seed_links`);
+}
+
+/**
  * Link what the DB keeps for PRs, the one pass the upgrade (all of it) and a restored task (`scope`: the task and its
  * threads' addresses) share, so they read the same sources: the threads' evidence and the waits bound to the cards,
  * the cards' PR blocks (the task's own and its threads'), and the deliverables' PR blocks and proof.
  */
-function linkRetained(db: Db, scope: { task: string; addresses: string[] } | null): void {
+export function linkRetained(db: Db, scope: { task: string; addresses: string[] } | null): void {
   const list = JSON.stringify(scope?.addresses ?? []);
   const cardWhere = scope
     ? `json_extract(json, '$.orchestrator.task') = ? OR json_extract(json, '$.orchestrator.origin') IN (SELECT value FROM json_each(?)) OR json_extract(json, '$.orchestrator.asker') IN (SELECT value FROM json_each(?))`
@@ -321,8 +374,8 @@ export function dropTask(db: Db, t: Pick<TaskRow, "id">, now: number): void {
   db.prepare(`UPDATE tasks SET state = 'dropped', dropped_at = ?, shipped_at = NULL, unfiled = ? WHERE id = ?`).run(now, any ? JSON.stringify(moved) : null, t.id);
 }
 
-/** A dropped task comes back (its title re-added): what its drop moved to Unfiled and is still there comes back with it. */
-function refile(db: Db, t: TaskRow): void {
+/** A dropped task comes back (its title re-added, or the CoS restores it): what its drop moved to Unfiled and is still there comes back with it. */
+export function refile(db: Db, t: TaskRow): void {
   let u: Unfiled;
   try {
     u = JSON.parse(t.unfiled!) as Unfiled;
@@ -357,7 +410,8 @@ export function resolveTaskRef(db: Db, project: string | null, ref: string): Tas
   const key = ref.trim();
   if (!project) throw new TaskError("only a project's lead and threads have tasks");
   const byId = TASK_ID_RE.test(key) ? taskRow(db, key) : null;
-  const t = byId ?? (db.prepare(`SELECT * FROM tasks WHERE project = ? AND state = 'open' AND norm = ?`).get(project, normTitle(key)) as TaskRow | undefined) ?? null;
+  const found = byId ?? (db.prepare(`SELECT * FROM tasks WHERE project = ? AND state = 'open' AND norm = ?`).get(project, normTitle(key)) as TaskRow | undefined) ?? null;
+  const t = found ? followMerge(db, found) : null;
   const open = () => {
     const rows = db.prepare(`SELECT id, title FROM tasks WHERE project = ? AND state = 'open' ORDER BY created_at`).all(project) as { id: string; title: string }[];
     return rows.length ? `its open tasks: ${rows.map((r) => `${r.id} ${JSON.stringify(r.title)}`).join(", ")}` : "it has no open tasks (publish steps with orch_status first)";

@@ -66,6 +66,16 @@ from the app's Needs you page, and write to a lead only from its Projects row (a
   answer from the owner is refused.
 - **The CoS sees the deliverables** with `orch_deliverables(project?, state?, since?)` (the Steward too): each lead's
   deliverables with their review state, the owner's note, and the latest revision's proof.
+- **The CoS tidies the work board** at each digest with `orch_board_tidy`. `action=list` shows each project's tasks
+  dropped with attachments, its Unfiled threads, PRs, deliverables and cards, and its open tasks. `merge(task, into)`
+  folds a duplicate into the task that carries on (its things move; its id redirects), `restore(task)` brings a
+  dropped task back with its things (the lead is told to send it back in its steps), `file(kind, ref, task)` attaches
+  an Unfiled thread, PR (with the thread that holds it; a PR no thread holds is filed itself, its state read from
+  GitHub, unknown until read, which keeps the task off Shipped), deliverable or card to a task of its project, and
+  `confirm(task)` accepts a drop. File only when it is obvious where a thing belongs; otherwise ask the lead. Each
+  change is logged on the board as the CoS's and the lead gets a notice. Leads hear once a day about a task whose PRs
+  all merged and deliverables are approved but whose live threads have idled over a day: resolve them or mark the
+  step done.
 - **The CoS manages the dead letters.** An hourly notice lists the new ones; `orch_dead_letters` lists them all and
   resends, re-routes (`to`), closes (`outcome`, the sender is told) or escalates one (`note`) to the owner's board.
   Only escalated ones reach the board.

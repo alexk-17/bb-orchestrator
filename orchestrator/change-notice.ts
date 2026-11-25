@@ -53,7 +53,7 @@ export const READS = {
   feed: ["agents", LIVE, "board", "decisions", "deliverables", "events", "inbox_entries", "lead_status", "projects", "scoping_tasks", ...ITEMS, BB],
   // the work board (core/work-board.ts): tasks with their hand moves (a move writes tasks too; task_moves is only its
   // log), durable PR links, and what each card shows
-  workBoard: ["agents", STATUS, "decisions", "deliverables", "events", "lead_status", "pr_readings", "prs", "projects", "spawns", "tasks", "task_prs"],
+  workBoard: ["agents", STATUS, "decisions", "deliverables", "events", "lead_status", "pr_readings", "prs", "projects", "spawns", "tasks", "task_pr_owners", "task_prs"],
   // the since lens (core/since.ts): the move log, the log's merges, the tasked PRs (task_prs of tasks not dropped), the
   // owner's approvals and the feed's seen line; GitHub's cached read is plugin kv, which board-since.ts announces itself
   boardSince: ["cursors", "deliverables", "events", "task_moves", "task_prs", "tasks"],
@@ -71,6 +71,7 @@ export const UNREAD_TABLES = [
   "xp_cursor", "thread_numbers", "alarms", "memchecks", "dream_batches",
   "slack_watch_events", "slack_watch_profiles", "slack_watch_roots", // read by multiplayer, which refetches on every change
   "multiplayer_beats", "multiplayer_records", "review_queue_lease",
+  "pr_read_requests", // the PR pass's own list of PRs to read (core/board-tidy.ts); the reading itself writes pr_readings
 ] as const;
 
 export const KNOWN_TABLES: ReadonlySet<string> = new Set([...Object.values(READS).flatMap((t) => t ?? []), ...UNREAD_TABLES]);

@@ -191,6 +191,15 @@ function gather(db: Db, only: string | null, pick: (t: TaskRow) => boolean): Gat
   const links = db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_prs'`).get()
     ? (db.prepare(`SELECT url, task, project, by, first_at FROM task_prs ORDER BY first_at, rowid`).all() as { url: string; task: string; project: string; by: string | null; first_at: number }[])
     : [];
+  // each link's holder is its oldest current owner on that task (task_pr_owners), a thread first: a link's own `by` is
+  // only its first sight, and that thread may have moved on (the CoS's tidy); none (the upgrade's seed runs first): `by`
+  // owners but none named (only the CoS's own filing is left): no holder, never the first sight that moved on
+  const holders = new Map<string, string | null>();
+  if (db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'task_pr_owners'`).get())
+    for (const o of db.prepare(`SELECT url, task, by FROM task_pr_owners ORDER BY by = '', by NOT LIKE 'thread:%', first_at, rowid`).all() as { url: string; task: string; by: string }[]) {
+      const k = `${o.url}\n${o.task}`;
+      if (!holders.has(k)) holders.set(k, o.by || null);
+    }
 
   const attached = new Map<string, BoardAttachments>(tasks.map((t) => [t.id, empty()]));
   const unfiled = new Map<string, BoardAttachments>(projects.map((p) => [p, empty()]));
@@ -207,12 +216,14 @@ function gather(db: Db, only: string | null, pick: (t: TaskRow) => boolean): Gat
     if (thread.live || filed(task)) put(task, project, (a) => a.threads.push(thread));
   }
   // each link puts its PR on its task, with the URL's one state; none read yet is state null (unknown), which keeps the
-  // task off Shipped. Its thread is the address it came through.
+  // task off Shipped. Its thread is its holder (above).
   const held = new Set<string>();
   for (const l of links) {
     if (taskState.has(l.task) && taskState.get(l.task) !== "dropped") held.add(l.url);
     const s = prs.get(l.url);
-    const pr: Pr = s ? { ...s, thread: l.by } : { url: l.url, number: Number(l.url.split("/").pop()) || null, state: null, checks: null, review: null, attention: null, wait: null, at: l.first_at, thread: l.by, source: "orchestrator" };
+    const k = `${l.url}\n${l.task}`;
+    const holder = holders.has(k) ? holders.get(k)! : l.by;
+    const pr: Pr = s ? { ...s, thread: holder } : { url: l.url, number: Number(l.url.split("/").pop()) || null, state: null, checks: null, review: null, attention: null, wait: null, at: l.first_at, thread: holder, source: "orchestrator" };
     pr.wait = prWait(pr);
     put(l.task, l.project, (a) => a.prs.push(pr));
   }

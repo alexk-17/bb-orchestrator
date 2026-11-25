@@ -15,6 +15,7 @@ import { join } from "node:path";
 import plugin from "../server.ts";
 import { Engine } from "../core/engine.ts";
 import { BB, KNOWN_TABLES, LIVE, READS, STATUS, touches, type ChangeRead } from "../change-notice.ts";
+import { statusParams } from "../core/status.ts";
 import { WRITES } from "../contract.ts";
 import { ChangeTables, recordWrites } from "../core/write-log.ts";
 import { pr, seedBusy } from "./fixtures/busy-seed.ts";
@@ -92,6 +93,7 @@ async function host(opts: { batchInbox?: boolean } = {}) {
   const routes = new Map<string, (c: any) => Promise<any>>();
   const services = new Map<string, { start: (s: AbortSignal) => Promise<void> }>();
   const notices: unknown[] = [];
+  const tools = new Map<string, any>();
   const settingsChange: ((v: any) => void)[] = [];
   let settingsValues: any = {};
   const bb: any = new Proxy(
@@ -115,6 +117,7 @@ async function host(opts: { batchInbox?: boolean } = {}) {
         if (k === "realtime") return { publish: (ch: string, p: unknown) => ch === "changed" && notices.push(p), subscribe: noop };
         if (k === "background") return { service: (n: string, s: { start: (s: AbortSignal) => Promise<void> }) => services.set(n, s) };
         if (k === "sdk") return sdk;
+        if (k === "agents") return new Proxy({ registerTool: (t: { name: string }) => void tools.set(t.name, t) }, { get: (a: any, n) => a[n] ?? noop });
         if (k === "log") return { info: () => {}, warn: (m: string) => void warnings.push(m), error: () => {}, debug: () => {} };
         return noop;
       },
@@ -160,7 +163,13 @@ async function host(opts: { batchInbox?: boolean } = {}) {
   };
   const seedNotice = () => ({ tables: seedTables.take() });
   seedNotice();
-  return { raw, reads, seeded, seedEngine, seedNotice, sdkCalls, warnings, slowThreads, prompts, read, events, post, notices, announce, quiet, calm, stop, settingsChange, settingsValues: () => settingsValues };
+  /** An agent's tool call, its raw arguments parsed by the tool's own schema as bb does. */
+  const tool = async (name: string, raw: unknown, threadId: string) => {
+    const t = tools.get(name)!;
+    const r = await t.execute(t.parameters.parse(raw), { threadId });
+    return { ok: !r.isError, text: r.content[0]!.text as string };
+  };
+  return { raw, reads, seeded, seedEngine, seedNotice, sdkCalls, warnings, slowThreads, prompts, read, events, post, tool, notices, announce, quiet, calm, stop, settingsChange, settingsValues: () => settingsValues };
 }
 
 const INPUTS: Record<ChangeRead, unknown> = {
@@ -434,6 +443,46 @@ test("a card moved on the work board refetches the board; a write it doesn't sho
   assert.ok(h.notices.length > 0 && h.notices.every((n: any) => Array.isArray(n.tables)), JSON.stringify(h.notices));
   assert.ok(h.notices.some((n) => touches(n, "board")), "the rule shows on the main board");
   assert.ok(!h.notices.some((n) => touches(n, "workBoard")), JSON.stringify(h.notices));
+});
+
+test("each CoS tidy refetches the work board and its since lens; a write neither shows leaves both alone", async (tc) => {
+  // the CoS merges, restores, files and confirms from its chat: the owner's open board must show each at once, from
+  // the tidy's own notice, and the since strip must log it (task_moves by cos)
+  const h = await host();
+  tc.after(() => h.stop.abort());
+  await h.announce();
+  // three tasks of one project: a keeps going, b is merged into it, c is dropped, confirmed and restored
+  const th = h.seeded.threads[0]!;
+  const project = th.project!;
+  const lead = h.seeded.leads.find((l) => l.project === project)!;
+  const publish = (titles: string[]) => h.seedEngine.publishStatus(lead, statusParams.parse({ goal: "Made-up goal", steps: titles.map((title, i) => ({ title, state: i === 0 ? "current" : "next" })) }));
+  const [a, b, c] = publish(["Made-up keep", "Made-up twin", "Made-up spare"]).steps.map((x) => x.id!);
+  await h.quiet();
+  const both = async (what: string, args: Record<string, unknown>) => {
+    h.notices.length = 0;
+    const r = await h.tool("orch_board_tidy", args, "thr_busy_cos");
+    assert.ok(r.ok, `${what}: ${r.text}`);
+    await h.quiet();
+    assert.ok(h.notices.some((n) => touches(n, "workBoard")), `${what} refetches the board: ${JSON.stringify(h.notices)}`);
+    assert.ok(h.notices.some((n) => touches(n, "boardSince")), `${what} refetches the lens: ${JSON.stringify(h.notices)}`);
+  };
+  await both("file a PR no thread holds", { action: "file", kind: "pr", ref: "https://github.com/made-up/repo/pull/5", task: a });
+  await both("merge", { action: "merge", task: b, into: a });
+  await both("file a thread", { action: "file", kind: "thread", ref: th.address, task: c });
+  publish(["Made-up keep"]); // b is merged into a; c leaves the steps: dropped, its thread to Unfiled
+  await h.quiet();
+  await both("confirm", { action: "confirm", task: c });
+  await both("restore", { action: "restore", task: c });
+  // list writes nothing: no notice, so nothing refetches
+  h.notices.length = 0;
+  await h.tool("orch_board_tidy", { action: "list" }, "thr_busy_cos");
+  await h.quiet();
+  assert.ok(!h.notices.some((n) => touches(n, "workBoard") || touches(n, "boardSince")), JSON.stringify(h.notices));
+  // a rule added: neither the board nor the lens shows rules
+  h.notices.length = 0;
+  await h.post(WRITES.ruleAdd, { text: "Made-up rule", project: null, kinds: ["question"], expiresInDays: null, source: "test" });
+  await h.quiet();
+  assert.ok(h.notices.length > 0 && !h.notices.some((n) => touches(n, "workBoard") || touches(n, "boardSince")), JSON.stringify(h.notices));
 });
 
 test("each change's notice touches every read whose answer it changed", async (tc) => {

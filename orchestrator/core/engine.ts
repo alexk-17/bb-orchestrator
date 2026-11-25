@@ -26,6 +26,7 @@ import { type LeadStatus, normalizeStatus, sameWait, type StatusParams, STATUS_S
 import { addressTask, assignTasks, linkCardPrs, linkDeliverablePrs, linkPr, resolveTaskRef, taskRow, TaskError, waitTask, type TaskRow as WorkTaskRow } from "./tasks.ts";
 import { readBoard, settleColumns } from "./work-board.ts";
 import { COLUMN_LABEL, type BoardColumn, type WorkBoard } from "../contract.ts";
+import { confirmDrop, fileItem, type FileKind, markStaleFlagged, mergeTask, restoreTask, staleNotice, staleTasks, type StaleTask, type TidyAction, tidyList, TidyRefusal } from "./board-tidy.ts";
 import { backfillEvents, buildHistory, buildSummary, logEvent, logSince, SUMMARY_DONE_MS, type DecisionLite, type EventIn, type EventRow, type HistoryInput, type ProjectHistory, type ProjectSummary, type SummaryInput } from "./history.ts";
 import { waitsOf } from "./status.ts";
 import { COPY_MAX, fileProof, folderFor, keepFile, keptCopy, listFolder, type Kept, writeReadme } from "./deliverable-files.ts";
@@ -2439,9 +2440,33 @@ export class Engine {
     this.event({ kind: "pr", project: who?.project ?? null, address: who?.address ?? null, threadId: who?.thread_id ?? null, value: state, ref: url, note: number != null ? String(number) : null });
   }
 
-  /** Drop the gh readings no open wait names any more (a wait met, moved or dropped). Returns how many went. */
+  /** Drop the gh readings no open wait names any more (a wait met, moved or dropped) and no PR link needs (a linked URL's state is read per URL). Returns how many went. */
   pruneWaitReadings(): number {
-    return Number((this.db.prepare(`DELETE FROM pr_readings WHERE url NOT IN (SELECT pr_url FROM waits WHERE closed_at IS NULL)`).run() as { changes: number | bigint }).changes);
+    // a tidy's read request ends once its PR is linked (filed) or after a day; its reading is kept while it lasts
+    this.db.prepare(`DELETE FROM pr_read_requests WHERE url IN (SELECT url FROM task_prs) OR at < ?`).run(this.now() - 24 * 3_600_000);
+    return Number(
+      (this.db.prepare(`DELETE FROM pr_readings WHERE url NOT IN (SELECT pr_url FROM waits WHERE closed_at IS NULL) AND url NOT IN (SELECT url FROM task_prs) AND url NOT IN (SELECT url FROM pr_read_requests)`).run() as { changes: number | bigint }).changes,
+    );
+  }
+
+  /**
+   * The linked PRs (task_prs, every path), and those a refused tidy asked for (pr_read_requests), that gh still has to read: no state yet, or a newest state (bb's reading, a
+   * gh reading or the PR log, as the board takes it) that isn't merged or closed. The wait pass reads them with the
+   * waits' PRs, so an unknown state resolves itself; a final one is not read again.
+   */
+  linkedPrsToRead(): string[] {
+    return (
+      this.db
+        .prepare(
+          `WITH s AS (
+             SELECT rtrim(trim(url), '/') AS u, state, seen_at AS at FROM prs
+             UNION ALL SELECT url, state, seen_at FROM pr_readings
+             UNION ALL SELECT rtrim(trim(ref), '/'), value, at FROM events WHERE kind = 'pr' AND ref IS NOT NULL
+           ), latest AS (SELECT u, state, MAX(at) FROM s GROUP BY u)
+           SELECT DISTINCT t.url FROM (SELECT url FROM task_prs UNION SELECT url FROM pr_read_requests) t LEFT JOIN latest l ON l.u = t.url WHERE l.state IS NULL OR l.state NOT IN ('merged', 'closed') ORDER BY t.url`,
+        )
+        .all() as { url: string }[]
+    ).map((r) => r.url);
   }
 
   // ---------------------------------------------------------------- the Watchers list: PR waits for the owner and the CoS (2026-11-17)
@@ -2708,10 +2733,11 @@ export class Engine {
   }
 
   /** A tasks.ts refusal as the engine's own. */
-  private taskGuard<T>(fn: () => T): T {
+  private taskGuard<T>(fn: () => T, unread?: (urls: string[]) => void): T {
     try {
       return fn();
     } catch (e) {
+      if (e instanceof TidyRefusal) unread?.(e.readFirst);
       if (e instanceof TaskError) throw new EngineError("invalid", e.message);
       throw e;
     }
@@ -2767,6 +2793,78 @@ export class Engine {
   /** Log the work board's column changes since the last settle (task_moves); from the tick, once a minute. */
   settleBoard(): number {
     return tx(this.db, () => settleColumns(this.db, this.now(), { log: true, by: "engine" }));
+  }
+
+  /**
+   * orch_board_tidy (core/board-tidy.ts): the CoS reads and tidies the work board. CoS only. Each change is one
+   * transaction: the action's own task_moves row (by cos), the project's knock-on column changes (by cos), and an INFO
+   * notice to the project's lead.
+   */
+  boardTidy(by: Agent, p: { action: TidyAction; task?: string | null; into?: string | null; kind?: FileKind | null; ref?: string | null; project?: string | null }): string {
+    if (by.role !== "cos") throw new EngineError("forbidden", "only the CoS tidies the work board");
+    if (p.action === "list") return tidyList(this.db, this.now(), p.project || null);
+    const need = (v: string | null | undefined, what: string) => {
+      if (!v) throw new EngineError("invalid", `${p.action} needs ${what}`);
+      return v;
+    };
+    let readFirst: string[] = [];
+    try {
+      return this.tidyTx(by, p, need, (urls) => (readFirst = urls));
+    } finally {
+      // a refusal rolled its transaction back; the PRs nobody has read yet are queued for the next PR pass after it
+      // (pr_read_requests, read by linkedPrsToRead), never read here: no GitHub call on the tool's request path
+      if (readFirst.length) {
+        const at = this.now();
+        tx(this.db, () => {
+          for (const url of readFirst) this.db.prepare(`INSERT INTO pr_read_requests (url, at) VALUES (?, ?) ON CONFLICT(url) DO UPDATE SET at = excluded.at`).run(url, at);
+        });
+      }
+    }
+  }
+
+  private tidyTx(by: Agent, p: { action: TidyAction; task?: string | null; into?: string | null; kind?: FileKind | null; ref?: string | null }, need: (v: string | null | undefined, what: string) => string, unread: (urls: string[]) => void): string {
+    return tx(this.db, () => {
+      const now = this.now();
+      const r = this.taskGuard(() =>
+        p.action === "merge"
+          ? mergeTask(this.db, now, need(p.task, "task (the one to fold in)"), need(p.into, "into (the task that keeps it)"))
+          : p.action === "restore"
+            ? restoreTask(this.db, now, need(p.task, "task"))
+            : p.action === "confirm"
+              ? confirmDrop(this.db, now, need(p.task, "task"))
+              : fileItem(this.db, now, (p.kind ?? need(null, "kind (thread, pr, deliverable or card)")) as FileKind, need(p.ref, "ref (what to file)"), need(p.task, "task (where to file it)")),
+        unread,
+      );
+      if (r.project) settleColumns(this.db, now, { log: true, by: "cos", project: r.project });
+      const lead = r.project ? `lead:${r.project}` : null;
+      if (r.notice && lead && this.agentByAddress(lead)) this.put({ recipient: lead, sender: by.address, kind: "notice", ref: null, body: r.notice, needsAck: false });
+      this.ports.changed();
+      return r.text;
+    });
+  }
+
+  /**
+   * The stale-task flag (core/board-tidy.ts staleTasks), from the tick with the board settle: one notice per lead
+   * listing its tasks that look finished but have a live thread idling on them, each task at most once a day. A
+   * project with no lead is not stamped, so its lead hears once it starts.
+   */
+  flagStaleTasks(): StaleTask[] {
+    return tx(this.db, () => {
+      const now = this.now();
+      const byProject = new Map<string, StaleTask[]>();
+      for (const t of staleTasks(this.db, now)) byProject.set(t.project, [...(byProject.get(t.project) ?? []), t]);
+      const sent: StaleTask[] = [];
+      for (const [project, tasks] of byProject) {
+        const lead = `lead:${project}`;
+        if (!this.agentByAddress(lead)) continue;
+        const it = this.put({ recipient: lead, sender: "orchestrator", kind: "notice", ref: null, body: staleNotice(tasks), key: `stale-tasks:${tasks.map((t) => t.id).join(",")}:${now}`, needsAck: false });
+        if (this.settings.batchInbox) this.batch.policy(it.id, { severity: "ACTION" });
+        markStaleFlagged(this.db, now, tasks.map((t) => t.id));
+        sent.push(...tasks);
+      }
+      if (sent.length) this.ports.changed();
+      return sent;
+    });
   }
 
   /** A project's latest status, or null before its lead published one. */
@@ -5806,6 +5904,7 @@ export class Engine {
     if (this.now() - this.boardSettledAt >= 60_000) {
       this.boardSettledAt = this.now();
       this.settleBoard();
+      this.flagStaleTasks();
     }
   }
   private outdatedCheckedAt = 0;

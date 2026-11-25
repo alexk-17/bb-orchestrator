@@ -526,7 +526,7 @@ test("a step's own blocker marks its task Blocked, whichever step it is; the pro
   assert.throws(() => s.publish([{ title: "Build", state: "current", blocker: "x".repeat(101) }]), /step 1's blocker is 101 characters; the cap is 100/);
 });
 
-test("a retired thread's PR merge stays known after the PR wait's reading is pruned (it is in the PR log, once)", () => {
+test("a retired thread's PR merge stays known after the wait readings are pruned (a linked PR's reading is kept; the merge is in the PR log, once)", () => {
   const s = setup();
   const [a] = s.publish([{ title: "Build", state: "current" }]).steps.map((x) => x.id!);
   s.spawn("T-1", a);
@@ -536,8 +536,8 @@ test("a retired thread's PR merge stays known after the PR wait's reading is pru
   s.at(30);
   s.e.waitPrSeen(pr("merged"));
   s.e.waitPrSeen(pr("merged"));
-  s.e.pruneWaitReadings(); // the same server pass: no open wait names the PR, so its reading goes
-  assert.equal(s.db.prepare(`SELECT COUNT(*) AS c FROM pr_readings`).get()!.c, 0);
+  s.e.pruneWaitReadings(); // the same server pass: no open wait names the PR, but it is linked to a task, so its reading stays
+  assert.equal(s.db.prepare(`SELECT COUNT(*) AS c FROM pr_readings`).get()!.c, 1);
   const t = s.task(a!);
   assert.equal(t.column, "shipped", "not back to In review");
   assert.equal(t.since, T0 + 30 * MIN);
@@ -654,7 +654,7 @@ test("a PR two tasks' threads both read keeps both off Shipped while it is open,
   assert.deepEqual([s.task(a!).column, s.task(b!).column], ["shipped", "shipped"], "the URL's one reading serves both");
 });
 
-test("a PR only a thread's wait watches keeps its task off Shipped while unread or open, and after the wait closes and its reading is pruned", () => {
+test("a PR only a thread's wait watches keeps its task off Shipped while unread or open, and after the wait closes and the readings are pruned", () => {
   const s = setup();
   const [a] = s.publish([{ title: "Build", state: "current" }]).steps.map((x) => x.id!);
   const t = s.spawn("T-1", a);
@@ -670,7 +670,7 @@ test("a PR only a thread's wait watches keeps its task off Shipped while unread 
   assert.equal(s.db.prepare(`SELECT COUNT(*) AS c FROM waits WHERE closed_at IS NULL`).get()!.c, 0);
   assert.notEqual(s.task(a!).column, "shipped", "green is not merged");
   s.e.pruneWaitReadings();
-  assert.deepEqual(prsOf(s.task(a!), 30), [[null, t.address]], "its reading is gone: unknown again, still on the task");
+  assert.deepEqual(prsOf(s.task(a!), 30), [["open", t.address]], "a linked PR keeps its reading: still open, still on the task");
   assert.notEqual(s.task(a!).column, "shipped");
   s.at(20);
   s.e.waitPrSeen(pr("merged", 30));
@@ -1023,6 +1023,8 @@ test("the upgrade links a completed PR wait's PR: a wait met at green, its readi
   s.e.waitPrSeen(pr("open", 30, "passing"));
   assert.equal(s.db.prepare(`SELECT COUNT(*) AS c FROM waits WHERE closed_at IS NULL`).get()!.c, 0, "the wait is met");
   s.e.pruneWaitReadings();
+  // before the upgrade the prune kept no reading of a met wait's PR (links didn't exist yet): the old DB has none
+  s.db.prepare(`DELETE FROM pr_readings WHERE url = ?`).run(PR30);
   s.e.retire("T-1");
   rewindLinks(s);
   settleColumns(s.db as never, s.clock.t, { log: false });
