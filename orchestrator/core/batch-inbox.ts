@@ -36,14 +36,14 @@ interface Wake {
   note: string | null;
 }
 const token = () => randomBytes(16).toString("hex");
-/** Characters of digest a wake carries before it says "more: read orch_inbox" (live digests ran 1-5k, median 2.8k). */
+/** Characters of digest a wake carries before it says "more: read orch_inbox". */
 export const WAKE_DIGEST_CAP = 16_000;
 
 /** acked_at of a dead letter's entry: out of the unread, but never read. */
 const DROPPED = -1;
 /** A wake's note when the owner's Resend or the CoS's retry_wake restarted it: it goes now, gap or not. */
 const RESTARTED = "restarted";
-/** Who the wake gap holds (2026-11-24, the owner's call): leads only. */
+/** Who the wake gap holds: leads only. */
 const gapped = (recipient: string) => recipient.startsWith("lead:");
 
 export class BatchInbox {
@@ -56,12 +56,14 @@ export class BatchInbox {
     this.db = db;
     this.now = now;
     this.render = render;
-    // Named, idempotent schema: independent of the numbered migrations in the external-mail PR.
+    // Named, idempotent schema, outside the numbered migrations.
     db.exec(`CREATE TABLE IF NOT EXISTS inbox_entries (
       seq INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT NOT NULL UNIQUE,
       recipient TEXT NOT NULL, severity TEXT NOT NULL, needs_reply INTEGER NOT NULL,
       due_at INTEGER, acked_at INTEGER);
       CREATE INDEX IF NOT EXISTS inbox_unread ON inbox_entries(recipient, acked_at, seq);
+      -- here, not in MIGRATIONS: this table is made after the migrations run
+      CREATE INDEX IF NOT EXISTS inbox_actionable ON inbox_entries(seq) WHERE acked_at IS NULL;
       CREATE TABLE IF NOT EXISTS inbox_reads (
       token TEXT PRIMARY KEY, recipient TEXT NOT NULL, thread_id TEXT NOT NULL, through_seq INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS inbox_wakes (
@@ -75,9 +77,7 @@ export class BatchInbox {
   }
 
   sync(): void {
-    // The open states by name (an item is pending, queued, delivered, closed or dead), so items_state finds the few open
-    // ones instead of this scanning every item ever sent: it runs on every flush and every inbox read (2026-11-18, speed).
-    // Imported mail (external_mail) keeps its own policy: its severity, needs-reply and deadline, not the item's needs_ack.
+    // Open states by name so items_state is used. Imported mail keeps its own severity, needs-reply and deadline.
     this.db.exec(`      INSERT OR IGNORE INTO inbox_entries(item_id,recipient,severity,needs_reply,due_at)
       SELECT i.id,i.recipient,
         CASE WHEN x.item_id IS NOT NULL THEN (CASE WHEN json_extract(x.json,'$.severity')='INFO' THEN 'INFO' ELSE 'ACTION' END)
@@ -88,7 +88,6 @@ export class BatchInbox {
       WHERE i.state IN ('pending','queued','delivered') AND NOT EXISTS (SELECT 1 FROM inbox_entries e WHERE e.item_id=i.id) ORDER BY i.created_at,i.rowid;`);
   }
 
-  /** An item's read time (its cursor ack) and its recipient's wake, if one covers it, for receipts. */
   /** When the recipient read an item (acked it in a batch), null if not yet or dropped: receipt's readAt, without the wake. */
   readAt(itemId: string): number | null {
     const e = this.db.prepare(`SELECT acked_at FROM inbox_entries WHERE item_id=?`).get(itemId) as { acked_at: number | null } | undefined;
@@ -152,7 +151,6 @@ export class BatchInbox {
         cursor,
         count: rows.length,
         more,
-        // The rules are said once here, not on every item (2026-11-19, tokens): each item carries only its own flags.
         text: rows.length
           ? `${more ? `${rows.length} of ${all.length}` : rows.length} unread, oldest first. After handling, orch_ack(through=${JSON.stringify(cursor)}) marks them read and closes what needs no outcome. Items marked "outcome" stay open until orch_ack(id, outcome) or a reply with ref=<its id>; decisions still use orch_ack(id, outcome).${rows.some((r) => r.kind === "copy") ? " Copies are read-only: no ack or reply." : ""}\n` +
             parts.join("\n") +
@@ -185,10 +183,7 @@ export class BatchInbox {
       this.db.prepare(`UPDATE inbox_entries SET acked_at=? WHERE recipient=? AND seq<=? AND acked_at IS NULL`).run(this.now(), a.address, r.through_seq);
       // Do not cancel a queued wake: the same queue row can wake for remaining/new mail.
       this.db.prepare(`DELETE FROM inbox_wakes WHERE recipient=? AND through_seq<=? AND state NOT IN ('queued','sending')`).run(a.address, r.through_seq);
-      // A cursor ack that read something answers the wake that went out, even when it left mail unread (a digest past its
-      // cap): what is left gets a fresh wake, after the lead gap, instead of the retry resendMs later (2026-11-24: an
-      // ACTION item behind many held notices waited 10 minutes). Leads only: the CoS, the Steward and threads have no gap,
-      // so for them this would be a fresh wake 2 s later, and they keep the wakes they had.
+      // A cursor ack answers the sent wake even past the digest cap: what is left gets a fresh wake after the gap. Leads only.
       if (rows.length && gapped(a.address)) this.db.prepare(`DELETE FROM inbox_wakes WHERE recipient=? AND state='sent'`).run(a.address);
       return rows.length;
     });
@@ -210,7 +205,7 @@ export class BatchInbox {
     this.db.prepare(`UPDATE inbox_entries SET acked_at=? WHERE item_id=? AND acked_at IS NULL`).run(DROPPED, id);
   }
   /**
-   * All of an address's unread is dropped (2026-11-17): it is an address nothing reads, the engine's own, whose items its
+   * All of an address's unread is dropped: it is an address nothing reads, the engine's own, whose items its
    * cards' acks close. Its wake goes once no unread is left under it (flush clears it).
    */
   droppedFor(address: string): void {
@@ -345,13 +340,14 @@ export class BatchInbox {
     this.sync();
     this.clearAcknowledgedWakes();
     const now = this.now();
+    // only imported mail can be paused
     const rows = this.db
       .prepare(
-        `SELECT recipient, item_id FROM inbox_entries WHERE acked_at IS NULL
-      AND (severity!='INFO' OR needs_reply=1 OR (due_at IS NOT NULL AND due_at<=?)) ORDER BY seq`,
+        `SELECT e.recipient, e.item_id, x.item_id IS NOT NULL AS ext FROM inbox_entries e LEFT JOIN external_mail x ON x.item_id=e.item_id
+      WHERE e.acked_at IS NULL AND (e.severity!='INFO' OR e.needs_reply=1 OR (e.due_at IS NOT NULL AND e.due_at<=?)) ORDER BY e.seq`,
       )
-      .all(now) as { recipient: string; item_id: string }[];
-    const actionable = [...new Set(rows.filter((r) => !o.paused?.(r.item_id)).map((r) => r.recipient))].map((recipient) => ({ recipient }));
+      .all(now) as { recipient: string; item_id: string; ext: number }[];
+    const actionable = [...new Set(rows.filter((r) => !(r.ext && o.paused?.(r.item_id))).map((r) => r.recipient))].map((recipient) => ({ recipient }));
     for (const { recipient } of actionable) {
       if (this.inflight.has(recipient)) continue;
       this.db
@@ -360,8 +356,7 @@ export class BatchInbox {
         )
         .run(recipient, token(), now + o.debounceMs, recipient);
       let w = this.db.prepare(`SELECT * FROM inbox_wakes WHERE recipient=?`).get(recipient) as Wake | undefined;
-      // Its mail was read and acked while this flush waited on an earlier recipient's delivery: nothing is left to wake
-      // for, so no wake row was made. Reading w.state threw and dropped the rest of the flush (and the clock's pass).
+      // Acked while this flush awaited an earlier delivery: no wake row was made.
       if (!w) continue;
       const a = o.agent(recipient);
       if (!a || o.held(a) || !["idle", "unknown", "error"].includes(a.status)) continue;
@@ -376,10 +371,8 @@ export class BatchInbox {
           o.dead?.(recipient, w.token, w.note ?? "wake unacknowledged after two attempts");
         }
       }
-      // The wake gap (2026-11-24): a new wake for a lead goes no sooner than gapMs after its last one, so a burst of mail
-      // is one turn. The deferral is written to due_at, so the wake timer fires for it. It is worked out again at every
-      // flush from the wake's own debounce (a due_at never later than now + debounce), never from an earlier deferral:
-      // urgent unread pulls it back whatever the gap, and a gap lowered or turned off shortens a deferral already made.
+      // A lead's wake goes no sooner than gapMs after its last. The deferral is recomputed each flush from the wake's own
+      // debounce, never from an earlier deferral, so urgent unread or a lowered gap pulls it back.
       const gap = o.gapMs ?? 0;
       if (w.state === "pending" && w.attempts === 0 && w.note !== RESTARTED && gapped(recipient)) {
         const base = Math.min(w.due_at, now + o.debounceMs);
@@ -401,8 +394,7 @@ export class BatchInbox {
         continue;
       }
       try {
-        // The wake carries the digest (2026-11-19, tokens: the orch_inbox call every wake began with was 4.6% of a
-        // host's spend). Its cursor covers only what it shows; later mail stays unread and gets its own wake.
+        // The digest's cursor covers only what it shows; later mail stays unread and gets its own wake.
         const bare = `[orchestrator] Inbox wake ${w.token}. Actionable unread mail is waiting. Read ALL unread with orch_inbox, handle the digest, then orch_ack(through=<returned cursor>). This wake is not the mail; unread persists until acknowledged.`;
         const d = this.read(a, WAKE_DIGEST_CAP);
         const text = d.cursor

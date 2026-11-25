@@ -74,7 +74,7 @@ import {
   type Card,
   type Watchers,
 } from "./contract.ts";
-import type { Db } from "./core/db.ts";
+import { tuneConnection, type Db } from "./core/db.ts";
 import { deliverableIndex, deliverableRows, deliverableWhole } from "./core/deliverables-view.ts";
 import { type DeliverResult, Engine, OUTPUT_KINDS, parseSince, type PrResult, type Settings, WAIT_WHEN } from "./core/engine.ts";
 import { PINS_MAX } from "./core/pins.ts";
@@ -257,7 +257,9 @@ export default async function plugin(bb: BbPluginApi) {
   const notices = new ChangeTables(KNOWN_TABLES);
   const reads = new ReadCache(5_000, Date.now);
   const loop = loopDelay();
-  const db = recordWrites(bb.storage.database() as unknown as Db, (tables) => {
+  const raw = bb.storage.database() as unknown as Db;
+  tuneConnection(raw); // before the migrations: PRAGMA synchronous can't change inside a transaction
+  const db = recordWrites(raw, (tables) => {
     notices.wrote(tables);
     reads.bump();
   });
@@ -2274,7 +2276,7 @@ export default async function plugin(bb: BbPluginApi) {
               prUrls: pr?.url ? [pr.url] : [],
             };
           });
-          const decisions = engine.decisions(5000).filter((decision) => decision.project === slug);
+          const decisions = engine.projectDecisions(slug);
           const prs = engine.knownPrs().filter((p) => p.project === slug);
           const deliverables = engine.deliverables().filter((deliverable) => deliverable.project === slug);
           const waits = engine.openWaits();
@@ -2346,7 +2348,7 @@ export default async function plugin(bb: BbPluginApi) {
         const issues = await mapPathwaysLimited(ids, 8, async (id) => (await request<{ issue: PathwaysIssue | null }>(detailQuery, id)).issue);
         if (issues.some((issue) => !issue)) return failure("Pathways Linear issue details were missing. Try Refresh.");
         const map = pathwaysMap(issues[0]!, issues.slice(1) as PathwaysIssue[]);
-        const decisions = engine.decisions(5000).filter((decision) => decision.project === slug);
+        const decisions = engine.projectDecisions(slug);
         linkPathwaysDecisions(map, issues.slice(1) as PathwaysIssue[], decisions.map((decision) => ({ id: decision.id, state: decision.state, title: decision.request.title, context: decision.request.context, project: decision.project, prUrls: (decision.request.blocks ?? []).flatMap((block) => block.kind === "pr" ? [block.url] : []) })));
         for (const ticket of map.tickets) if (ticket.readiness.state === "needs decision" || ticket.displayState === "blocked") ticket.decisionDraft = draftPathwaysDecision(ticket);
         const deliverables = engine.deliverables().filter((deliverable) => deliverable.project === slug);

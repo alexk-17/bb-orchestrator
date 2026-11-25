@@ -102,8 +102,6 @@ export const MIGRATIONS: string[] = [
    DROP TABLE agents;
    ALTER TABLE agents_v2 RENAME TO agents;
    CREATE UNIQUE INDEX agents_live_address ON agents (address) WHERE retired_at IS NULL`,
-  // Phase 2 (docs/phase2-plan.md): projects with priority and hold, spawns against approved plans, PR state per
-  // environment, and each agent's bb environment.
   `CREATE TABLE projects (
      slug TEXT PRIMARY KEY,
      bb_project_id TEXT,
@@ -133,8 +131,7 @@ export const MIGRATIONS: string[] = [
    ALTER TABLE agents ADD COLUMN environment_id TEXT;
    ALTER TABLE agents ADD COLUMN flags TEXT NOT NULL DEFAULT '';
    ALTER TABLE agents ADD COLUMN mon TEXT`,
-  // Phase 3: Outputs, the finished artefacts a lead or thread recorded for the owner (the earlier Docs record). A file is kept
-  // as its realpath and the bb host it is on (for bb's preview); a link as its URL. One of path or url, never both.
+  // outputs: a file is its realpath and bb host (for bb's preview), a link its URL; one of path or url, never both.
   `CREATE TABLE outputs (
      id TEXT PRIMARY KEY,
      title TEXT NOT NULL,
@@ -149,8 +146,7 @@ export const MIGRATIONS: string[] = [
      at INTEGER NOT NULL
    );
    CREATE INDEX outputs_project ON outputs (project, at)`,
-  // Dreams (phase 3, gap 5): one nightly batch per date in the dream zone, its whole state as JSON (so a restart
-  // neither re-launches nor files a second card), and one memory check per date.
+  // dreams: one batch per date, its whole state as JSON so a restart neither re-launches nor files a second card.
   `CREATE TABLE dream_batches (
      date TEXT PRIMARY KEY,
      run TEXT NOT NULL,
@@ -165,8 +161,7 @@ export const MIGRATIONS: string[] = [
      posted INTEGER NOT NULL,
      at INTEGER NOT NULL
    )`,
-  // Deliverables (docs/deliverables-plan.md): a lead's finished work for the owner, with proof. The row's columns are what
-  // the screens sort and filter by; the json holds the revisions (each with its proof) and the owner's feedback.
+  // deliverables: the columns are what the screens sort and filter by; json holds the revisions and the owner's feedback.
   `CREATE TABLE deliverables (
      id TEXT PRIMARY KEY,
      project TEXT,
@@ -180,8 +175,7 @@ export const MIGRATIONS: string[] = [
      json TEXT NOT NULL
    );
    CREATE INDEX deliverables_state ON deliverables (state, updated_at)`,
-  // Levels (2026-11-13): XP is the tokens an agent's turns processed. It is kept per address, so a restarted
-  // lead or a handed-over thread keeps levelling; the cursor is per bb thread (the last usage event counted).
+  // XP is per address, so a restarted lead or handed-over thread keeps it; the cursor is per bb thread.
   `CREATE TABLE xp (
      address TEXT PRIMARY KEY,
      tokens INTEGER NOT NULL,
@@ -191,8 +185,6 @@ export const MIGRATIONS: string[] = [
      thread_id TEXT PRIMARY KEY,
      seq INTEGER NOT NULL
    )`,
-  // Requested 2026-11-13: leads evolve too and start at their base form, so each lead's final-form Pokémon becomes its
-  // line's base (Heracross, Jolteon and Rotom have no line: the kind's new pick). Its level then sets the form shown.
   `UPDATE agents SET mon = CASE mon
        WHEN 'Alakazam' THEN 'Abra'
        WHEN 'Espeon' THEN 'Eevee'
@@ -221,22 +213,15 @@ export const MIGRATIONS: string[] = [
        WHEN 'Gengar' THEN 'Gastly'
        ELSE mon END
    WHERE role = 'lead'`,
-  // An archived project: its agents retired, its open questions withdrawn, kept for the record. Starting its lead again
-  // brings it back.
   `ALTER TABLE projects ADD COLUMN archived_at INTEGER`,
-  // Dead letters go to the CoS (2026-11-15): each death gets the next sequence number (the hourly wake's cursor, as
-  // the clock can repeat) and its time; only the ones the CoS escalates reach the owner's board. Those already dead
-  // are on the board today and stay there. `cursors` holds named counters (the wake's last sequence and check time).
+  // A death's sequence number is the CoS wake's cursor (the clock can repeat). `cursors` holds named counters.
   `ALTER TABLE items ADD COLUMN dead_seq INTEGER;
    ALTER TABLE items ADD COLUMN dead_at INTEGER;
    ALTER TABLE items ADD COLUMN on_board INTEGER NOT NULL DEFAULT 0;
    UPDATE items SET on_board = 1 WHERE state = 'dead';
    CREATE TABLE cursors (name TEXT PRIMARY KEY, value INTEGER NOT NULL)`,
-  // A reply counts as the ack (2026-11-16): when an agent last went idle, kept through its next turn (idle_at is
-  // cleared when it turns active), so a reply can tell whether a message arrived for the turn it is in.
+  // idle_at is kept through the next turn, so a reply can tell whether a message arrived for the turn it is in.
   `ALTER TABLE agents ADD COLUMN last_idle_at INTEGER`,
-  // Answers that wait on a PR (2026-11-16): an ack bound to a PR and a condition. The PR notices wake its owner with
-  // the original answer once the condition holds; the tick nudges it each day it doesn't.
   `CREATE TABLE waits (
      id TEXT PRIMARY KEY,
      owner TEXT NOT NULL,
@@ -251,8 +236,7 @@ export const MIGRATIONS: string[] = [
      item_id TEXT
    );
    CREATE INDEX waits_open ON waits (closed_at, pr_url)`,
-  // Rules from answers (2026-11-16): a rule made from the owner's answers carries what it matches (rules.ts) and settles
-  // those cards by itself. Each offer to the CoS is kept with its evidence, so the same cards are offered once.
+  // Each rule offer is kept with its evidence, so the same cards are offered once.
   `ALTER TABLE rules ADD COLUMN match TEXT;
    CREATE TABLE rule_offers (
      id TEXT PRIMARY KEY,
@@ -261,10 +245,9 @@ export const MIGRATIONS: string[] = [
      suggested TEXT NOT NULL,
      at INTEGER NOT NULL
    )`,
-  // The project page's history (2026-11-16): an append-only log of what changed and when. kind: spawn (value = role,
-  // ref = parent thread), status (value = the new status), pr (value = state, ref = url, note = number), handoff
-  // (thread_id = the successor, ref = the predecessor, value/note = new/old provider), retire, resolve (value = why).
-  // Rows rebuilt from older tables at the log's start have backfill = 1 (history.ts).
+  // events, append-only. kind: spawn (value = role, ref = parent thread), status (value = the new status), pr (value =
+  // state, ref = url, note = number), handoff (thread_id = successor, ref = predecessor, value/note = new/old provider),
+  // retire, resolve (value = why). backfill = 1: rebuilt from older tables (history.ts).
   `CREATE TABLE events (
      seq INTEGER PRIMARY KEY AUTOINCREMENT,
      at INTEGER NOT NULL,
@@ -278,8 +261,7 @@ export const MIGRATIONS: string[] = [
      backfill INTEGER NOT NULL DEFAULT 0
    );
    CREATE INDEX events_project ON events (project, at)`,
-  // A lead's structured status (2026-11-16, status.ts): the latest orch_status per project, as JSON. nudged_at: when its
-  // lead was told it went stale (once per stale period; a new publish clears it). Each publish is also an event.
+  // nudged_at: when the lead was told its status went stale (once per stale period; a new publish clears it).
   `CREATE TABLE lead_status (
      project TEXT PRIMARY KEY,
      address TEXT NOT NULL,
@@ -288,9 +270,7 @@ export const MIGRATIONS: string[] = [
      updated_at INTEGER NOT NULL,
      nudged_at INTEGER
    )`,
-  // Pokémon types per project (2026-11-16, mons.ts TYPES): each project's type, picked once and kept; and a stage kept
-  // through a change of Pokémon (the stage and the level it was kept at), so a re-assigned agent keeps its stage.
-  // The re-assignment itself is the engine's settleMons (it needs mons.ts), idempotent and run at every start.
+  // A project's type is picked once and kept; a kept stage survives a change of Pokémon.
   `ALTER TABLE projects ADD COLUMN mon_type TEXT;
    ALTER TABLE agents ADD COLUMN mon_stage INTEGER;
    ALTER TABLE agents ADD COLUMN mon_stage_level INTEGER`,
@@ -304,24 +284,15 @@ export const MIGRATIONS: string[] = [
      due_at INTEGER,
      UNIQUE(source, external_id)
    )`,
-  // The Projects tab as a source of truth (2026-11-16, core/book.ts): the owner's answers on one project, newest first
-  // (Decided), and every answer after a time (the search's window; what can cover a blocker, history.ts). Expression
-  // indexes: a query uses them only when it repeats json_extract(json, '$.answer.at') exactly. And the cards by state:
-  // the row summaries read the open ones on every refresh (padded to 100k cards, that read halves with it).
+  // Expression indexes: a query uses them only when it repeats json_extract(json, '$.answer.at') exactly.
   `CREATE INDEX decisions_project_answer ON decisions (project, json_extract(json, '$.answer.at'));
    CREATE INDEX decisions_answer_at ON decisions (json_extract(json, '$.answer.at'));
    CREATE INDEX decisions_state ON decisions (state)`,
-  // The book's other reads (core/book.ts, Codex review v3): a project's events of one kind newest first (its
-  // lead-status history, its merges), its deliverables and its board by time.
-  // Without them a sparse kind walks the project's whole log, the reports scan the board and the deliverables sort.
-  // And each merged PR's sightings by its URL: a merge counts at its first sighting, looked up here (only merge rows).
   `CREATE INDEX events_project_kind ON events (project, kind, at);
    CREATE INDEX deliverables_project ON deliverables (project, updated_at);
    CREATE INDEX board_project ON board (project, at);
    CREATE INDEX events_merged_ref ON events (ref, project, at) WHERE kind = 'pr' AND value = 'merged'`,
-  // Pinned documents (2026-11-17, core/pins.ts): what a project keeps at hand under its message box. A pin names its
-  // target (a file and its host, a URL, or a deliverable), never its content; "updated" is read when the tab loads.
-  // Unpinning sets unpinned_at (the row stays, for the record). At most PINS_MAX live per project.
+  // A pin names its target, never its content. Unpinning sets unpinned_at; the row stays.
   `CREATE TABLE project_pins (
      id TEXT PRIMARY KEY,
      project TEXT NOT NULL,
@@ -338,7 +309,6 @@ export const MIGRATIONS: string[] = [
      unpinned_at INTEGER
    );
    CREATE INDEX project_pins_live ON project_pins (project, unpinned_at, position)`,
-  // 1.10.0: a thread resolved while its PR stays open because someone else now owns it (orch_resolve handed_off)
   `CREATE TABLE handed_off_prs (
      id INTEGER PRIMARY KEY AUTOINCREMENT,
      project TEXT,
@@ -351,13 +321,8 @@ export const MIGRATIONS: string[] = [
      at INTEGER NOT NULL
    );
    CREATE INDEX handed_off_prs_project ON handed_off_prs (project, at)`,
-  // 1.11.0: a project's mode. While scoping, its lead's cards and deliverables wait in the owner's Scope pane only (no
-  // CoS triage, no Needs you, no standing rule); the owner's yes on its "Scoping done?" card makes it active. Every
-  // project that exists today is active.
   `ALTER TABLE projects ADD COLUMN mode TEXT NOT NULL DEFAULT 'active'`,
-  // 1.12.0: scoping tasks, the named parts of a project scoped with the owner while the rest goes the normal way (a project
-  // can have several; a name is unique among its open ones). A card or deliverable names its task in its JSON
-  // (scope_task); a thread started for one (orch_spawn_thread scope_task) has it on its spawn row, which a handoff moves.
+  // A scoping task's name is unique among its project's open ones. A spawn row's task moves with a handoff.
   `CREATE TABLE scoping_tasks (
      id TEXT PRIMARY KEY,
      project TEXT NOT NULL,
@@ -371,12 +336,9 @@ export const MIGRATIONS: string[] = [
    );
    CREATE UNIQUE INDEX scoping_tasks_open_name ON scoping_tasks (project, name COLLATE NOCASE) WHERE state = 'scoping';
    ALTER TABLE spawns ADD COLUMN scope_task TEXT`,
-  // 1.13.0: when the owner made a thread a task's scoping thread from the Projects view (null for one started with the
-  // task): the newest pick plans the task, whenever the thread itself started.
+  // null for a thread started with the task; the newest pick plans the task.
   `ALTER TABLE spawns ADD COLUMN scoped_at INTEGER`,
-  // PR waits read their own PR (2026-11-17): a wait on a PR no live environment shows reads it by URL with gh. Its last
-  // reading per URL, in prs' terms (sig as prSeen writes it); seen_at is when it last changed, read_at when it was read.
-  // Rows go once no open wait names the URL (pruneWaitReadings), and when bb's own reading covers the PR (prSeen).
+  // pr_readings: sig as prSeen writes it; seen_at is when it last changed, read_at when it was read.
   `CREATE TABLE pr_readings (
      url TEXT PRIMARY KEY,
      number INTEGER,
@@ -387,9 +349,7 @@ export const MIGRATIONS: string[] = [
      seen_at INTEGER NOT NULL,
      read_at INTEGER NOT NULL
    )`,
-  // Screenshots in the owner's direct messages (2026-11-17): each image the page sent, kept as a file at `path`; item_id
-  // is null until a message to that project's lead carries it (n: its place there). source_project: the bb project
-  // whose attachments took it (null: the plugin's own folder). Never the bytes.
+  // item_id is null until a message carries the image (n: its place there). source_project null: the plugin's own folder.
   `CREATE TABLE direct_images (
      id TEXT PRIMARY KEY,
      slug TEXT NOT NULL,
@@ -403,23 +363,14 @@ export const MIGRATIONS: string[] = [
      created_at INTEGER NOT NULL
    );
    CREATE INDEX direct_images_item ON direct_images (item_id)`,
-  // The CodeRabbit review queue (2026-11-18, review-queue/store.ts): its whole state as one JSON row, and the run lease
-  // that keeps two runs (or two plugin generations) from overlapping.
+  // The run lease keeps two runs, or two plugin generations, from overlapping.
   `CREATE TABLE review_queue_state (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL);
    CREATE TABLE review_queue_lease (id INTEGER PRIMARY KEY CHECK (id = 1), token TEXT NOT NULL, expires INTEGER NOT NULL)`,
-  // Speed (2026-11-18): an address's last report (lastReport, lastReportAt) is read once per live agent on every agents
-  // and scope read; without this each one scanned the whole board and sorted it.
   `CREATE INDEX board_from ON board (from_address, at)`,
-  // Speed (2026-11-18): each project's direct line (directLines: the owner's messages to its lead, newest first) is read on
-  // every board and projects read; items_recipient (recipient, state) found them but sorted them in a temp B-tree.
-  // Descending, so messages of the same millisecond keep the order that sort gave them (oldest of them first).
+  // Descending, so messages of the same millisecond keep their order (oldest of them first).
   `CREATE INDEX items_recipient_kind ON items (recipient, kind, created_at DESC)`,
-  // Speed (2026-11-18): the batched inbox's backfill (BatchInbox.sync) looks for open items on every flush and every
-  // inbox read; nearly all items are closed, so by state it reads a few rows instead of scanning them all.
   `CREATE INDEX items_state ON items (state)`,
-  // PR links (2026-11-19): an environment can hold more than one PR (a second PR after the first merged, or one the
-  // thread reported from another branch: core/pr-links.ts), so a PR's row is keyed by environment and URL. prFor reads the
-  // newest open one as the thread's PR; the others stay readable by URL.
+  // An environment can hold more than one PR, so a row is keyed by environment and URL; prFor reads the newest open one.
   `CREATE TABLE prs_v2 (
      environment_id TEXT NOT NULL,
      thread_id TEXT NOT NULL,
@@ -436,7 +387,6 @@ export const MIGRATIONS: string[] = [
    DROP TABLE prs;
    ALTER TABLE prs_v2 RENAME TO prs;
    CREATE INDEX prs_url ON prs (url)`,
-  // The Multiplayer tab (multiplayer/): the owner's boards, the leads' review records, and each watcher's last read.
   `CREATE TABLE multiplayer_boards (
      id TEXT PRIMARY KEY,
      channel TEXT NOT NULL UNIQUE,
@@ -471,8 +421,7 @@ export const MIGRATIONS: string[] = [
   `ALTER TABLE items ADD COLUMN about TEXT;
    UPDATE items SET about = 'msg:' || id WHERE kind = 'owner.message';
    CREATE INDEX items_about ON items (about, created_at)`,
-  // The highest thread number each project has given (2026-11-22): agent rows go when a retired thread takes another
-  // project or role, and spawn events age out, so neither alone remembers it. Seeded from both.
+  // Agent rows and spawn events both age out, so neither alone remembers the highest thread number. Seeded from both.
   `CREATE TABLE thread_numbers (
      project TEXT PRIMARY KEY,
      last INTEGER NOT NULL
@@ -492,12 +441,7 @@ export const MIGRATIONS: string[] = [
    CREATE TABLE slack_watch_events (key TEXT PRIMARY KEY, profile TEXT NOT NULL, channel TEXT NOT NULL,
      json TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0);
    CREATE INDEX slack_watch_pending ON slack_watch_events(profile,done)`,
-  // The slow reads (2026-11-23, lag): each index serves one read's query, so a LIMIT stops early instead of sorting a
-  // whole table. board: the Board tab, the feed's alarms and counts, the Projects tab's latest report (board_reports,
-  // read INDEXED BY). items: the feed's reply,
-  // last-message and left-out lookups. events: the Projects tab's merged PRs, a project page's thread ids. decisions:
-  // the feed's answered cards in post order (core/feed.ts ANSWERED_AT, read INDEXED BY), a project page's cards, open
-  // plans. deliverables: the Deliverables list and the feed's, newest first; the feed's columns are all in the index.
+  // board_reports and decisions_feed_answered are read INDEXED BY; decisions_feed_answered repeats feed.ts ANSWERED_AT.
   `CREATE INDEX IF NOT EXISTS board_at ON board (at);
    CREATE INDEX IF NOT EXISTS board_kind_at ON board (kind, at);
    CREATE INDEX IF NOT EXISTS board_reports ON board (project, at, title) WHERE kind IN ('report','pr');
@@ -514,12 +458,8 @@ export const MIGRATIONS: string[] = [
    CREATE INDEX IF NOT EXISTS deliverables_list ON deliverables (updated_at, id, state, project, created_at, json_extract(json, '$.revisions[#-1].at'))
      WHERE json_extract(json, '$.board') IS NULL;
    CREATE INDEX IF NOT EXISTS deliverables_board_list ON deliverables (updated_at, id) WHERE json_extract(json, '$.board') IS NOT NULL`,
-  // The work board (2026-11-23, core/tasks.ts and core/work-board.ts): a task is a lead's status step with an id. state:
-  // open, shipped (the step was done) or dropped (it left the list before it was done). norm: the title as the matcher
-  // compares it. unfiled: what a drop moved to the project's Unfiled list (JSON), null when nothing was attached (a quiet
-  // drop); the CoS reads these. hand_*: the owner's hand move (its column, time and the attachments' signature then;
-  // it holds while the signature stays). col/col_at: the column task_moves last logged. A spawn row names its thread's
-  // task. SEEDS below turns each project's current steps into tasks in the same transaction.
+  // tasks: norm is the title as the matcher compares it; unfiled is what a drop moved to Unfiled (JSON, null for a quiet
+  // drop); hand_* is the owner's hand move, held while hand_sig matches; col/col_at is the column task_moves last logged.
   `CREATE TABLE tasks (
      id TEXT PRIMARY KEY,
      project TEXT NOT NULL,
@@ -550,13 +490,8 @@ export const MIGRATIONS: string[] = [
    CREATE INDEX task_moves_at ON task_moves (at);
    CREATE INDEX task_moves_task ON task_moves (task, seq);
    ALTER TABLE spawns ADD COLUMN task TEXT`,
-  // The work board's PR log read (core/work-board.ts gather): each PR's last logged state, by URL. Without it every
-  // settle scanned the whole events table.
   `CREATE INDEX events_pr_ref_at ON events (ref, at) WHERE kind = 'pr'`,
-  // Durable PR links (2026-11-24, the owner's call; core/tasks.ts linkPr): one row per PR and
-  // task, written when the PR is first seen through any path, never pruned. via: how (bb's reading, a thread's
-  // report, a PR wait, the CoS filing it, or the upgrade); by: the address it came through. A PR's state is read per
-  // URL (prs, pr_readings, the PR log); none means unknown, which keeps the task off Shipped. SEEDS backfills it.
+  // task_prs: never pruned. by: the address the link came through. A PR with no state read is unknown, off Shipped.
   `CREATE TABLE task_prs (
      url TEXT NOT NULL,
      task TEXT NOT NULL,
@@ -568,20 +503,13 @@ export const MIGRATIONS: string[] = [
    );
    CREATE INDEX task_prs_task ON task_prs (task);
    CREATE INDEX task_prs_by ON task_prs (by)`,
-  // one address's task (core/tasks.ts addressTask: a PR link's task, its card's or wait's) over every holder, retired
-  // ones too; agents_live_address covers live ones only, so the lookup scanned agents (Codex's review of fec268d)
+  // addressTask looks up retired holders too, which agents_live_address doesn't cover.
   `CREATE INDEX agents_address_created ON agents (address, created_at)`,
-  // The CoS's board tidy (2026-11-23, core/board-tidy.ts): merged_into is the task a merged task now is (it stays
-  // dropped, and its id redirects there); stale_flag_at is when the lead was last told the task looks done but a
-  // thread idles on it (at most once a day).
+  // merged_into: a merged task stays dropped and its id redirects there. stale_flag_at: at most once a day.
   `ALTER TABLE tasks ADD COLUMN merged_into TEXT;
    ALTER TABLE tasks ADD COLUMN stale_flag_at INTEGER`,
-  // Every owner of a PR link (2026-11-24, the owner's call on the CoS tidy; core/tasks.ts linkPr): task_prs keeps one
-  // row per PR and task, the link the board reads, and this keeps each reason it is there, one row per address (by;
-  // '' for none) and path (via). A tidy that moves an attachment moves its owner rows, and a link goes only when its
-  // last owner leaves: the evidence that made it (reports, readings) can be pruned, so owners are stored, not
-  // re-derived. The links already there get their own owner from the link itself, then every owner the DB can
-  // still recover (SEEDS: seedPrOwners).
+  // One row per reason a link exists (by: '' for none). Stored, not re-derived: the evidence can be pruned. A link goes
+  // only when its last owner leaves.
   `CREATE TABLE task_pr_owners (
      url TEXT NOT NULL,
      task TEXT NOT NULL,
@@ -593,11 +521,20 @@ export const MIGRATIONS: string[] = [
    CREATE INDEX task_pr_owners_task ON task_pr_owners (task);
    CREATE INDEX task_pr_owners_by ON task_pr_owners (by);
    INSERT OR IGNORE INTO task_pr_owners (url, task, by, via, first_at) SELECT url, task, coalesce(by, ''), via, first_at FROM task_prs`,
-  // PRs the CoS's tidy was refused for because nobody has read them yet (2026-11-24, the lead's call; core/board-tidy.ts):
-  // the next PR pass reads each by URL with the linked ones (Engine.linkedPrsToRead), so the CoS can file it again after
-  // it. No task link. A request goes once its PR is linked, or after a day.
+  // A request goes once its PR is linked, or after a day.
   `CREATE TABLE pr_read_requests (url TEXT PRIMARY KEY, at INTEGER NOT NULL)`,
+  `CREATE INDEX outputs_at ON outputs (at, id);
+   DROP INDEX handed_off_prs_project;
+   DROP INDEX multiplayer_records_board`,
 ];
+
+/** Per connection, outside any transaction: bb sets WAL, busy_timeout and auto_vacuum; these add to them. */
+export function tuneConnection(db: Db): void {
+  db.exec("PRAGMA synchronous = NORMAL");
+  db.exec("PRAGMA cache_size = -32768");
+  db.exec("PRAGMA mmap_size = 268435456");
+  db.exec("PRAGMA temp_store = MEMORY");
+}
 
 /**
  * Data steps that need code, by the index of the migration they follow: each runs right after that statement, in its
@@ -622,11 +559,7 @@ export function migrate(db: Db): void {
   });
 }
 
-/**
- * Prepares `sql`, which reads a table `INDEXED BY index`. SQLite refuses a hint on a missing index ("no such index" at
- * prepare), so when the index is gone (dropped, or never built) this prepares the same query without the hint: slower,
- * same rows, never a failed read (2026-11-23, lag review).
- */
+/** SQLite refuses INDEXED BY a missing index at prepare; without the index this prepares the query unhinted. */
 export function prepareHinted(db: Db, index: string, sql: string): Stmt {
   try {
     return db.prepare(sql);
