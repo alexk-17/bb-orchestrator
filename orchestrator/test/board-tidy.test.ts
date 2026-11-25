@@ -1,11 +1,3 @@
-// The CoS's board tidy (the work board scope) and the stale-task flag. The board is only as good as its tasks:
-// - a duplicate task folded into another must take everything with it, and its old id must keep pointing at the task
-//   that carries on, or the lead's next publish (or a plan card that still names it) quietly splits the work again;
-// - a task dropped by mistake comes back with its attachments, and its lead is told to send it back (or it drops again);
-// - an Unfiled thread, PR, deliverable or card filed by the CoS lands on that task's card, never across projects;
-// - only the CoS may tidy: a lead or thread moving other leads' work around would make the board untrustworthy;
-// - every tidy is on the record (task_moves by cos; thread 3's since-T counts read it) and the lead hears about it;
-// - a task whose PRs all merged sits In progress while a forgotten thread idles on it: its lead is told, once a day.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
@@ -338,7 +330,7 @@ test("filing a PR no thread holds moves only the CoS's own link: one a thread re
   );
 });
 
-// Codex's review of a754e92: a tidy must never make a task wrongly Shipped. Filing brings what the attachment carries
+// A tidy must never make a task wrongly Shipped. Filing brings what the attachment carries
 // (the shared retained-evidence pass restore and the upgrade use), a thread's move keeps on its old task what is still
 // needed there, and a lead's done task never swallows unfinished work.
 const linksOf = (s: ReturnType<typeof setup>, url: string) => s.db.prepare(`SELECT task FROM task_prs WHERE url = ? ORDER BY task`).all(url).map((r) => (r as { task: string }).task);
@@ -403,7 +395,7 @@ test("a merge into a task its lead marked done is refused while the incoming tas
   assert.match(s.tidy({ action: "merge", task: c, into: b }), /Merged/);
 });
 
-// Codex's review of db5a220: every owner of a link is stored (task_pr_owners), so a link goes only when its last owner
+// Every owner of a link is stored (task_pr_owners), so a link goes only when its last owner
 // leaves, even after the evidence that made it is pruned; and an unresolved card is unfinished work too.
 const pruneReports = (s: ReturnType<typeof setup>) => s.db.prepare(`DELETE FROM board WHERE kind = 'pr'`).run();
 
@@ -468,7 +460,7 @@ test("the owners migration is appended last and gives each existing link its own
   assert.deepEqual([linksOf(s, "https://github.com/o/r/pull/91"), linksOf(s, "https://github.com/o/r/pull/92")], [[c], [a]], "the thread's link went with it; the CoS's stayed");
 });
 
-// Codex's review of 6a8f976: the owners migration stores every owner it can still recover, filing onto a done task is
+// The owners migration stores every owner it can still recover, filing onto a done task is
 // refused like a merge, and the board names a link's holder from its current owners.
 test("the owners migration stores both threads' reports of one PR, so a move after retention keeps the link for the other", () => {
   const s = setup();
@@ -528,7 +520,7 @@ test("the board names a shared PR's holder from the owners still on the task, no
   assert.ok(touches({ tables: ["task_pr_owners"] }, "workBoard"), "an owner change refetches the board");
 });
 
-// the lead's call on the refusal above: a PR nobody has read can't be judged, so the refusal queues it for the next PR
+// A PR nobody has read can't be judged, so the refusal queues it for the next PR
 // pass (pr_read_requests, no link, no GitHub call here), and once that pass reads it merged the same filing succeeds
 test("a PR nobody has read is refused onto a done task, read by the next PR pass, then files", () => {
   const s = setup();
@@ -548,7 +540,7 @@ test("a PR nobody has read is refused onto a done task, read by the next PR pass
   assert.equal(s.db.prepare(`SELECT COUNT(*) AS n FROM pr_read_requests`).get()!.n, 0, "filed: the request ends");
 });
 
-// Codex's review of 709a962 (shipped at a7b6153, fixed in the next patch): what a filing brings is every PR that gains
+// What a filing brings is every PR that gains
 // an owner on the target, whoever owns it, and a link whose owners name nobody shows no holder.
 function retiredAskerWithLeadWait(s: ReturnType<typeof setup>, waitPr: number) {
   const stray = s.e.register("T-9", "thread", "demo", "T-lead"); // on no task
@@ -596,7 +588,7 @@ test("a link whose only owner left is the CoS's own filing shows no holder, not 
   assert.equal(s.task(c!).prs.find((p) => p.url === url)!.thread, th.address);
 });
 
-// From the live filing (2026-11-25): a PR last read "open" by a thread since resolved is never polled again, so a
+// A PR last read "open" by a thread since resolved is never polled again, so a
 // refusal queues every PR not read merged or closed, not only unread ones; the next pass reads it, and filing succeeds
 test("a PR last read open by a retired holder and merged since is queued by the refusal, read merged, then files", () => {
   const s = setup();
@@ -633,4 +625,34 @@ test("a PR that is really open is queued once by repeated refusals: one request,
   s.at(24 * 60 + 40); // a day after the last refusal, the request ends
   s.e.pruneWaitReadings();
   assert.equal(s.db.prepare(`SELECT COUNT(*) AS n FROM pr_read_requests`).get()!.n, 0);
+});
+
+test("list shows each project's Shipped tasks, newest first and bounded, so merged work can be filed under one that shipped weeks ago", () => {
+  const s = setup();
+  const DAY = 24 * HOUR;
+  const shipped: string[] = [];
+  for (let i = 1; i <= 7; i++) {
+    s.clock.t = T0 + (i - 1) * DAY;
+    shipped.push(s.publish([{ title: "Keep", state: "current" }, { title: `Ship ${i}`, state: "done" }]).steps[1]!.id!);
+  }
+  s.db.prepare(`INSERT INTO tasks (id, project, title, norm, state, created_at) VALUES ('t-0000aa', 'demo', 'Old ship', 'old ship', 'shipped', ?)`).run(T0);
+  s.clock.t = T0 + 20 * DAY;
+  const otherLead = s.e.register("T-lead2", "lead", "other");
+  const [theirs, undated] = s.e.publishStatus(otherLead, statusParams.parse({ goal: "Other work", steps: [{ title: "Their ship", state: "done" }, { title: "Their old ship", state: "done" }] })).steps.map((x) => x.id!);
+  s.db.prepare(`UPDATE tasks SET shipped_at = NULL WHERE id = ?`).run(undated); // as the upgrade left a done step
+  s.clock.t = T0 + 30 * DAY; // every one shipped before the board's one-week window
+  const text = s.tidy({ action: "list", project: "demo" });
+  assert.ok(!text.includes(theirs), "a project lists only its own Shipped tasks");
+  const newest = [7, 6, 5, 4, 3].map((i) => `${shipped[i - 1]} "Ship ${i}" \\[Shipped 2026-11-${22 + i}\\]`);
+  assert.match(text, new RegExp(`Shipped tasks \\(newest first\\): ${newest.join("; ")}; and 2 older`), "the newest five, then a count");
+  for (const id of [shipped[0], shipped[1]]) assert.ok(!text.includes(id!), `${id} is counted, not listed`);
+  assert.ok(!text.includes("t-0000aa"), "an undated task out of its lead's list is on no board, and the filing guard reads the board: not offered");
+  assert.match(text, /Open tasks: t-[0-9a-f]{6} "Keep" \[In progress\]/, "open tasks are listed as before");
+  const all = s.tidy({ action: "list" });
+  assert.match(all, new RegExp(`## other\\nNo open tasks\\.\\nShipped tasks \\(newest first\\): ${theirs} "Their ship" \\[Shipped 2026-12-13\\]; ${undated} "Their old ship" \\[Shipped\\]$`, "m"), "with nothing to tidy, a project still shows its Shipped tasks: a wrong PR on one is the CoS's to find");
+  assert.match(all, new RegExp(`## demo\\n[^#]*${newest.join("; ")}; and 2 older`));
+  for (const [n, task] of [[140, shipped[6]!], [141, undated!]] as const) {
+    s.e.waitPrSeen(pr("merged", n));
+    assert.match(s.tidy({ action: "file", kind: "pr", ref: `https://github.com/o/r/pull/${n}`, task }), /Filed PR/, "a listed Shipped task, dated or not, is a target file accepts merged work on");
+  }
 });

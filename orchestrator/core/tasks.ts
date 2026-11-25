@@ -1,4 +1,4 @@
-// Work-board tasks (2026-11-23, SCOPE st-070570dd piece 3): a task is a lead's status step with a stable id, so the board
+// Work-board tasks: a task is a lead's status step with a stable id, so the board
 // keeps one card per step through rewording. orch_status steps carry an optional id; a step without one matches, by its
 // normalised title (status.ts normTitle), the task the lead's stored list holds under that title, then an open task of
 // the project, then one dropped in the last 14 days (a re-added title finds its old id; REVIVE_DROPPED_MS), else a new t-xxxxxx is made. A step that leaves the list is never deleted: done is Shipped, anything else is
@@ -18,9 +18,8 @@ import { settleColumns } from "./work-board.ts";
 export const TASK_ID_RE = /^t-[0-9a-f]{6}$/;
 /**
  * How long a dropped task can come back by its title: the board's since picker reaches 14 days. A title dropped longer
- * ago starts a new task, so a generic title ("QA", "Release") never brings back a stale task and its old attachments
- * (lead, 2026-11-24). An undated drop (the upgrade's) counts as old. An explicit id still brings back a dropped task
- * of any age.
+ * ago starts a new task, so a generic title ("QA", "Release") never brings back a stale task and its old attachments.
+ * An undated drop (the upgrade's) counts as old. An explicit id still brings back a dropped task of any age.
  */
 export const REVIVE_DROPPED_MS = 14 * 24 * 60 * 60_000;
 export type TaskState = "open" | "shipped" | "dropped";
@@ -118,7 +117,7 @@ export function assignTasks(db: Db, project: string, steps: LeadStatus["steps"],
   }
   const newest = (a: TaskRow, b: TaskRow) => (b.dropped_at ?? 0) - (a.dropped_at ?? 0);
   // a title match brings a dropped task back only within REVIVE_DROPPED_MS, on every path (a skipped step left in the
-  // list too: the Codex review of f26e3db); a step still skipped revives nothing, so it keeps its task at any age
+  // list too); a step still skipped revives nothing, so it keeps its task at any age
   const matches = (t: TaskRow | undefined, s: LeadStatus["steps"][number]) => !!t && (t.state !== "dropped" || stateOf(s.state) === "dropped" || now - (t.dropped_at ?? 0) <= REVIVE_DROPPED_MS);
   for (const [i, s] of steps.entries()) {
     if (out[i]) continue;
@@ -181,7 +180,7 @@ export const threadTask = (db: Db, threadId: string): string | null => (db.prepa
  * The one rule for an address's task, which the board's placement, every live link and the seed all use: only a
  * thread's address has one, the spawn row's of its latest holder that has one (a handoff successor has no spawn row
  * and works on its predecessor's task). A lead, the CoS, or a thread that took another role, has none: a spawn row
- * that outlives its thread's role names no task for the new address (Codex's review of 7391d9b).
+ * that outlives its thread's role names no task for the new address.
  */
 const ADDRESS_TASK = `SELECT a.address, s.task FROM agents a JOIN spawns s ON s.thread_id = a.thread_id WHERE a.role = 'thread'`;
 
@@ -205,8 +204,8 @@ export type PrVia = "bb" | "report" | "wait" | "handoff" | "card" | "deliverable
 
 /**
  * Link a PR to a task, once (task_prs, keyed by URL and task: a PR two tasks share is two rows). The first sight
- * wins: later ones change nothing, and nothing prunes the row, so the board never loses a PR that blocks Shipped
- * (the owner's call, durable PR links). No task, or not a PR URL: nothing.
+ * wins: later ones change nothing, and nothing prunes the row, so the board never loses a PR that blocks Shipped.
+ * No task, or not a PR URL: nothing.
  */
 export function linkPr(db: Db, url: string, task: string | null, via: PrVia, by: string | null, at: number): void {
   const key = prKey(url);
@@ -337,11 +336,6 @@ export function seedPrOwners(db: Db): void {
   db.exec(`DROP TABLE temp.seed_links`);
 }
 
-/**
- * Link what the DB keeps for PRs, the one pass the upgrade (all of it) and a restored task (`scope`: the task and its
- * threads' addresses) share, so they read the same sources: the threads' evidence and the waits bound to the cards,
- * the cards' PR blocks (the task's own and its threads'), and the deliverables' PR blocks and proof.
- */
 export function linkRetained(db: Db, scope: { task: string; addresses: string[] } | null): void {
   const list = JSON.stringify(scope?.addresses ?? []);
   const cardWhere = scope
@@ -386,7 +380,7 @@ export function refile(db: Db, t: TaskRow): void {
   for (const id of u.deliverables) db.prepare(`UPDATE deliverables SET json = json_set(json, '$.task', ?) WHERE id = ? AND json_extract(json, '$.task') IS NULL`).run(t.id, id);
   for (const id of u.cards) db.prepare(`UPDATE decisions SET json = json_set(json, '$.orchestrator.task', ?) WHERE id = ? AND json_extract(json, '$.orchestrator.task') IS NULL`).run(t.id, id);
   // what came back brings the PRs it gained while Unfiled (those links were never written: it had no task then),
-  // through the pass the upgrade uses, scoped to the task and its threads (Codex's reviews of 7391d9b and a65bfeb)
+  // through the pass the upgrade uses, scoped to the task and its threads
   const addresses = u.threads.flatMap((id) => (db.prepare(`SELECT address FROM agents WHERE thread_id = ? AND role = 'thread'`).all(successor(db, id)) as { address: string }[]).map((r) => r.address));
   linkRetained(db, { task: t.id, addresses: [...new Set(addresses)] });
 }

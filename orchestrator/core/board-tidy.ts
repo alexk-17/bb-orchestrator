@@ -1,4 +1,4 @@
-// The CoS's board tidy (2026-11-23, the work board scope): the CoS keeps the work board's tasks honest with one
+// The CoS's board tidy: the CoS keeps the work board's tasks honest with one
 // tool, orch_board_tidy. It reads the board (list), folds a duplicate task into another (merge: the attachments move
 // and the merged id redirects, core/tasks.ts followMerge), brings a dropped task back with what its drop moved to
 // Unfiled (restore), attaches an Unfiled thread, PR, deliverable or card to a task (file), and accepts a drop so it
@@ -8,8 +8,7 @@
 // the lead an INFO notice.
 //
 // staleTasks: a task whose attached PRs are all merged and deliverables all approved, held off Shipped only by live
-// threads that have all been idle for over a day (the owner, 2026-11-23): the engine flags it to its
-// lead at most once a day. No model, no UI.
+// threads that have all been idle for over a day: the engine flags it to its lead at most once a day.
 import type { BoardColumn, BoardTask, WorkBoard } from "../contract.ts";
 import type { Db } from "./db.ts";
 import { PR_URL_RE } from "./open-prs.ts";
@@ -173,7 +172,6 @@ function unfinished(db: Db, now: number, into: TaskRow, incoming: Incoming, agai
   for (const a of incoming.threads) if (!b || b.threads.some((t) => t.address === a && t.live)) out.push(`live thread ${a}`);
   for (const u of incoming.prs) {
     const p = b?.prs.find((x) => x.url === u);
-    // never read: the next PR pass reads it (queued by the engine), never a GitHub call here
     // not merged or closed by its newest state (none, or a reading nobody polls any more, such as a resolved thread's
     // last "open"): the next PR pass reads it again (queued by the engine), never a GitHub call here
     if (!p || (p.state !== "merged" && p.state !== "closed")) {
@@ -381,15 +379,22 @@ const parseUnfiled = (s: string | null): Unfiled | null => {
 };
 
 const COL: Record<BoardColumn, string> = { planned: "Planned", in_progress: "In progress", in_review: "In review", waiting: "Waiting on you", blocked: "Blocked", shipped: "Shipped" };
+const SHIPPED_LISTED = 5;
 
-/** list: what the CoS tidies, per project (only projects with something): drops to confirm or restore, Unfiled things, and the tasks to file them under. */
+/** list: per project with something to tidy or a Shipped task: drops to confirm or restore, Unfiled things, and the tasks to file them under. */
 export function tidyList(db: Db, now: number, project: string | null): string {
   const board: WorkBoard = readBoard(db, now, { project });
   const out: string[] = [];
+  // from the tasks, not the board's week of Shipped, but only those the board shows (the filing guard reads the board):
+  // dated, or an undated one still in its lead's list
+  const onBoard = `project = ? AND state = 'shipped' AND (shipped_at IS NOT NULL OR id IN (SELECT json_extract(s.value, '$.id') FROM lead_status l, json_each(iif(json_valid(l.json), l.json, NULL), '$.steps') s))`;
+  const newestShipped = db.prepare(`SELECT id, title, shipped_at FROM tasks WHERE ${onBoard} ORDER BY shipped_at IS NULL, shipped_at DESC, created_at DESC LIMIT ?`);
+  const shippedCount = db.prepare(`SELECT COUNT(*) AS n FROM tasks WHERE ${onBoard}`);
   for (const p of board.projects) {
     const u = p.unfiled;
     const unfiled = u.threads.length + u.prs.length + u.deliverables.length + u.cards.length;
-    if (!p.dropped.length && !unfiled && !project) continue;
+    const shipped = Number((shippedCount.get(p.slug) as { n: number | bigint }).n);
+    if (!p.dropped.length && !unfiled && !shipped && !project) continue;
     out.push(`## ${p.slug}`);
     if (p.dropped.length) {
       out.push(`Dropped with attachments (restore, merge into another task, or confirm):`);
@@ -404,6 +409,13 @@ export function tidyList(db: Db, now: number, project: string | null): string {
     }
     const open = p.tasks.filter((t: BoardTask) => t.state === "open");
     out.push(open.length ? `Open tasks: ${open.map((t) => `${t.id} ${q(t.title)} [${COL[t.column]}]`).join("; ")}` : "No open tasks.");
+    if (shipped) {
+      const shown = (newestShipped.all(p.slug, SHIPPED_LISTED) as { id: string; title: string; shipped_at: number | null }[]).map(
+        (t) => `${t.id} ${q(t.title)} [Shipped${t.shipped_at === null ? "" : ` ${new Date(t.shipped_at).toISOString().slice(0, 10)}`}]`,
+      );
+      const older = shipped - shown.length;
+      out.push(`Shipped tasks (newest first): ${shown.join("; ")}${older ? `; and ${older} older` : ""}`);
+    }
   }
   return out.length ? out.join("\n") : "The board is tidy: no drops to confirm and nothing Unfiled.";
 }

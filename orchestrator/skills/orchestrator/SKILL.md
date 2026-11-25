@@ -67,8 +67,9 @@ from the app's Needs you page, and write to a lead only from its Projects row (a
 - **The CoS sees the deliverables** with `orch_deliverables(project?, state?, since?)` (the Steward too): each lead's
   deliverables with their review state, the owner's note, and the latest revision's proof.
 - **The CoS tidies the work board** at each digest with `orch_board_tidy`. `action=list` shows each project's tasks
-  dropped with attachments, its Unfiled threads, PRs, deliverables and cards, and its open tasks. `merge(task, into)`
-  folds a duplicate into the task that carries on (its things move; its id redirects), `restore(task)` brings a
+  dropped with attachments, its Unfiled threads, PRs, deliverables and cards, its open tasks, and its newest Shipped
+  tasks (merged work can be filed under one). `merge(task, into)` folds a duplicate into the task that carries on
+  (its things move; its id redirects), `restore(task)` brings a
   dropped task back with its things (the lead is told to send it back in its steps), `file(kind, ref, task)` attaches
   an Unfiled thread, PR (with the thread that holds it; a PR no thread holds is filed itself, its state read from
   GitHub, unknown until read, which keeps the task off Shipped), deliverable or card to a task of its project, and
