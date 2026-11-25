@@ -66,6 +66,8 @@ export const COS_IMAGES = "@cos";
 const WHEN_WORDS: Record<WaitWhen, string> = { approved: "approved", green: "green (checks passing)", ready: "ready to merge", merged: "merged" };
 /** How far apart a handoff's retire and its successor's start may lie. */
 const HANDOFF_GAP_MS = 1000;
+const ROLE_TOOLS_NOTICE = "role-tools:";
+const roleToolsPrefix = (threadId: string) => `${ROLE_TOOLS_NOTICE}${threadId}:`;
 /** How long a pasted sign-in code stays on disk at most. */
 export const SECRET_TTL_MS = 30 * 60_000;
 import {
@@ -1216,11 +1218,14 @@ export class Engine {
 
   /** Retire a thread's role. Its unacked mail becomes dead letters (the CoS resends them), never the next holder's mail. */
   retire(threadId: string, keepMail = false, at = this.now()): void {
-    const a = this.agentByThread(threadId);
-    this.db.prepare(`UPDATE agents SET retired_at = ? WHERE thread_id = ? AND retired_at IS NULL`).run(at, threadId);
-    if (a) this.event({ at, kind: "retire", project: a.project, address: a.address, threadId });
-    if (a) this.batch.handoff(a.address); // its wake can't wake the next holder, and a dead or queued one would block that holder's wakes
-    if (!keepMail) this.deadLetterOrphans();
+    tx(this.db, () => {
+      const a = this.agentByThread(threadId);
+      this.db.prepare(`UPDATE agents SET retired_at = ? WHERE thread_id = ? AND retired_at IS NULL`).run(at, threadId);
+      if (a) this.event({ at, kind: "retire", project: a.project, address: a.address, threadId });
+      if (a) this.batch.handoff(a.address); // its wake can't wake the next holder, and a dead or queued one would block that holder's wakes
+      if (a) this.dropRoleToolsNotices(a);
+      if (!keepMail) this.deadLetterOrphans();
+    });
     this.ports.changed();
   }
 
@@ -1499,6 +1504,10 @@ export class Engine {
     const rows = (this.db.prepare(`SELECT * FROM items WHERE state = 'pending' ORDER BY created_at`).all() as ItemRow[]).map(toItem);
     for (const it of rows) {
       if (this.inflight.has(it.id)) continue;
+      if (it.sender === "orchestrator" && it.sendKey?.startsWith(ROLE_TOOLS_NOTICE)) {
+        this.closeItems(`id = ?`, [it.id], "superseded", "role-tools notices go only with a batch wake");
+        continue;
+      }
       const external = this.db.prepare(`SELECT source, quiet, due_at FROM external_mail WHERE item_id = ?`).get(it.id) as { source: string; quiet: number; due_at: number | null } | undefined;
       if (external && this.ports.externalEnabled?.(external.source, it.recipient) === false) continue;
       if (external?.quiet && (external.due_at === null || external.due_at > this.now())) continue;
@@ -4120,6 +4129,34 @@ export class Engine {
     if (wake && this.settings.batchInbox) this.batch.policy(it.id, { severity: "ACTION" });
   }
 
+  /** Only a batch wake carries these: per-message delivery would send each one alone and could start a runtime for it. */
+  roleToolsChanged(changes: readonly { role: Role; key: string; body: string }[]): string[] {
+    if (!this.settings.batchInbox) return [];
+    return tx(this.db, () => {
+      const told: string[] = [];
+      for (const c of changes)
+        for (const a of this.agents()) {
+          // unknown: a role given to a running thread, before the clock's first status read
+          if (a.role !== c.role || !["active", "idle", "unknown"].includes(a.status)) continue;
+          this.put({ recipient: a.address, sender: "orchestrator", kind: "notice", ref: null, body: c.body, key: `${roleToolsPrefix(a.threadId)}${c.key}`, needsAck: false });
+          told.push(a.address);
+        }
+      return told;
+    });
+  }
+
+  /** A role-tools notice is about one thread's process: whoever holds the address next started with the new tools. */
+  private dropRoleToolsNotices(a: Agent): void {
+    const prefix = roleToolsPrefix(a.threadId);
+    const ids = this.db
+      .prepare(`SELECT id FROM items WHERE recipient = ? AND kind = 'notice' AND sender = 'orchestrator' AND substr(send_key, 1, ?) = ?`)
+      .all(a.address, prefix.length, prefix) as { id: string }[];
+    for (const { id } of ids) {
+      this.closeItems(`id = ?`, [id], "superseded", "its thread no longer holds the address");
+      this.batch.dropped(id);
+    }
+  }
+
   alarm(level: string, snapshot: Record<string, unknown>, summary: string): Item | null {
     const steward = this.agentByAddress("steward");
     const id = `a-${hex(4)}`;
@@ -4574,6 +4611,7 @@ export class Engine {
       const agents = this.agents().filter((a) => a.project === slug && (a.role === "lead" || a.role === "thread"));
       const note = "project archived";
       for (const a of agents) {
+        this.dropRoleToolsNotices(a);
         this.closeItems(`recipient = ?`, [a.address], "superseded", note);
         this.db.prepare(`UPDATE agents SET retired_at = ? WHERE thread_id = ? AND retired_at IS NULL`).run(this.now(), a.threadId);
         this.event({ kind: "retire", project: a.project, address: a.address, threadId: a.threadId });

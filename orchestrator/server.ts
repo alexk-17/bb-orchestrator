@@ -77,6 +77,7 @@ import {
 import { tuneConnection, type Db } from "./core/db.ts";
 import { deliverableIndex, deliverableRows, deliverableWhole } from "./core/deliverables-view.ts";
 import { type DeliverResult, Engine, OUTPUT_KINDS, parseSince, type PrResult, type Settings, WAIT_WHEN } from "./core/engine.ts";
+import { ROLE_TOOLS_KEY, roleToolsChanges } from "./core/role-tools.ts";
 import { PINS_MAX } from "./core/pins.ts";
 import { DAY_MS, prune, pruneSummary } from "./core/retention.ts";
 import { GONE_CHECK_MS, lookThreads } from "./core/gone.ts";
@@ -1610,6 +1611,24 @@ export default async function plugin(bb: BbPluginApi) {
       skills: mem.tools.length ? ["orchestrator", "memory"] : ["orchestrator"],
       instructions: mem.instructions ? `${roleBrief(ownerWords(cfg.ownerName))[role]}\n\n${mem.instructions}` : roleBrief(ownerWords(cfg.ownerName))[role],
     };
+  });
+
+  bb.background.service("role-tools", {
+    async start() {
+      try {
+        const kept = await bb.storage.kv.get<unknown>(ROLE_TOOLS_KEY);
+        const { baseline, changes } = roleToolsChanges(kept, TOOLS_BY_ROLE);
+        if (changes.length) {
+          const told = engine.roleToolsChanged(changes);
+          bb.log.info(`role tools: ${changes.map((c) => c.role).join(", ")} changed; told ${told.join(", ") || "no running agent"}`);
+          void flush();
+        }
+        // after the notices: a crash in between replays the same keys, which tell nobody twice
+        if (JSON.stringify(baseline) !== JSON.stringify(kept)) await bb.storage.kv.set(ROLE_TOOLS_KEY, baseline);
+      } catch (e) {
+        bb.log.warn(`role tools: ${errText(e)}`);
+      }
+    },
   });
 
   bb.agents.contributeInstructions(({ threadId }) => {
