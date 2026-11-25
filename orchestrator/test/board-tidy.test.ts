@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { Engine, type PrResult } from "../core/engine.ts";
 import { MIGRATIONS, migrate } from "../core/db.ts";
 import { statusParams } from "../core/status.ts";
+import { addressTask, linkPr } from "../core/tasks.ts";
 import { touches } from "../change-notice.ts";
 import type { BoardTask } from "../contract.ts";
 
@@ -655,4 +656,398 @@ test("list shows each project's Shipped tasks, newest first and bounded, so merg
     s.e.waitPrSeen(pr("merged", n));
     assert.match(s.tidy({ action: "file", kind: "pr", ref: `https://github.com/o/r/pull/${n}`, task }), /Filed PR/, "a listed Shipped task, dated or not, is a target file accepts merged work on");
   }
+});
+
+test("filing a PR through its retired holder never drags along a PR already filed under another project's task", () => {
+  const s = setup();
+  const [, a, c] = s.publish([{ title: "Keep", state: "current" }, { title: "Merged work", state: "next" }, { title: "Other step", state: "next" }]).steps.map((x) => x.id!);
+  const otherLead = s.e.register("T-lead2", "lead", "other");
+  const [o] = s.e.publishStatus(otherLead, statusParams.parse({ goal: "Other work", steps: [{ title: "Merge all the PRs", state: "current" }] })).steps.map((x) => x.id!);
+  const holder = s.e.register("T-9", "thread", "demo", "T-lead"); // on no task
+  s.e.setEnvironment("T-9", "E9");
+  s.e.prSeen(holder, "E9", pr("merged", 110));
+  const url = (n: number) => `https://github.com/o/r/pull/${n}`;
+  for (const n of [111, 112, 113]) s.e.report(holder, `PR ${n}`, "Up.", url(n));
+  s.tidy({ action: "file", kind: "pr", ref: url(111), task: o! }); // reported in passing, filed under the other project's task
+  s.tidy({ action: "file", kind: "pr", ref: url(113), task: c! }); // filed under another task of the same project
+  s.e.retire("T-9");
+  s.tidy({ action: "file", kind: "pr", ref: url(110), task: a! });
+  assert.deepEqual(linksOf(s, url(111)), [o], "the other project's PR stays where the CoS filed it");
+  assert.deepEqual(linksOf(s, url(110)), [a]);
+  assert.deepEqual(linksOf(s, url(112)), [a], "a PR the holder reported that no task has still comes with it");
+  assert.deepEqual(linksOf(s, url(113)), [a, c].sort(), "a PR on another task of the same project is shared, as before");
+});
+
+test("filing through a retired holder onto a done task still refuses its unread PR, and never names another project's PR", () => {
+  const s = setup();
+  const [k, b] = s.publish([{ title: "Keep", state: "current" }, { title: "Done", state: "next" }]).steps.map((x) => x.id!);
+  const otherLead = s.e.register("T-lead2", "lead", "other");
+  const [o] = s.e.publishStatus(otherLead, statusParams.parse({ goal: "Other work", steps: [{ title: "Merge all the PRs", state: "current" }] })).steps.map((x) => x.id!);
+  const holder = s.e.register("T-9", "thread", "demo", "T-lead");
+  s.e.setEnvironment("T-9", "E9");
+  s.e.prSeen(holder, "E9", pr("merged", 120));
+  const url = (n: number) => `https://github.com/o/r/pull/${n}`;
+  for (const n of [121, 122]) s.e.report(holder, `PR ${n}`, "Up.", url(n));
+  s.tidy({ action: "file", kind: "pr", ref: url(121), task: o! });
+  s.e.retire("T-9");
+  s.publish([{ id: k, title: "Keep", state: "current" }, { id: b, title: "Done", state: "done" }]);
+  assert.throws(
+    () => s.tidy({ action: "file", kind: "pr", ref: url(120), task: b! }),
+    (e: Error) => /PR https:\/\/github.com\/o\/r\/pull\/122 \(not read yet/.test(e.message) && !/pull\/121/.test(e.message),
+    "the holder's own unread PR is unfinished work on a done task; the other project's PR is not the holder's to bring",
+  );
+  assert.deepEqual([linksOf(s, url(120)), linksOf(s, url(121)), linksOf(s, url(122))], [[], [o], []], "the refusal writes nothing");
+});
+
+test("a card filed away keeps the PR on its old task while another card's wait there still binds it, even when another project links the PR", () => {
+  const s = setup();
+  const [a, c] = s.publish([{ title: "One", state: "current" }, { title: "Two", state: "next" }]).steps.map((x) => x.id!);
+  const otherLead = s.e.register("T-lead2", "lead", "other");
+  const [o] = s.e.publishStatus(otherLead, statusParams.parse({ goal: "Other work", steps: [{ title: "Merge all the PRs", state: "current" }] })).steps.map((x) => x.id!);
+  const url = "https://github.com/o/r/pull/130";
+  s.tidy({ action: "file", kind: "pr", ref: url, task: o! });
+  const waitOn = () => {
+    const q = s.e.ask(s.lead, { title: "Merge?", question: "Merge it?", options: opts, task: a });
+    s.e.triageAskPerson(s.cos, q.id, { question: "Merge it?", options: opts, allowText: true });
+    s.e.personAnswer(q.id, s.e.decision(q.id)!.rev, "1", null, "desktop");
+    s.e.ack(s.lead, q.id, "done", null, { pr: url, when: "merged" });
+    return q;
+  };
+  const first = waitOn();
+  waitOn();
+  assert.deepEqual(linksOf(s, url), [a, o].sort());
+  s.tidy({ action: "file", kind: "card", ref: first.id, task: c! });
+  assert.ok(linksOf(s, url).includes(a), "the second card's wait still binds the PR to its task");
+});
+
+test("a card filed under another task takes its lead's PR wait along, even when another project links the PR: the wait still waits, so its task shows the PR", () => {
+  const s = setup();
+  const [a, c] = s.publish([{ title: "One", state: "current" }, { title: "Two", state: "next" }]).steps.map((x) => x.id!);
+  const otherLead = s.e.register("T-lead2", "lead", "other");
+  const [o] = s.e.publishStatus(otherLead, statusParams.parse({ goal: "Other work", steps: [{ title: "Merge all the PRs", state: "current" }] })).steps.map((x) => x.id!);
+  const url = "https://github.com/o/r/pull/131";
+  s.tidy({ action: "file", kind: "pr", ref: url, task: o! });
+  const q = s.e.ask(s.lead, { title: "Merge?", question: "Merge it?", options: opts, task: a });
+  s.e.triageAskPerson(s.cos, q.id, { question: "Merge it?", options: opts, allowText: true });
+  s.e.personAnswer(q.id, s.e.decision(q.id)!.rev, "1", null, "desktop");
+  s.e.ack(s.lead, q.id, "done", null, { pr: url, when: "merged" });
+  assert.deepEqual(linksOf(s, url), [a, o].sort());
+  s.tidy({ action: "file", kind: "card", ref: q.id, task: c! });
+  assert.deepEqual(linksOf(s, url), [c, o].sort());
+});
+
+test("another project's thread or CoS link wins over a thread's history, whichever of the thread and a card with a lead wait on the PR is filed first", () => {
+  for (const cardFirst of [false, true]) {
+    const s = setup();
+    const [a, b, c] = s.publish([{ title: "One", state: "current" }, { title: "Two", state: "next" }, { title: "Three", state: "next" }]).steps.map((x) => x.id!);
+    const otherLead = s.e.register("T-lead2", "lead", "other");
+    const [o] = s.e.publishStatus(otherLead, statusParams.parse({ goal: "Other work", steps: [{ title: "Merge all the PRs", state: "current" }] })).steps.map((x) => x.id!);
+    const url = "https://github.com/o/r/pull/132";
+    s.tidy({ action: "file", kind: "pr", ref: url, task: o! });
+    const q = s.e.ask(s.lead, { title: "Merge?", question: "Merge it?", options: opts, task: a });
+    s.e.triageAskPerson(s.cos, q.id, { question: "Merge it?", options: opts, allowText: true });
+    s.e.personAnswer(q.id, s.e.decision(q.id)!.rev, "1", null, "desktop");
+    s.e.ack(s.lead, q.id, "done", null, { pr: url, when: "merged" });
+    s.clock.t += HOUR;
+    const t = s.e.register("T-9", "thread", "demo", "T-lead"); // on no task
+    s.e.report(t, "PR 132", "Up.", url); // later than the lead's wait
+    const fileThread = () => s.tidy({ action: "file", kind: "thread", ref: t.address, task: b! });
+    const fileCard = () => s.tidy({ action: "file", kind: "card", ref: q.id, task: b! });
+    for (const f of cardFirst ? [fileCard, fileThread] : [fileThread, fileCard]) f();
+    assert.deepEqual(linksOf(s, url), [b, o].sort(), "the card's wait brings it");
+    s.tidy({ action: "file", kind: "thread", ref: t.address, task: c! });
+    assert.deepEqual(linksOf(s, url), [b, o].sort(), `${cardFirst ? "card" : "thread"} first: the thread never owned it on b, so it takes nothing along`);
+  }
+});
+
+function otherProjectWithHolder(s: ReturnType<typeof setup>) {
+  const [, a] = s.publish([{ title: "Keep", state: "current" }, { title: "Merged work", state: "next" }]).steps.map((x) => x.id!);
+  const otherLead = s.e.register("T-lead2", "lead", "other");
+  const [o] = s.e.publishStatus(otherLead, statusParams.parse({ goal: "Other work", steps: [{ title: "Release", state: "current" }] })).steps.map((x) => x.id!);
+  const holder = s.e.register("T-9", "thread", "demo", "T-lead"); // on no task
+  return { a: a!, o: o!, otherLead, holder };
+}
+
+test("a thread's or the CoS's link in another project says the PR's work lives there: a filed holder's history doesn't bring it", () => {
+  const s = setup();
+  const { a, o, otherLead, holder } = otherProjectWithHolder(s);
+  const url = (n: number) => `https://github.com/o/r/pull/${n}`;
+  const theirs = s.e.register("T-7", "thread", "other", "T-lead2");
+  s.tidy({ action: "file", kind: "thread", ref: theirs.address, task: o });
+  s.e.setEnvironment("T-7", "E7");
+  s.e.prSeen(theirs, "E7", pr("open", 150)); // the other project's thread works on it
+  s.tidy({ action: "file", kind: "pr", ref: url(151), task: o }); // the CoS filed it there
+  s.e.ask(otherLead, { title: "Review?", question: "Review this one?", options: opts, task: o, blocks: [{ kind: "pr", url: url(152) }] });
+  s.e.prSeen(theirs, "E7", pr("open", 152)); // named by a card first, then worked on there
+  for (const n of [150, 151, 152]) s.e.report(holder, `PR ${n}`, "Up.", url(n));
+  s.e.retire("T-9");
+  s.tidy({ action: "file", kind: "thread", ref: holder.address, task: a });
+  assert.deepEqual([linksOf(s, url(150)), linksOf(s, url(151)), linksOf(s, url(152))], [[o], [o], [o]], "who owns the link now counts, not who linked it first");
+});
+
+test("a card or deliverable in another project only names a PR: a filed holder's history still brings it to its own task", () => {
+  const s = setup();
+  const { a, o, otherLead, holder } = otherProjectWithHolder(s);
+  const url = (n: number) => `https://github.com/o/r/pull/${n}`;
+  s.e.deliver(otherLead, { title: "Release packet", summary: "The PRs in this release.", proof: [{ kind: "pr", caption: "in the release", url: url(160) }], task: o }, place);
+  s.e.ask(otherLead, { title: "Ship it?", question: "Release with these?", options: opts, task: o, blocks: [{ kind: "pr", url: url(161) }] });
+  assert.deepEqual([linksOf(s, url(160)), linksOf(s, url(161))], [[o], [o]], "each mention links on its own task, as on save");
+  for (const n of [160, 161]) s.e.report(holder, `PR ${n}`, "Up.", url(n));
+  s.e.retire("T-9");
+  s.tidy({ action: "file", kind: "thread", ref: holder.address, task: a });
+  assert.deepEqual([linksOf(s, url(160)), linksOf(s, url(161))], [[a, o].sort(), [a, o].sort()], "the holder's own task gets them too; the mentions keep theirs");
+});
+
+const M_URL = "https://github.com/o/r/pull/300";
+type MCtx = { s: ReturnType<typeof setup>; A: string; B: string; C: string; t?: ReturnType<Engine["register"]>; x?: string; d?: string };
+
+function mBase(claimed: boolean): MCtx {
+  const s = setup();
+  const [A, B, C] = s.publish([{ title: "One", state: "current" }, { title: "Two", state: "next" }, { title: "Three", state: "next" }]).steps.map((x) => x.id!);
+  const otherLead = s.e.register("T-lead2", "lead", "other");
+  const [O] = s.e.publishStatus(otherLead, statusParams.parse({ goal: "Other work", steps: [{ title: "Release", state: "current" }] })).steps.map((x) => x.id!);
+  if (claimed) s.tidy({ action: "file", kind: "pr", ref: M_URL, task: O! });
+  return { s, A: A!, B: B!, C: C! };
+}
+
+const mThread = (c: MCtx, on: string | null) => {
+  c.t = c.s.e.register("T-9", "thread", "demo", "T-lead");
+  if (on) c.s.tidy({ action: "file", kind: "thread", ref: c.t.address, task: on });
+  c.s.e.setEnvironment("T-9", "E9");
+  return c.t;
+};
+
+/** An answered card: the lead's (the owner answers; the lead acks), the thread's answered by its lead (the thread acks), or the thread's forwarded to the owner (the lead acks). */
+function mAnswered(c: MCtx, asker: "lead" | "thread" | "thread, forwarded", task: string | null): string {
+  const q = c.s.e.ask(asker === "lead" ? c.s.lead : c.t!, { title: "Merge?", question: "Merge it?", options: opts, ...(task ? { task } : {}) });
+  if (asker === "thread") return c.s.e.leadAnswer(c.s.lead, q.id, null, "1", "my call").id;
+  if (asker === "thread, forwarded") c.s.e.forward(c.s.lead, q.id, null);
+  c.s.e.triageAskPerson(c.s.cos, q.id, { question: "Merge it?", options: opts, allowText: true });
+  c.s.e.personAnswer(q.id, c.s.e.decision(q.id)!.rev, "1", null, "desktop");
+  return q.id;
+}
+
+/** What a thread does with the PR, by owner via, linked live on its task when it has one. */
+function mHistory(c: MCtx, via: "bb" | "report" | "handoff" | "thread wait", cardTask: string | null): void {
+  const t = c.t!;
+  if (via === "bb") c.s.e.prSeen(t, "E9", pr("open", 300));
+  else if (via === "report") c.s.e.report(t, "PR 300", "Up.", M_URL);
+  else if (via === "handoff") {
+    // as resolving a thread with its open PR handed off writes it
+    c.s.db.prepare(`INSERT INTO handed_off_prs (project, thread_address, thread_id, pr, owner, note, by_address, at) VALUES ('demo', ?, 'T-9', ?, 'Sam', NULL, ?, ?)`).run(t.address, M_URL, c.s.lead.address, c.s.clock.t);
+    linkPr(c.s.db, M_URL, addressTask(c.s.db, t.address), "handoff", t.address, c.s.clock.t);
+  } else {
+    c.x = mAnswered(c, "thread", cardTask);
+    c.s.e.ack(t, c.x, "done", null, { pr: M_URL, when: "merged" });
+  }
+}
+
+/** The owner row under test, on A. */
+const M_ROWS: Record<string, { build: (c: MCtx) => void; rows: string[] }> = {
+  bb: { build: (c) => (mThread(c, c.A), mHistory(c, "bb", null)), rows: ["A:bb:T"] },
+  report: { build: (c) => (mThread(c, c.A), mHistory(c, "report", null)), rows: ["A:report:T"] },
+  handoff: { build: (c) => (mThread(c, c.A), mHistory(c, "handoff", null)), rows: ["A:handoff:T"] },
+  "thread wait (card asked for A)": { build: (c) => (mThread(c, c.A), mHistory(c, "thread wait", c.A)), rows: ["A:wait:T"] },
+  "lead wait (card asked for A)": {
+    build: (c) => {
+      c.x = mAnswered(c, "lead", c.A);
+      c.s.e.ack(c.s.lead, c.x, "done", null, { pr: M_URL, when: "merged" });
+    },
+    rows: ["A:wait:lead"],
+  },
+  "cos (filed through its holder)": {
+    build: (c) => {
+      mThread(c, c.A);
+      mHistory(c, "bb", null);
+      c.s.tidy({ action: "file", kind: "pr", ref: M_URL, task: c.A });
+    },
+    rows: ["A:bb:T", "A:cos:T"],
+  },
+  "card (the lead's, asked for A)": { build: (c) => void (c.x = c.s.e.ask(c.s.lead, { title: "Review?", question: "Review it?", options: opts, task: c.A, blocks: [{ kind: "pr", url: M_URL }] }).id), rows: ["A:card:lead"] },
+  deliverable: {
+    build: (c) => void (c.d = c.s.e.deliver(c.s.lead, { title: "Release packet", summary: "In the release.", proof: [{ kind: "pr", caption: "in it", url: M_URL }], task: c.A }, place).id),
+    rows: ["A:deliverable:lead"],
+  },
+};
+
+const mOps: Record<string, { run: (c: MCtx) => void; moves: string[] }> = {
+  "card move A→B": {
+    run: (c) => {
+      c.x ??= c.s.e.ask(c.s.lead, { title: "Other?", question: "Anything else?", options: opts, task: c.A }).id;
+      c.s.tidy({ action: "file", kind: "card", ref: c.x, task: c.B });
+    },
+    moves: ["lead wait (card asked for A)", "card (the lead's, asked for A)"],
+  },
+  "deliverable move A→B": {
+    run: (c) => {
+      c.d ??= c.s.e.deliver(c.s.lead, { title: "Shots", summary: "Done.", proof, task: c.A }, place).id;
+      c.s.tidy({ action: "file", kind: "deliverable", ref: c.d, task: c.B });
+    },
+    moves: ["deliverable"],
+  },
+  "thread filing A→B": {
+    run: (c) => {
+      c.t ??= mThread(c, c.A);
+      c.s.tidy({ action: "file", kind: "thread", ref: c.t.address, task: c.B });
+    },
+    moves: ["bb", "report", "handoff", "thread wait (card asked for A)", "cos (filed through its holder)"],
+  },
+  "drop A, restore A": { run: (c) => mDropped(c, () => {}, M_BACK["restore A"]!), moves: [] },
+  "drop A, put A back in the lead's steps": { run: (c) => mDropped(c, () => {}, M_BACK["put A back in the lead's steps"]!), moves: [] },
+  "merge A into B": { run: (c) => M_BACK["merge A into B"]!(c), moves: Object.keys(M_ROWS) },
+  "drop A, merge A into B": { run: (c) => mDropped(c, () => {}, M_BACK["merge A into B"]!), moves: Object.keys(M_ROWS) },
+};
+
+/** The ways a dropped task's Unfiled things come back to it (each through refile's scoped pass). */
+const M_BACK: Record<string, (c: MCtx) => void> = {
+  "restore A": (c) => c.s.tidy({ action: "restore", task: c.A }),
+  "put A back in the lead's steps": (c) => c.s.publish([{ id: c.A, title: "One", state: "current" }, { id: c.B, title: "Two", state: "next" }, { id: c.C, title: "Three", state: "next" }]),
+  "merge A into B": (c) => c.s.tidy({ action: "merge", task: c.A, into: c.B }),
+};
+
+function mDropped(c: MCtx, whileDropped: () => void, back: (c: MCtx) => void): void {
+  c.s.publish([{ id: c.B, title: "Two", state: "next" }, { id: c.C, title: "Three", state: "next" }]);
+  whileDropped();
+  back(c);
+}
+
+function mRead(c: MCtx): { rows: string[]; links: string[] } {
+  const name: Record<string, string> = { [c.A]: "A", [c.B]: "B", [c.C]: "C" };
+  const who = (by: string) => (by === "" ? "cos" : by === c.s.lead.address ? "lead" : by === c.t?.address ? "T" : by);
+  const rows = (c.s.db.prepare(`SELECT task, via, by FROM task_pr_owners WHERE url = ?`).all(M_URL) as { task: string; via: string; by: string }[]).filter((r) => name[r.task]).map((r) => `${name[r.task]}:${r.via}:${who(r.by)}`);
+  const links = (c.s.db.prepare(`SELECT task FROM task_prs WHERE url = ?`).all(M_URL) as { task: string }[]).filter((r) => name[r.task]).map((r) => name[r.task]!);
+  return { rows: rows.sort(), links: links.sort() };
+}
+
+type MCell = { name: string; build: (c: MCtx) => void; run: (c: MCtx) => void; before: string[]; after: (claimed: boolean) => string[]; label?: string };
+
+const M_CELLS: MCell[] = [
+  // no loss: an owner row stays on its task unless its owner moved, and moves with it when it did
+  ...Object.entries(mOps).flatMap(([op, o]) =>
+    Object.entries(M_ROWS).map(([via, r]) => ({ name: `${op} × ${via}`, build: r.build, run: o.run, before: r.rows, after: () => r.rows.map((x) => (o.moves.includes(via) ? x.replace(/^A:/, "B:") : x)) })),
+  ),
+  {
+    name: "card move A→B × card the thread asked for A",
+    build: (c) => (mThread(c, c.A), void (c.x = c.s.e.ask(c.t!, { title: "Review?", question: "Review it?", options: opts, task: c.A, blocks: [{ kind: "pr", url: M_URL }] }).id)),
+    run: mOps["card move A→B"]!.run,
+    before: ["A:card:T"],
+    after: () => ["B:card:T"],
+  },
+  {
+    name: "thread filing A→B × card the thread asked, following it",
+    build: (c) => (mThread(c, c.A), void (c.x = c.s.e.ask(c.t!, { title: "Review?", question: "Review it?", options: opts, blocks: [{ kind: "pr", url: M_URL }] }).id)),
+    run: mOps["thread filing A→B"]!.run,
+    before: ["A:card:T"],
+    after: () => ["B:card:T"],
+  },
+  {
+    name: "thread filing A→B × card the thread asked for A",
+    build: (c) => (mThread(c, c.A), void (c.x = c.s.e.ask(c.t!, { title: "Review?", question: "Review it?", options: opts, task: c.A, blocks: [{ kind: "pr", url: M_URL }] }).id)),
+    run: mOps["thread filing A→B"]!.run,
+    before: ["A:card:T"],
+    after: () => ["A:card:T", "B:card:T"],
+    label: "known limit: saving the card links A only",
+  },
+  {
+    name: "thread filing A→B × lead wait on a card the thread asked, following it",
+    build: (c) => {
+      mThread(c, c.A);
+      c.x = mAnswered(c, "thread, forwarded", null);
+      c.s.e.ack(c.s.lead, c.x, "done", null, { pr: M_URL, when: "merged" });
+    },
+    run: mOps["thread filing A→B"]!.run,
+    before: ["A:wait:lead"],
+    after: () => ["A:wait:lead", "B:wait:lead"],
+    label: "known limit: the wait follows the card to B, and A keeps a copy",
+  },
+  // no gain: a thread's history from while it had no task links its PR, unless another project's thread or CoS linked it
+  ...(["bb", "report", "handoff", "thread wait"] as const).flatMap((via): MCell[] => [
+    {
+      name: `thread filing (Unfiled)→B × ${via} from while Unfiled`,
+      build: (c) => (mThread(c, null), mHistory(c, via, null)),
+      run: (c) => c.s.tidy({ action: "file", kind: "thread", ref: c.t!.address, task: c.B }),
+      before: [],
+      after: (claimed) => (claimed ? [] : [`B:${via === "thread wait" ? "wait" : via}:T`]),
+      label: "blocked on purpose when claimed",
+    },
+    {
+      name: `PR 301 filed through its holder (Unfiled)→B × ${via} of PR 300 from while Unfiled`,
+      build: (c) => {
+        mThread(c, null);
+        c.s.e.prSeen(c.t!, "E9", pr("merged", 301));
+        mHistory(c, via, null);
+      },
+      run: (c) => c.s.tidy({ action: "file", kind: "pr", ref: "https://github.com/o/r/pull/301", task: c.B }),
+      before: [],
+      after: (claimed) => (claimed ? [] : [`B:${via === "thread wait" ? "wait" : via}:T`]),
+      label: "blocked on purpose when claimed",
+    },
+    ...Object.entries(M_BACK).map(
+      ([back, f]): MCell => ({
+        name: `drop A, ${back} × ${via} from while dropped`,
+        build: (c) => void mThread(c, c.A),
+        run: (c) => mDropped(c, () => mHistory(c, via, null), f),
+        before: [],
+        after: (claimed) => (claimed ? [] : [`${back.startsWith("merge") ? "B" : "A"}:${via === "thread wait" ? "wait" : via}:T`]),
+        label: "blocked on purpose when claimed",
+      }),
+    ),
+  ]),
+  // a card with a lead wait and a thread with history, filed onto B in either order, then the thread on to C
+  ...[true, false].map(
+    (cardFirst): MCell => ({
+      name: `${cardFirst ? "card A→B, thread (Unfiled)→B" : "thread (Unfiled)→B, card A→B"}, thread B→C × lead wait and the thread's report`,
+      build: (c) => {
+        c.x = mAnswered(c, "lead", c.A);
+        c.s.e.ack(c.s.lead, c.x, "done", null, { pr: M_URL, when: "merged" });
+        c.s.clock.t += HOUR;
+        mThread(c, null);
+        mHistory(c, "report", null);
+      },
+      run: (c) => {
+        const card = () => c.s.tidy({ action: "file", kind: "card", ref: c.x!, task: c.B });
+        const thread = () => c.s.tidy({ action: "file", kind: "thread", ref: c.t!.address, task: c.B });
+        for (const f of cardFirst ? [card, thread] : [thread, card]) f();
+        c.s.tidy({ action: "file", kind: "thread", ref: c.t!.address, task: c.C });
+      },
+      before: ["A:wait:lead"],
+      after: (claimed) => (claimed ? ["B:wait:lead"] : ["B:wait:lead", "C:report:T"]),
+      label: "blocked on purpose when claimed",
+    }),
+  ),
+];
+
+test("each tidy keeps an owner's PR row unless the owner moved, and a thread gains no PR another project's thread or CoS linked", async (t) => {
+  for (const cell of M_CELLS)
+    for (const claimed of [true, false]) {
+      const after = cell.after(claimed);
+      const label = cell.label && (claimed || !cell.label.startsWith("blocked")) ? ` [${cell.label}]` : "";
+      await t.test(`${cell.name}, ${claimed ? "PR claimed in another project" : "PR in no other project"} → ${after.join(" ") || "none"}${label}`, () => {
+        const c = mBase(claimed);
+        cell.build(c);
+        assert.deepEqual(mRead(c).rows, cell.before, "the starting rows");
+        cell.run(c);
+        const got = mRead(c);
+        assert.deepEqual(got.rows, after);
+        assert.deepEqual(got.links, [...new Set(after.map((x) => x[0]!))].sort(), "a link where an owner is, and only there");
+      });
+    }
+});
+
+test("a card leaving a task still links there what a thread reported before its spawn put it on the task", () => {
+  const c = mBase(false);
+  mThread(c, c.A);
+  mHistory(c, "thread wait", c.A);
+  const late = c.s.e.register("T-10", "thread", "demo", "T-lead");
+  const url302 = "https://github.com/o/r/pull/302";
+  c.s.e.report(late, "PR 302", "Up.", url302);
+  const plan = c.s.e.ask(c.s.lead, { title: "Start a thread?", question: "Start one thread?", options: opts, kind: "plan", threads: 1, task: c.A });
+  c.s.e.triageAskPerson(c.s.cos, plan.id, { question: "Start one thread?", options: [], allowText: true });
+  c.s.e.personAnswer(plan.id, c.s.e.decision(plan.id)!.rev, "1", null, "desktop");
+  c.s.e.confirmSpawn(c.s.e.reserveSpawn(c.s.lead, plan.id), "T-10");
+  const linked = () => (c.s.db.prepare(`SELECT task FROM task_prs WHERE url = ?`).all(url302) as { task: string }[]).map((r) => r.task);
+  assert.deepEqual(linked(), [], "reported before its spawn named a task");
+  c.s.tidy({ action: "file", kind: "card", ref: c.x!, task: c.B });
+  assert.deepEqual(linked(), [c.A], "the card's move replays A");
+  assert.deepEqual(mRead(c).rows, ["A:wait:T"], "the thread's wait stays with the thread");
 });

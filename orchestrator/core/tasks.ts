@@ -289,14 +289,17 @@ function prEvidence(db: Db, addresses: string[] | null, cards: string[] | null):
   return out;
 }
 
-/** Link evidence earliest first (so first_at is the earliest), each on its address's task now (a wait: its own task). */
-function linkEvidence(db: Db, ev: Evidence[]): void {
+/** Link evidence earliest first (so first_at is the earliest), each on its address's task now (a wait: its own task), where `keep` allows. */
+function linkEvidence(db: Db, ev: Evidence[], keep: (x: Evidence, task: string) => boolean = () => true): void {
   const tasks = new Map<string, string | null>();
   const taskOf = (address: string) => {
     if (!tasks.has(address)) tasks.set(address, addressTask(db, address));
     return tasks.get(address) ?? null;
   };
-  for (const x of ev.sort((a, b) => a.at - b.at)) linkPr(db, x.url, x.via === "wait" ? waitTask(db, x.by, x.ref ?? "", taskOf) : taskOf(x.by), x.via, x.by, x.at);
+  for (const x of ev.sort((a, b) => a.at - b.at)) {
+    const task = x.via === "wait" ? waitTask(db, x.by, x.ref ?? "", taskOf) : taskOf(x.by);
+    if (task && keep(x, task)) linkPr(db, x.url, task, x.via, x.by, x.at);
+  }
 }
 
 /** Link the PR blocks of the cards `where` picks, each on its task now (the card rule), as each save does. */
@@ -336,6 +339,7 @@ export function seedPrOwners(db: Db): void {
   db.exec(`DROP TABLE temp.seed_links`);
 }
 
+/** Scoped, a thread's history links no PR a thread or the CoS put on another project's task; a card's waits link as their save does. */
 export function linkRetained(db: Db, scope: { task: string; addresses: string[] } | null): void {
   const list = JSON.stringify(scope?.addresses ?? []);
   const cardWhere = scope
@@ -343,7 +347,13 @@ export function linkRetained(db: Db, scope: { task: string; addresses: string[] 
     : `1`;
   const cardParams = scope ? [scope.task, list, list] : [];
   const cards = scope ? (db.prepare(`SELECT id FROM decisions WHERE ${cardWhere}`).all(...cardParams) as { id: string }[]).map((r) => r.id) : null;
-  linkEvidence(db, prEvidence(db, scope ? scope.addresses : null, cards));
+  const elsewhere = scope
+    ? db.prepare(
+        `SELECT 1 FROM task_prs p JOIN task_pr_owners o ON o.url = p.url AND o.task = p.task JOIN tasks t ON t.id = ?
+         WHERE p.url = ? AND p.project <> t.project AND o.via NOT IN ('card', 'deliverable')`,
+      )
+    : null;
+  linkEvidence(db, prEvidence(db, scope ? scope.addresses : null, cards), elsewhere ? (x, task) => (x.via === "wait" && !x.by.startsWith("thread:")) || !elsewhere.get(task, prKey(x.url)) : undefined);
   linkCards(db, cardWhere, cardParams);
   linkDeliverables(db, scope ? `json_extract(json, '$.task') = ?` : `json_extract(json, '$.task') IS NOT NULL`, scope ? [scope.task] : []);
 }

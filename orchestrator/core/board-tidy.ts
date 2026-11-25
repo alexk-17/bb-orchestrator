@@ -191,16 +191,17 @@ function unfinished(db: Db, now: number, into: TaskRow, incoming: Incoming, agai
 type Owner = { url: string; by: string; via: string };
 
 /**
- * After a card or deliverable left `from`, the owner rows it gave its PR links there go (task_pr_owners), the shared
- * retained-evidence pass (the one restore and the upgrade use) gives back those that what is still on `from` carries
- * (another card or deliverable naming the same PR), and a link goes only when its last owner has.
+ * After a card or deliverable left `from`, the owner rows it gave its PR links there go, and the shared pass gives back
+ * those that what is still on `from` carries. A thread's wait bound to the card stays: it moves only with the thread,
+ * and the pass may refuse to rebuild it (another project's link).
  */
 function dropOwners(db: Db, from: string, owners: Owner[]): void {
+  const gone = owners.filter((o) => o.via !== "wait" || !o.by.startsWith("thread:"));
   if (!owners.length) return;
   const del = db.prepare(`DELETE FROM task_pr_owners WHERE task = ? AND url = ? AND by = ? AND via = ?`);
-  for (const o of owners) del.run(from, o.url, o.by, o.via);
+  for (const o of gone) del.run(from, o.url, o.by, o.via);
   linkRetained(db, { task: from, addresses: taskThreads(db, from) });
-  unlinkOwnerless(db, from, owners.map((o) => o.url));
+  unlinkOwnerless(db, from, gone.map((o) => o.url));
 }
 
 /** A link on `task` to each of `urls` goes once nothing owns it there. */
