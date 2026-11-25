@@ -99,7 +99,7 @@ export const MON_POOLS: Record<"cos" | "steward" | "lead" | "thread", readonly M
   lead: TYPES.map((t) => lineMon(t.lead)),
   thread: [...new Set(TYPES.flatMap((t) => t.threads))].map(lineMon),
 };
-/** Earlier pools: still named on old rows, so they keep resolving; never picked again. */
+/** Never picked: old rows still name them, so they keep resolving. */
 const RETIRED_MONS: readonly Mon[] = [
   m("Bidoof", 399), m("Zigzagoon", 263), m("Rattata", 19), m("Sentret", 161), m("Patrat", 504), m("Kricketot", 401),
   m("Larvesta", 636), m("Eevee", 133), m("Staryu", 120), m("Onix", 95), m("Joltik", 595), m("Regigigas", 486),
@@ -287,7 +287,7 @@ export function formAt(base: string | null | undefined, level: number, pin: Stag
   return stage ? evolutionsOf(b.name)[stage - 1]!.mon : b;
 }
 
-// A pack's lines resolve like mons.ts's own while it is loaded; a pack never changes one of mons.ts's (personas.ts validates that).
+// A pack's lines resolve like the built-in ones while it is loaded; a pack never changes a built-in line.
 
 export interface PackLine {
   dex: number;
@@ -297,7 +297,7 @@ export interface PackLine {
 const PACK = new Map<string, { types: readonly MonType[]; evolutions: readonly Evolution[] }>();
 const PACK_NAMES = new Map<string, Mon>();
 
-/** Each call replaces the last; mons.ts's own lines win over a pack's. */
+/** Each call replaces the last; built-in lines win over a pack's. */
 export function setPackLines(lines: Readonly<Record<string, PackLine>> | null): void {
   PACK.clear();
   PACK_NAMES.clear();

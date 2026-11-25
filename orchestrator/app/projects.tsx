@@ -306,7 +306,7 @@ const layoutCss = /* css */ `
 /* the list says it holds a chevron (data-folds) rather than a :has() asking: an ancestor :has() restyles the page on every insert */
 [data-orch] .orch-cc .k-plist[data-folds] > .k-prow { grid-template-columns: 32px minmax(0, 1fr) auto 32px; }
 [data-orch] .orch-cc .k-kids { margin-top: -2px; }
-/* React never removes a hoisted <style>, so every property an earlier version set is set again here */
+/* React never removes a hoisted <style>: an older bundle's sheet stays, so every property it sets is set again here */
 [data-orch] .orch-cc .k-kids > ul { position: relative; display: flex; flex-direction: column; gap: 1px; margin: 0 0 4px; padding: 0; border: 0; list-style: none; }
 [data-orch] .orch-cc .k-kids > ul::before { content: ""; position: absolute; top: 0; bottom: 0; left: 28px; z-index: 1; pointer-events: none; border-left: 1px solid var(--border); opacity: 0.7; }
 [data-orch] .orch-cc .k-krow { position: static; display: grid; grid-template-columns: 28px minmax(0, 1fr); column-gap: 6px; flex-direction: row; flex-wrap: nowrap; align-items: center; justify-content: stretch; gap: 0 6px; min-height: 28px; margin: 0; padding: 5px 8px 5px 44px; border: 0; border-radius: 6px; cursor: pointer; }
@@ -331,7 +331,7 @@ const layoutCss = /* css */ `
 [data-orch] [data-fits-pane] .b-body { flex: 1 1 0; min-height: 0; grid-template-rows: minmax(0, 1fr); align-items: stretch; }
 [data-orch] [data-fits-pane] .b-body > .k-listpane { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding-bottom: 32px; }
 [data-orch] [data-fits-pane] .b-body > .detail { min-height: 0; }
-/* nothing in the fixed head shrinks: a flex box's minimum is its children's flex bases, so a shrinking chat card let its row slide under the message box */
+/* nothing in the fixed head shrinks: a flex box's minimum is its children's flex bases, so a shrinking chat card slides its row under the message box */
 [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed { flex: none; min-height: 0; max-height: calc(100% - 48px); overflow-y: auto; scrollbar-gutter: stable; margin: -2px; padding: 2px; }
 [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed > .k-chatcard, [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed .k-chat, [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed .k-chat > * { flex: none; }
 [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed > .k-chatcard { overflow: clip; }
@@ -663,7 +663,7 @@ export function ProjectsView({
     });
     return () => clearTimeout(t);
   }, [opening, step.next, step.move]);
-  // only the list's root fits the pane ([data-fits-pane]): the board and web project page return before it, and asking for them scrolled nothing
+  // only the list's root fits the pane ([data-fits-pane]): the board and web project page return before it
   const listShown = !toBoard && !board && !!q.data && !(detail && !phone && q.data.some((p) => p.slug === detail));
   usePaneFits(wide && listShown);
   const now = useMinute();

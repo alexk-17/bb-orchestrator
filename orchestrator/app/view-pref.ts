@@ -18,6 +18,7 @@ export class PrefWrites {
   #own: ReadonlyMap<string, ViewPrefBody> = new Map();
   readonly #landed = new Map<ViewPrefBody, number>();
   #rev = 0;
+  #top = 0;
   readonly #heard = new Set<() => void>();
   readonly #reads = new Set<() => Promise<void>>();
   constructor(post: (b: ViewPrefBody) => Promise<Outcome>) {
@@ -43,12 +44,13 @@ export class PrefWrites {
     if (this.#landed.size) void refetch().catch(() => undefined);
     return () => void this.#reads.delete(refetch);
   }
-  // a pick stays the page's own until a read holds its save's revision; a failed, cancelled or older read holds less
-  read(rev: number) {
-    this.#rev = rev;
+  // a pick stays the page's own until a read holds its save's revision (none answered: one past the newest the page has read)
+  read(rev: number | undefined) {
+    this.#rev = rev ?? 0;
+    this.#top = Math.max(this.#top, this.#rev);
     const next = new Map(this.#own);
     for (const [b, saved] of this.#landed) {
-      if (rev < saved) continue;
+      if (this.#rev < saved) continue;
       this.#landed.delete(b);
       if (next.get(prefKey(b)) === b) next.delete(prefKey(b));
     }
@@ -56,9 +58,7 @@ export class PrefWrites {
   }
   #answered(b: ViewPrefBody, o: Outcome | null) {
     if (o?.ok) {
-      const rev = revOf(o.result);
-      if (rev === null) return;
-      this.#landed.set(b, rev);
+      this.#landed.set(b, revOf(o.result) ?? this.#top + 1);
       this.read(this.#rev);
       const refetch = this.#reads.values().next().value;
       if (refetch) void refetch().catch(() => undefined);
@@ -97,6 +97,7 @@ export function useViewPrefs(): { prefs: ViewPrefs | undefined; own: ReadonlyMap
   });
   useEffect(() => writes.mount(() => refetch.current()), []);
   useEffect(() => {
+    // the SDK hands the read over unparsed: a server that stamps no revision sends none
     if (q.data) writes.read(q.data.rev);
   }, [q.data]);
   const prefs = q.data ?? (q.error ? { projectsView: null, boardFolds: {}, rev: 0 } : undefined);

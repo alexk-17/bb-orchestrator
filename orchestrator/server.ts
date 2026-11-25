@@ -2088,7 +2088,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
     async needsYou({ zone }) {
       const v = engine.needsYou();
-      // Asked of bb 8 at a time: one by one costs a round trip per agent, and all at once was no faster and timed out under load.
+      // Asked of bb 8 at a time: one by one costs a round trip per agent, and all at once times out under load.
       const list = engine.agents();
       const perAgent: NeedsYou["interactions"][] = new Array(list.length);
       let next = 0;

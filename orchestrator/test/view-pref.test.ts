@@ -175,7 +175,7 @@ test("a refresh that failed, was cancelled or read from before the save leaves t
   assert.equal(viewWord(listKept, c.own(), false), "board", "a refresh whose read was cancelled hands nothing over");
 });
 
-test("a save from another window, read after this page's, is the pick; a save with no revision stays the page's own", async () => {
+test("a save from another window, read after this page's, is the pick", async () => {
   const { sent, post } = posts();
   const w = new PrefWrites(post);
   w.mount(async () => undefined);
@@ -185,12 +185,82 @@ test("a save from another window, read after this page's, is the pick; a save wi
   await tick();
   w.read(6);
   assert.equal(viewWord({ ...listKept, rev: 6 }, w.own(), false), "list", "List saved elsewhere after Board: the read holding it wins");
+});
+
+test("a save answered with no revision is the page's own until a read newer than the page's last; one from before it, a failed or a cancelled one keeps it", async () => {
+  const { sent, post } = posts();
+  const w = new PrefWrites(post);
+  let reads = 0;
+  w.mount(() => (++reads === 1 ? Promise.reject(new Error("offline")) : Promise.reject(new DOMException("cancelled", "AbortError"))));
+  w.read(4);
   void w.keep({ projectsView: "board" });
+  void w.keep({ board: "-", folded: [] });
+  await tick();
+  sent[0]!.answer({ ok: true, result: null });
   await tick();
   sent[1]!.answer({ ok: true, result: null });
   await tick();
+  assert.equal(reads, 2, "each kept save refreshes the read; one failed, one was cancelled");
+  w.read(4);
+  w.read(3);
+  w.read(undefined);
+  assert.equal(viewWord({ ...listKept, rev: 4 }, w.own(), false), "board", "a read no newer than the page's last, or with no revision, may predate the save: Board holds");
+  assert.deepEqual(foldWord(listKept, w.own(), "-"), [], "and Shipped stays open");
   w.read(99);
-  assert.equal(viewWord({ ...listKept, rev: 99 }, w.own(), false), "board", "no revision to wait for: the page keeps its pick");
+  assert.equal(w.own().size, 0, "a newer read holds both saves");
+  assert.equal(viewWord({ ...listKept, rev: 99 }, w.own(), false), "list", "List saved elsewhere since: the plugin's word is the pick");
+  assert.deepEqual(foldWord({ ...listKept, rev: 99 }, w.own(), "-"), ["shipped"]);
+});
+
+test("a save answered with no revision lands past the newest read the page has had, though a read since went back or carried none", async () => {
+  for (const back of [3, undefined]) {
+    const { sent, post } = posts();
+    const w = new PrefWrites(post);
+    w.mount(async () => undefined);
+    w.read(4);
+    w.read(back);
+    void w.keep({ projectsView: "board" });
+    await tick();
+    sent[0]!.answer({ ok: true, result: null });
+    await tick();
+    w.read(4);
+    assert.equal(viewWord({ ...listKept, rev: 4 }, w.own(), false), "board", `revision 4 was read before the save (then ${back}): Board holds`);
+    w.read(5);
+    assert.equal(w.own().size, 0, "a revision past any the page had read holds the save");
+  }
+});
+
+test("a read with no revision, from a server that stamps none, is revision 0: it hands back no save", async () => {
+  const { sent, post } = posts();
+  const w = new PrefWrites(post);
+  w.mount(async () => undefined);
+  w.read(undefined);
+  void w.keep({ projectsView: "board" });
+  await tick();
+  sent[0]!.answer({ ok: true, result: null });
+  await tick();
+  w.read(undefined);
+  assert.equal(viewWord(listKept, w.own(), false), "board", "no answer and no read says which came first: Board holds");
+  void w.keep({ projectsView: "list" });
+  await tick();
+  sent[1]!.answer(kept(2));
+  await tick();
+  w.read(undefined);
+  assert.deepEqual(w.own().get("view"), { projectsView: "list" }, "a read with no revision is older than revision 2");
+});
+
+test("a save answered with no revision never frees a later pick of the same choice", async () => {
+  const { sent, post } = posts();
+  const w = new PrefWrites(post);
+  w.mount(async () => undefined);
+  void w.keep({ projectsView: "board" });
+  void w.keep({ projectsView: "list" });
+  await tick();
+  sent[0]!.answer({ ok: true, result: null });
+  await tick();
+  w.read(99);
+  assert.deepEqual(w.own().get("view"), { projectsView: "list" }, "List is still being sent: the page's own");
+  assert.equal(viewWord({ ...listKept, projectsView: "board", rev: 99 }, w.own(), false), "list");
 });
 
 test("a change made while a save is sent stays the page's own; a save that failed leaves it", async () => {

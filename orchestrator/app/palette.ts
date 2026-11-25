@@ -1,5 +1,5 @@
 // light-dark() follows bb's theme with no JS: bb sets color-scheme on :root, .light and html.dark.
-// Text must stay >= 4.5:1 and marks >= 3:1 against bb's light and dark surfaces (test/palette.test.ts).
+// Text must stay >= 4.5:1 and marks >= 3:1 against bb's light and dark surfaces.
 export type Tone = { light: string; dark: string };
 
 export const ROLE_TONES = {
