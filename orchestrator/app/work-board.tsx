@@ -1,11 +1,4 @@
-// The work board in Projects (SCOPE piece 2; mockups where-1-projects, board-1-task, cols-6): every
-// project's tasks in six columns, with a project filter. A card is a task the lead declares; its chips say what is
-// attached. State is a column tint, a card tint and chips, never a coloured left edge or bar. A phone, or a pane too
-// narrow for six columns, shows one column at a time under a picker with counts, and never scrolls sideways. Each
-// project's Unfiled tray sits under the board, collapsed.
-// The read (workBoard) is a database read; it refetches only on a change notice that touches what it reads
-// (change-notice.ts READS.workBoard), after a pause, and not while the page is hidden.
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { experimental_useRpcQuery, useRealtime } from "@get-bb/plugin-sdk/app";
 import { BOARD_COLUMNS, CHANGED_CHANNEL, WRITES, rpcContract, type boardMoveBody, type BoardColumn, type BoardTask, type Deliverables, type NeedsYou, type Projects, type Scope, type WorkBoard } from "../contract.ts";
 import { COLUMN_LABEL, whyText, chipsOf, columnAfterPick, columnsOf, firstColumn, movedByYou, unfiledCount, type BoardLens, type LensMove } from "./work-board-model.ts";
@@ -26,14 +19,10 @@ import { Badge } from "./ui/badge.tsx";
 import { boardTones, toneVars } from "./project-colour.ts";
 import { boardRows, drawnFolds, useFolded } from "./board-fold.ts";
 
-/** A change notice's refetch waits this long, so a burst of notices is one read. */
 const BOARD_DEBOUNCE_MS = 800;
-/** Six columns side by side need this much room; three by two need less; below that the board shows one at a time. */
 export const SIX_COLUMNS_MIN = 6 * 140 + 5 * 8;
 export const THREE_COLUMNS_MIN = 3 * 160 + 2 * 8;
 
-// column tints (the mockups' cols-6): Waiting on you warm, Blocked red, Shipped green, the rest the page's wash. A
-// card moved by hand is tinted blue; the selected card has a ring. No left edges anywhere.
 const boardCss = /* css */ `
 .wb { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .wb-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
@@ -53,8 +42,7 @@ const boardCss = /* css */ `
 .wb-card .flag { align-self: flex-start; }
 .wb-body { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
 .wb-body > * { grid-area: 1 / 1; }
-/* the open card's panel scrolls itself when it is long; otherwise a wheel over it scrolls the board (overscroll-behavior:
-   contain kept the board still under a panel with nothing to scroll, half of a pane's width) */
+/* overscroll-behavior: contain kept the board still under a panel with nothing to scroll */
 .wb-side { justify-self: end; align-self: start; position: sticky; top: 8px; z-index: 2; width: min(400px, 100%); max-height: calc(100dvh - 140px); overflow-y: auto; padding: 16px; border-radius: 12px; background: var(--popover, var(--card)); color: var(--popover-foreground, var(--card-foreground)); border: 1px solid var(--border); box-shadow: 0 8px 24px color-mix(in srgb, var(--foreground) 14%, transparent); }
 .wb-sheet { padding: 16px; border-radius: 12px; background: var(--card); border: 1px solid var(--border); box-shadow: 0 4px 16px color-mix(in srgb, var(--foreground) 10%, transparent); min-width: 0; }
 .wb-card .drop { font-size: 12px; font-weight: 600; line-height: 16px; }
@@ -64,9 +52,6 @@ const boardCss = /* css */ `
 .wb-unfiled ul { margin: 0; padding: 0 0 0 8px; list-style: none; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted-foreground); }
 `;
 
-// each project's colour (project-colour.ts): a chip filled in it with the project's name on every card (its words in the
-// page's background, readable on every hue in both themes), a faint tint on the card, and the filter's chips with a dot
-// in the same colour, filled when picked, so the filter is the legend. A card moved by hand keeps its blue (.wb-card.moved).
 const toneCss = /* css */ `
 .wb-proj[data-tone] { background: var(--wb-tone); color: var(--background); font-weight: 600; }
 .wb-card:where([data-tone]) { background: color-mix(in srgb, var(--wb-tone) 5%, var(--card)); }
@@ -75,10 +60,6 @@ const toneCss = /* css */ `
 .wb-pick[data-tone][aria-pressed="true"]::before { background: var(--background); }
 `;
 
-// the board's head (2026-11-24, the lead: "make the toolbar sticky at the top of the board while the page scrolls"): the
-// toolbar, the count pills and the project chips stay in sight over a long board. On a phone, or one column at a time,
-// only the toolbar and the pills (its .wb-top) stay; the project chips and the column picker scroll away. The desktop
-// panel beside the board sits under the head (--wb-head-h, its height, kept by useHeadHeight).
 const headCss = /* css */ `
 .wb-head { position: sticky; top: 0; z-index: 3; display: flex; flex-direction: column; gap: 8px; min-width: 0; margin-top: -8px; padding: 8px 0; background: var(--background); }
 .wb[data-layout="one"] .wb-head { display: contents; }
@@ -86,9 +67,6 @@ const headCss = /* css */ `
 .wb .wb-side { top: calc(var(--wb-head-h, 0px) + 8px); max-height: calc(100dvh - 140px - var(--wb-head-h, 0px)); }
 `;
 
-// folding a column (2026-11-24, the owner: "I don't need to see everything shipped"): the columns sit in rows, one of
-// six or three by two, and a folded column shrinks to its header (chevron, name, count) in its place, at the top of its
-// row, handing its width to the open ones beside it. Its header is the toggle; it is still a column a card drops on.
 const foldCss = /* css */ `
 .wb-row { display: flex; gap: 8px; align-items: flex-start; min-width: 0; }
 .wb-row > .wb-col { flex: 1 1 0; }
@@ -99,7 +77,6 @@ const foldCss = /* css */ `
 .wb-col-h .wb-fold svg { width: 14px; height: 14px; }
 `;
 
-/** Keeps the head's height in --wb-head-h on the board, for the panel beside it; written only when the head resizes. */
 function useHeadHeight() {
   const ro = useRef<ResizeObserver | null>(null);
   return useCallback((el: HTMLDivElement | null) => {
@@ -112,8 +89,6 @@ function useHeadHeight() {
   }, []);
 }
 
-/** The board's read at T (`since`; null: the read's 7-day default), with its own refetch: on a notice that touches it
- *  (after a pause, never while hidden), and on return to the page. A new T keeps the last board up until its read lands. */
 export function useWorkBoard(since: number | null = null) {
   const q = experimental_useRpcQuery({ contract: rpcContract, method: "workBoard", input: { since, project: null } });
   const last = useRef<WorkBoard | undefined>(undefined);
@@ -121,7 +96,6 @@ export function useWorkBoard(since: number | null = null) {
   const refetch = useRef(q.refetch);
   refetch.current = q.refetch;
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  // a notice that came while the page was hidden: read once it is back
   const missed = useRef(false);
   const onNotice = useCallback((n: unknown) => {
     if (!touches(n, "workBoard")) return;
@@ -147,11 +121,9 @@ export function useWorkBoard(since: number | null = null) {
   return { ...q, data: q.data ?? last.current };
 }
 
-/** One card: its title, its project, what is attached, and the one line of why. */
 function TaskCard({ t, now, selected, tone, onOpen, lensChip }: { t: BoardTask; now: number; selected: boolean; tone: Tone | undefined; onOpen: (id: string) => void; lensChip: ReactNode }) {
   const moved = movedByYou(t);
   return (
-    // shadcn's Card as the button (the ui ratchet: no raw <button>); Enter or Space opens it, as a click does
     <Card
       role="button"
       tabIndex={0}
@@ -169,7 +141,6 @@ function TaskCard({ t, now, selected, tone, onOpen, lensChip }: { t: BoardTask; 
         onOpen(t.id);
       }}
     >
-      {/* its project, on every card, in the project's colour; then the flags */}
       <span className="wb-chips flag" data-card-top="">
         <Badge variant="secondary" className="wb-proj" data-chip="project" data-tone={tone ? "" : undefined}>
           {t.project}
@@ -195,7 +166,6 @@ function TaskCard({ t, now, selected, tone, onOpen, lensChip }: { t: BoardTask; 
           ),
         )}
       </span>
-      {/* the column a drag is over, written by the drag into this card only (work-board-drag.ts) */}
       <span className="drop" data-drop-label="" aria-hidden="true" />
       <span className="why" data-why="">
         {whyText(t.why)}
@@ -233,7 +203,6 @@ function Column({ column, tasks, now, selected, tones, onOpen, chip, solo = fals
   );
 }
 
-/** A project's Unfiled tray: what no task holds yet, quiet and collapsed. */
 function UnfiledTray({ p }: { p: WorkBoard["projects"][number] }) {
   const [open, setOpen] = useState(false);
   const n = unfiledCount(p.unfiled);
@@ -273,7 +242,6 @@ function UnfiledTray({ p }: { p: WorkBoard["projects"][number] }) {
   );
 }
 
-/** The panel's Move to: the six columns, the one it is in pressed; the phone's way to move a card. */
 function MoveTo({ t, onMove }: { t: BoardTask; onMove: (to: BoardColumn) => void }) {
   useGate();
   return (
@@ -293,13 +261,10 @@ function MoveTo({ t, onMove }: { t: BoardTask; onMove: (to: BoardColumn) => void
 
 export type BoardPlace = { project: string | null; task: string | null };
 
-/** The board, with its own read: mounted only while a pane shows it. */
-/** What the card panel acts with: the page's reads (Needs you's cards, the deliverables, the projects' leads) and its refetch. */
 export type PanelReads = { needs: NeedsYou | undefined; scope: Scope | undefined; deliverables: Deliverables | undefined; projects: Projects | undefined; refetchAll: () => void };
 
-/** The since lens's seam (work board thread 3 mounts it): `since` draws the header in the board's top row and hands the
- *  lens back; `movedChip` draws a card's chip for its move since T. Without them the board reads with the 7-day default. */
-export type SinceSlot = (project: string | null, onLens: (lens: BoardLens) => void) => ReactNode;
+export type BoardShown = { since: number; ids: ReadonlySet<string> };
+export type SinceSlot = (project: string | null, onLens: (lens: BoardLens) => void, shown: BoardShown | null) => ReactNode;
 export type MovedChipSlot = (move: LensMove, now: number) => ReactNode;
 
 export function BoardView({ place, onPlace, switcher, since, movedChip, reads }: { place: BoardPlace; onPlace: (p: BoardPlace, how?: "push" | "replace") => void; switcher: ReactNode; since?: SinceSlot; movedChip?: MovedChipSlot; reads: PanelReads }) {
@@ -312,7 +277,6 @@ export function BoardView({ place, onPlace, switcher, since, movedChip, reads }:
   const now = useMinute();
   const [picked, setPicked] = useState<BoardColumn | null>(null);
   const [pickWas, setPickWas] = useState<string | null>(null);
-  // a phone's sheet opens under the column: bring it into sight once per task, when it is first drawn
   const sheetFor = useRef<string | null>(null);
   const sheet = useCallback(
     (el: HTMLDivElement | null) => {
@@ -323,6 +287,7 @@ export function BoardView({ place, onPlace, switcher, since, movedChip, reads }:
     [place.task],
   );
   const board = q.data;
+  const onBoard = useMemo(() => (board ? { since: board.since, ids: new Set(board.projects.flatMap((p) => p.tasks.map((t) => t.id))) } : null), [board]);
   const styles = (
     <>
       <style href={styleHref("orch-work-board", boardCss)} precedence="default">
@@ -339,14 +304,12 @@ export function BoardView({ place, onPlace, switcher, since, movedChip, reads }:
       </style>
     </>
   );
-  // the top row, at the same place while the board loads and after, so the since header keeps its state
   const top = (project: string | null) => (
     <div className="wb-top">
       {switcher}
       <div className="contents" data-board-since="">
-        {since ? since(project, setLens) : null}
+        {since ? since(project, setLens, onBoard) : null}
       </div>
-      {/* a read that failed while a board is up (a new T, a refetch): the last board stays, with one quiet line */}
       {board && q.error ? (
         <span className="flex items-center gap-1 text-xs text-muted-foreground" role="status" data-board-stale="">
           Couldn't load
@@ -370,15 +333,11 @@ export function BoardView({ place, onPlace, switcher, since, movedChip, reads }:
   const slugs = board.projects.map((p) => p.slug);
   const project = place.project && slugs.includes(place.project) ? place.project : null;
   const cols = columnsOf(board, project, lens);
-  // a count pill picked or changed: the column picked by hand stays while it holds some of the pill's cards, else the
-  // one-column board shows the first that does (2026-11-25, Codex's review: Planned shown, "7 shipped" picked, 0 cards)
   const pickNow = lens?.pick ? `${lens.pick.key}:${lens.pick.ids.join(",")}` : null;
   if (pickNow !== pickWas) {
     setPickWas(pickNow);
     setPicked(columnAfterPick(picked, cols));
   }
-  // a picked pill opens the folded columns that hold its cards while it is picked; meanwhile no column holding its cards
-  // folds (that would hide what was picked), and the empty ones keep their toggle
   const drawn = drawnFolds(folded, cols, !!lens?.pick);
   const chip = (id: string): ReactNode => {
     const move = lens?.moved[id];
@@ -388,15 +347,12 @@ export function BoardView({ place, onPlace, switcher, since, movedChip, reads }:
   const one = layout === "one";
   const shown = picked ?? firstColumn(cols);
   const open = (id: string) => onPlace({ project, task: place.task === id ? null : id });
-  // the colours come with the projects read (each project's accent); until it lands the chips stay plain, so no colour
-  // is drawn and then changed
   const tones = reads.projects ? boardTones([...reads.projects, ...board.projects]) : null;
   const openTask = place.task ? board.projects.flatMap((p) => p.tasks).find((t) => t.id === place.task) ?? null : null;
   const after = () => {
     reads.refetchAll();
     void q.refetch();
   };
-  // a hand move (piece 5): by drag on desktop, by Move to in the panel; the server writes only the task's hand move
   const moveTask = (task: string, to: BoardColumn) => {
     if (gate.lock) return;
     void write(WRITES.boardMove, { task, to } satisfies z.input<typeof boardMoveBody>, { kind: "other", where: "work-board", after });
@@ -446,7 +402,6 @@ export function BoardView({ place, onPlace, switcher, since, movedChip, reads }:
             ))}
           </div>
           <Column solo column={shown} tasks={cols.find((c) => c.column === shown)!.tasks} now={now} selected={place.task} tones={tones} onOpen={open} chip={chip} />
-          {/* a phone's sheet: under the column it was opened from */}
           {panel ? (
             <div ref={sheet} className="wb-sheet" data-panel-sheet="">
               {panel}
@@ -464,7 +419,6 @@ export function BoardView({ place, onPlace, switcher, since, movedChip, reads }:
               </div>
             ))}
           </div>
-          {/* beside the board, over its right-hand columns, and in sight while the board scrolls */}
           {panel ? (
             <aside className="wb-side" data-panel-side="">
               {panel}

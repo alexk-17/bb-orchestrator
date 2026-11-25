@@ -1,5 +1,3 @@
-// The frontend contract. Reads go over bb RPC; the owner's writes go to plain HTTP routes that require a browser Origin
-// (a guard rail so an agent's `bb plugin rpc call` can't answer as the owner; curl can still fake an Origin).
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { blockSchema, pointSchema } from "./blocks.ts";
@@ -8,7 +6,6 @@ import { IMAGE_TYPES, MAX_IMAGE_BYTES, MAX_IMAGES } from "./core/direct-images.t
 export { IMAGE_TYPES, MAX_IMAGE_BYTES, MAX_IMAGES };
 
 export const PLUGIN_ID = "orchestrator";
-/** The owner's writes: POST JSON to `${WRITE_BASE}/<path>`. */
 export const WRITE_BASE = `/api/v1/plugins/${PLUGIN_ID}/http`;
 export const CHANGED_CHANNEL = "changed";
 
@@ -20,34 +17,31 @@ export const cardSchema = z.object({
   id: z.string(),
   rev: z.number(),
   project: z.string().nullable(),
-  asker: z.string(), // the address the answer goes to
-  origin: z.string(), // who first asked
+  asker: z.string(),
+  origin: z.string(),
   title: z.string(),
   question: z.string(),
   context: z.string(),
-  options: z.array(opt), // recommended first
+  options: z.array(opt),
   allowText: z.boolean(),
   askedAt: z.string(),
-  escalated: z.boolean(), // "CoS didn't triage"
-  merge: z.boolean(), // a merge card
-  deferredUntil: z.string().nullable(), // set on deferred cards; null + deferred=true means "until brought back"
+  escalated: z.boolean(),
+  merge: z.boolean(),
+  deferredUntil: z.string().nullable(),
   deferred: z.boolean(),
   returnedAt: z.string().nullable(),
-  blocks: z.array(blockSchema), // typed parts drawn as components (blocks.ts)
-  prs: z.array(prSchema), // the live state of its PR blocks that pr-watch knows, by url
-  queued: z.number().optional(), // cards from the same asker held behind this one (batching); they come up once it is answered
-  // a scoping lead's "Scoping done?" card (1.11.0): its summary and PROJECT.md, drawn above its options
+  blocks: z.array(blockSchema),
+  prs: z.array(prSchema),
+  queued: z.number().optional(),
   scopingDone: z.object({ summary: z.string(), projectMd: z.string() }).nullable().optional(),
-  // the scoping task it waits under in the Scope tab (1.12.0), or none for the whole project
   scopeTask: z.string().nullable().optional(),
-  revised: z.number().optional(), // times its asker revised it while unanswered: drawn as "rev N+1"
+  revised: z.number().optional(),
 });
 export type Card = z.infer<typeof cardSchema>;
 
 export const presetSchema = z.object({ id: z.enum(["1h", "evening", "tomorrow", "manual"]), label: z.string(), until: z.string().nullable() });
 export type Preset = z.infer<typeof presetSchema>;
 
-// a question an agent asked through its own question tool (interactions.ts): the card draws these as options
 export const questionSchema = z.object({
   id: z.string(),
   prompt: z.string(),
@@ -59,26 +53,25 @@ export const questionSchema = z.object({
 });
 
 export const interactionSchema = z.object({
-  id: z.string(), // bb's interaction id
+  id: z.string(),
   threadId: z.string(),
   address: z.string(),
-  title: z.string(), // the thread's title
-  kind: z.string(), // what the thread waits for
+  title: z.string(),
+  kind: z.string(),
   since: z.string().nullable(),
-  questions: z.array(questionSchema), // a user_question's questions; empty for other prompts (answered in the thread)
+  questions: z.array(questionSchema),
 });
 
 export const needsYouSchema = z.object({
-  cards: z.array(cardSchema), // answerable, in order
+  cards: z.array(cardSchema),
   deferred: z.array(cardSchema),
   triaging: z.array(z.object({ id: z.string(), title: z.string(), origin: z.string(), project: z.string().nullable(), dueAt: z.string().nullable() })),
-  interactions: z.array(interactionSchema), // threads with an orchestrator role waiting on a native prompt
+  interactions: z.array(interactionSchema),
   presets: z.array(presetSchema),
-  badge: z.number(), // only the owner's items: cards + interactions
+  badge: z.number(),
 });
 export type NeedsYou = z.infer<typeof needsYouSchema>;
 
-// The Watchers list on the Board (2026-11-17, core/watchers.ts): every open PR wait and every timed job
 export const watchWaitSchema = z.object({
   id: z.string(),
   owner: z.string(),
@@ -106,48 +99,41 @@ export const watchJobSchema = z.object({
 export const watchersSchema = z.object({ waits: z.array(watchWaitSchema), jobs: z.array(watchJobSchema), conditions: z.array(z.string()) });
 export type Watchers = z.infer<typeof watchersSchema>;
 
-// The personas hook (personas.ts, 2026-11-18): an agent's persona, with the pokemon setting on and a pack loaded.
 export const personaSchema = z.object({
   name: z.string(),
   title: z.string(),
-  image: z.string(), // https, safe in a CSS url()
+  image: z.string(),
   credit: z.string().nullable(),
-  team: z.array(z.string()), // names for a profile card only
-  teamDex: z.array(z.number().nullable()).optional(), // each team member's National Dex number, for its sprite (2026-11-18)
-  roster: z.array(z.string()).optional(), // a lead's roster lines: its party lists the threads on them first
-  partner: z.string().nullable(), // the CoS's and the Steward's own Pokémon (its form now); null for a lead
-  type: z.string().nullish(), // the pack's specialty type (2026-11-18): the Projects label names it; none: the project's
+  team: z.array(z.string()),
+  teamDex: z.array(z.number().nullable()).optional(),
+  roster: z.array(z.string()).optional(),
+  partner: z.string().nullable(),
+  type: z.string().nullish(),
 });
 export type AgentPersona = z.infer<typeof personaSchema>;
 
 export const boardSchema = z.object({
   rows: z.array(z.object({ id: z.string(), kind: z.string(), from: z.string().nullable(), project: z.string().nullable(), title: z.string(), body: z.string(), ref: z.string().nullable(), at: z.number() })),
   dead: z.array(z.object({ id: z.string(), recipient: z.string(), sender: z.string(), kind: z.string(), body: z.string(), note: z.string().nullable(), createdAt: z.number() })),
-  agents: z.array(z.object({ threadId: z.string(), address: z.string(), role: z.string(), project: z.string().nullable(), status: z.string(), mon: z.string().nullable(), monType: z.string().nullable(), dex: z.number().nullish(), persona: personaSchema.nullish() })), // dex and persona (2026-11-18): engine.faceOf
+  agents: z.array(z.object({ threadId: z.string(), address: z.string(), role: z.string(), project: z.string().nullable(), status: z.string(), mon: z.string().nullable(), monType: z.string().nullable(), dex: z.number().nullish(), persona: personaSchema.nullish() })),
   rules: z.array(z.object({ id: z.string(), text: z.string(), project: z.string().nullable(), kinds: z.array(z.string()), expiresAt: z.number().nullable(), source: z.string(), createdAt: z.number(), revokedAt: z.number().nullable() })),
   decisions: z.array(z.object({ id: z.string(), state: z.string(), title: z.string(), origin: z.string(), asker: z.string(), level: z.string(), answer: z.string().nullable(), ack: z.string().nullable(), updatedAt: z.string() })),
-  directUnread: z.array(z.string()).optional(), // projects with a lead's note the owner hasn't opened: the Projects tab's dot
-  watchers: watchersSchema.optional(), // the Watchers list (core/watchers.ts): open PR waits and timed jobs
+  directUnread: z.array(z.string()).optional(),
+  watchers: watchersSchema.optional(),
 });
 export type Board = z.infer<typeof boardSchema>;
 
-
-// A lead's structured status (core/status.ts): the project page's step bar and the Projects line.
 export const leadStatusSchema = z.object({
   goal: z.string(),
   steps: z.array(z.object({ title: z.string(), state: z.enum(STEP_STATES) })),
   waitingOn: z.object({ kind: z.enum(WAIT_KINDS), ref: z.string().nullable(), label: z.string().nullable() }),
-  // up to three waits, newer kinds only here (status.ts); absent in statuses stored before it: waitsOf
   waits: z.array(z.object({ kind: z.enum(LIST_WAIT_KINDS), ref: z.string().nullable(), label: z.string().nullable(), who: z.string().nullable(), since: z.number() })).optional(),
   blockers: z.array(z.string()),
-  // the Lead status card (2026-11-17); absent until the lead's first update
   update: z.object({ workingOn: z.array(z.string()), at: z.string(), needs: z.string(), updateAt: z.number() }).nullish(),
   updatedAt: z.number(),
   by: z.string(),
 });
 
-// The Projects row (2026-11-16, core/history.ts buildSummary): one batched read, no bb calls. Optional: an older server
-// sends none, and the row then falls back to the status line.
 export const summaryWaitSchema = z.object({
   source: z.enum(["lead", "live"]),
   kind: z.string(),
@@ -156,23 +142,21 @@ export const summaryWaitSchema = z.object({
   label: z.string().nullable(),
   since: z.number().nullable(),
   unchanged: z.boolean(),
-  note: z.string().nullable(), // what a live fact adds to a wait that still stands ("the thread failed")
+  note: z.string().nullable(),
 });
 export const projectSummarySchema = z.object({
   motion: z.enum(["held", "nolead", "moving", "waiting", "quiet"]),
   threads: z.object({ working: z.number(), total: z.number() }),
   leadWorking: z.boolean(),
   needsYou: z.object({ count: z.number(), id: z.string().nullable(), title: z.string().nullable(), question: z.string().nullable(), since: z.number().nullable() }),
-  waits: z.array(summaryWaitSchema), // each once; none a live fact shows is over
-  blockers: z.array(z.string()), // the lead's, minus those a later answer covers
-  statusOutOfDate: z.boolean(), // a live fact contradicts the status: the row says so, the lead was asked to republish
+  waits: z.array(summaryWaitSchema),
+  blockers: z.array(z.string()),
+  statusOutOfDate: z.boolean(),
   done: z.object({ text: z.string(), at: z.number(), kind: z.enum(["deliverable", "merged", "report"]) }).nullable(),
-  last: z.object({ text: z.string(), at: z.number() }).nullable(), // the latest finished thing at any age (quiet rows)
+  last: z.object({ text: z.string(), at: z.number() }).nullable(),
   leadIdleSince: z.number().nullable(),
 });
 export type SummaryWait = z.infer<typeof summaryWaitSchema>;
-// The owner's direct line to a project's lead (2026-11-16, PLAN 3): the latest messages, newest first, each with the
-// lead's ack note once it acks. unread: a note came in since the owner last opened the composer.
 export const directMessageSchema = z.object({
   id: z.string(),
   text: z.string(),
@@ -182,23 +166,18 @@ export const directMessageSchema = z.object({
   outcome: z.string().nullable(),
   note: z.string().nullable(),
   answeredAt: z.number().nullable(),
-  unread: z.boolean().optional(), // the lead's answer came after the owner last opened the thread
-  images: z.array(z.object({ name: z.string() })).optional(), // 2026-11-17: the screenshots it carried (text is without their line)
+  unread: z.boolean().optional(),
+  images: z.array(z.object({ name: z.string() })).optional(),
 });
 export const directLineSchema = z.object({ messages: z.array(directMessageSchema), unread: z.boolean() });
 export type DirectLine = z.infer<typeof directLineSchema>;
 
-// Phase 2: the Projects tab (the owner sets priority and hold) and each agent's live state (its lanes; the Agents tab
-// it fed went into Projects on 2026-11-16).
-// The Projects tab as a source of truth (core/book.ts): one project's Decided, Done, latest merges and blockers' start,
-// read only for the project opened; older answered cards for the search.
 export const projectBookSchema = z.object({
   decided: z.array(z.object({ id: z.string(), title: z.string(), answer: z.string(), at: z.number() })),
   done: z.array(z.object({ kind: z.enum(["deliverable", "merged", "report"]), text: z.string(), at: z.number(), ref: z.string().nullable(), state: z.string().nullable() })),
   merged: z.array(z.object({ number: z.number().nullable(), url: z.string().nullable(), at: z.number() })),
   mergedTotal: z.number(),
   since: z.array(z.object({ text: z.string(), since: z.number(), bound: z.boolean() })),
-  // pinned documents (core/pins.ts): the live pins, "updated" read at this read
   pins: z.array(
     z.object({
       id: z.string(),
@@ -213,12 +192,11 @@ export const projectBookSchema = z.object({
       rev: z.number().nullable(),
       missing: z.boolean(),
     }),
-  ).optional(), // optional: a page served by an older plugin process during an update draws no strip
+  ).optional(),
 });
 export type ProjectBook = z.infer<typeof projectBookSchema>;
 export const cardHitsSchema = z.array(z.object({ id: z.string(), project: z.string().nullable(), title: z.string(), answer: z.string(), at: z.number() }));
 export type CardHits = z.infer<typeof cardHitsSchema>;
-
 
 export const projectsSchema = z.array(
   z.object({
@@ -226,22 +204,17 @@ export const projectsSchema = z.array(
     priority: z.enum(["urgent", "high", "normal", "low"]),
     heldAt: z.number().nullable(),
     archivedAt: z.number().nullable(),
-    // when it was made: the board colours projects oldest first (app/project-colour.ts); optional for an older plugin process
     createdAt: z.number().optional(),
-    // scoping (1.11.0): the owner settles its scope with the lead in the Scope tab; optional for an older plugin process
     mode: z.enum(["scoping", "active"]).optional(),
     lead: z.object({ address: z.string(), threadId: z.string(), status: z.string(), mon: z.string().nullable(), persona: personaSchema.nullish() }).nullable(),
     threads: z.number(),
-    openPlans: z.number(), // plan cards not yet decided
-    status: leadStatusSchema.nullable(), // the lead's latest orch_status (core/status.ts)
-    monType: z.string().nullable(), // the project's Pokémon type (mons.ts TYPES): its accent; null with the setting off
-    summary: projectSummarySchema.nullish(), // the row's summary; none for an archived project
-    direct: directLineSchema.nullish(), // the owner's direct messages to its lead; none before the first
-    // the PRs the plugin has read for this project's threads: a PR number in its text links only to one of these
+    openPlans: z.number(),
+    status: leadStatusSchema.nullable(),
+    monType: z.string().nullable(),
+    summary: projectSummarySchema.nullish(),
+    direct: directLineSchema.nullish(),
     prs: z.array(z.object({ number: z.number(), url: z.string(), state: z.string(), checks: z.string().nullable(), review: z.string().nullable(), attention: z.string().nullable() })).optional(),
-    // open PRs whose threads were resolved as handed off (orch_resolve handed_off), newest first
     handedOff: z.array(z.object({ pr: z.string(), owner: z.string(), note: z.string().nullable(), at: z.number(), thread: z.string() })).optional(),
-    // its open scoping tasks (1.13.0), oldest first, each with its live scoping thread's address (none: the lead plans it)
     tasks: z.array(z.object({ id: z.string(), name: z.string(), planner: z.string().nullable() })).optional(),
   }),
 );
@@ -253,38 +226,35 @@ export const agentsSchema = z.array(
     address: z.string(),
     role: z.string(),
     project: z.string().nullable(),
-    monType: z.string().nullable(), // its project's Pokémon type (the project accent); null with the setting off
+    monType: z.string().nullable(),
     priority: z.string().nullable(),
     held: z.boolean(),
     status: z.string(),
-    // the orchestrator's own status: "stopped" and "archived" live only here (bb's status says idle)
     engineStatus: z.string(),
-    idleAt: z.number().nullable(), // when it went idle, while it is
+    idleAt: z.number().nullable(),
     title: z.string().nullable(),
-    lastReport: z.string().nullable(), // the title of its last orch_report
-    provider: z.string().nullable(), // bb's provider id, when there is no model yet
-    mon: z.string().nullable(), // the base Pokémon (what was picked)
-    form: z.string().nullable(), // what it is now, after any evolution
-    formDex: z.number().nullish(), // its National Dex number (a pack's lines are unknown to the browser's mons.ts)
-    persona: personaSchema.nullish(), // a person instead of a Pokémon: the CoS, the Steward, a lead (personas.ts)
-    level: z.number(), // from XP, uncapped
-    xp: z.number(), // tokens processed by this address's turns
-    xpThis: z.number(), // XP where this level started
-    xpNext: z.number(), // XP for the next level
+    lastReport: z.string().nullable(),
+    provider: z.string().nullable(),
+    mon: z.string().nullable(),
+    form: z.string().nullable(),
+    formDex: z.number().nullish(),
+    persona: personaSchema.nullish(),
+    level: z.number(),
+    xp: z.number(),
+    xpThis: z.number(),
+    xpNext: z.number(),
     model: z.string().nullable(),
     usedTokens: z.number().nullable(),
     contextWindow: z.number().nullable(),
     branch: z.string().nullable(),
     pr: prSchema.extend({ review: z.string().nullable() }).nullable(),
-    unread: z.boolean(), // something happened since the owner last looked at the thread
-    flags: z.array(z.string()), // "unplanned"
-    scopeTask: z.object({ id: z.string(), name: z.string() }).nullable().optional(), // the open task it is the scoping thread of (1.13.0)
+    unread: z.boolean(),
+    flags: z.array(z.string()),
+    scopeTask: z.object({ id: z.string(), name: z.string() }).nullable().optional(),
   }),
 );
 export type Agents = z.infer<typeof agentsSchema>;
 
-// The project page (2026-11-16): one project's history from the events log (core/history.ts), for its Timeline, Agent
-// flow and Dependencies views. Times are ms epoch; a segment's "nolog" is before the log started (start and end only).
 export const projectHistorySchema = z.object({
   slug: z.string(),
   now: z.number(),
@@ -324,8 +294,6 @@ export const projectHistorySchema = z.object({
 });
 export type ProjectHistory = z.infer<typeof projectHistorySchema>;
 
-// Phase 3: Outputs, the finished artefacts leads and threads recorded for the owner. A file opens in bb's preview on its
-// host (hostId + path), a link in a new tab.
 export const outputsSchema = z.array(
   z.object({
     id: z.string(),
@@ -336,16 +304,13 @@ export const outputsSchema = z.array(
     hostId: z.string().nullable(),
     note: z.string().nullable(),
     project: z.string().nullable(),
-    author: z.string(), // the recording agent's address
+    author: z.string(),
     at: z.number(),
-    gone: z.boolean(), // a file output whose file no longer exists (2026-11-18: the Files view says "Missing")
+    gone: z.boolean(),
   }),
 );
 export type Outputs = z.infer<typeof outputsSchema>;
 
-// Deliverables (docs/deliverables-plan.md): a lead's finished work with proof, for the owner to approve or send back. A proof
-// file is shown through the proof route (GET `${WRITE_BASE}${PROOF_ROUTE}?id=<proof id>`, or `?output=<output id>` for a
-// recorded output's file), or opened in bb's preview.
 export const PROOF_ROUTE = "/proof";
 export const proofSchema = z.object({
   id: z.string(),
@@ -354,66 +319,47 @@ export const proofSchema = z.object({
   path: z.string().nullable(),
   url: z.string().nullable(),
   hostId: z.string().nullable(),
-  pr: prSchema.nullable(), // a PR proof's live state, when pr-watch saw the same URL
-  // 2026-11-17: a file copied into its deliverable's folder: `path` is the copy, `source` the original
+  pr: prSchema.nullable(),
   source: z.string().nullable().optional(),
   stored: z.enum(["copied", "too_big", "missing", "failed"]).optional(),
   bytes: z.number().optional(),
 });
-/** A revision as a whole card draws it: its proof with the PRs' live state, its typed blocks and its points. */
 const revisionSchema = z.object({ rev: z.number(), summary: z.string(), at: z.string(), proof: z.array(proofSchema), blocks: z.array(blockSchema), points: z.array(pointSchema), prs: z.array(prSchema) });
-/** One deliverable whole: what a card draws (the `deliverable` read; the list's rows in review carry it inline). */
 export const deliverableSchema = z.object({
   id: z.string(),
   project: z.string().nullable(),
-  lead: z.string(), // the delivering lead's address
+  lead: z.string(),
   leadMon: z.string().nullable(),
-  leadPersona: personaSchema.nullish(), // the lead's person (2026-11-18): null with the setting off, no pack, or the lead gone
+  leadPersona: personaSchema.nullish(),
   title: z.string(),
   summary: z.string(),
   state: z.enum(["review", "approved", "changes", "withdrawn"]),
-  rev: z.number(), // the revision the owner's writes must carry
+  rev: z.number(),
   createdAt: z.number(),
   updatedAt: z.number(),
   revisions: z.array(revisionSchema),
   feedback: z.array(z.object({ rev: z.number(), by: z.string(), text: z.string().nullable(), at: z.string(), outcome: z.enum(["approved", "changes"]) })),
   withdrawn: z.object({ at: z.string(), reason: z.string().nullable() }).nullable(),
-  // the owner's next action for the lead, and the outcome and note the lead closed it with (state closed)
   next: z
     .object({ text: z.string(), rev: z.number(), at: z.string(), item: z.string(), state: z.enum(["open", "closed", "dead"]), outcome: z.string().nullable(), note: z.string().nullable(), closedAt: z.number().nullable() })
     .nullable(),
-  // delivered while its project was scoping: reviewed in the Scope tab, not on Deliverables (1.11.0)
   scope: z.boolean().optional(),
-  scopeTask: z.string().optional(), // the scoping task it is reviewed under (1.12.0)
-  folder: z.string().optional(), // its own folder of files and README.md (2026-11-17)
-  // a Multiplayer board's review: reviewed on that board, never on Deliverables
+  scopeTask: z.string().optional(),
+  folder: z.string().optional(),
   board: z.object({ id: z.string(), record: z.string().nullable(), flag: z.string().nullable() }).optional(),
 });
 export type Deliverables = z.infer<typeof deliverableSchema>[];
-/**
- * The Deliverables list (2026-11-23, lag: the whole list was 743 KB for 200 deliverables): each row without its
- * revisions, plus its shown revision's summary, time, proof count and first screenshot (a closed card's look). A row in
- * review carries its revisions too: the cards the owner acts on draw at once. So does the card Delivered shows on its
- * own when nothing there is in review (its newest), so it never draws loading. The rest load with `deliverable` when
- * one is opened, and search and Files read `deliverableIndex` (app/deliverable-data.ts puts them back together).
- */
 export const deliverableRowSchema = deliverableSchema.omit({ revisions: true }).extend({
   latest: z.object({ rev: z.number(), summary: z.string(), at: z.string(), proofs: z.number(), shot: proofSchema.nullable() }).nullable(),
   revisions: z.array(revisionSchema).nullable(),
 });
 export const deliverablesSchema = z.array(deliverableRowSchema);
 export type DeliverableRows = z.infer<typeof deliverablesSchema>;
-/**
- * What search and Files read of every listed deliverable: each revision's summary, points and proof (no PR state). `rev`
- * and `updatedAt` are the deliverable's when it was read, so a cached index can tell it is older than the list.
- */
 export const deliverableIndexSchema = z.array(
   z.object({ id: z.string(), rev: z.number(), updatedAt: z.number(), revisions: z.array(z.object({ rev: z.number(), summary: z.string(), at: z.string(), points: z.array(pointSchema), proof: z.array(proofSchema.omit({ pr: true })) })) }),
 );
 export type DeliverableIndex = z.infer<typeof deliverableIndexSchema>;
 
-// Each deliverable's own folder (2026-11-17), listed for the Deliverables tab: its files by kind, proof copies and the
-// rest (a thread's notes and outputs), and its README. `hostId`: the bb host the folders are on, for bb's preview.
 export const folderFileSchema = z.object({ path: z.string(), name: z.string(), kind: z.enum(["images", "videos", "artifacts"]), bytes: z.number(), at: z.number(), dir: z.boolean() });
 export const deliverableFoldersSchema = z.object({
   hostId: z.string().nullable(),
@@ -422,19 +368,12 @@ export const deliverableFoldersSchema = z.object({
 export type DeliverableFolders = z.infer<typeof deliverableFoldersSchema>;
 export type FolderFile = z.infer<typeof folderFileSchema>;
 
-// The Scope tab (1.11.0): each scoping project and the cards waiting on the owner there; badge: those cards. Its
-// deliverables come from the deliverables read (scope: true).
-// 1.12.0: an active project is listed too while it has open scoping tasks; whole says it scopes as a whole, and its tasks
-// group the cards (by scopeTask). Both optional for an older plugin process (every listed project scoped as a whole).
 export const scopeSchema = z.object({
   projects: z.array(
     z.object({
       slug: z.string(),
       cards: z.array(cardSchema),
       whole: z.boolean().optional(),
-      // planner (1.13.0): the task's live scoping thread (bb's title, the engine's status), none while the lead plans it.
-      // idleAt and report (2026-11-17): since when it is idle, and the title and time of its last orch_report, for the
-      // status card the entry shows while nothing waits; optional for an older plugin process
       tasks: z
         .array(
           z.object({
@@ -486,17 +425,12 @@ export const pathwaysSchema = z.object({
 export type Pathways = z.infer<typeof pathwaysSchema>;
 export const pathwaysViewSchema = pathwaysSchema.extend({ fetchedAt: z.number().nullable(), refreshing: z.boolean() });
 
-// Every project in the sidebar's placing order (engine.projects()), with its accent type (none with pokemon off); the page
-// puts it in the viewer's own section order (core/project-order.ts).
 export const projectOrderSchema = z.array(z.object({ slug: z.string(), monType: z.string().nullable() }));
 export type ProjectOrder = z.infer<typeof projectOrderSchema>;
 
-/** Who the page is for: the ownerName setting ("" = the page says "you") and the CoS's name. */
-// linearWorkspace / linearTeams: where a Linear id in the command center links (app/refs.ts); empty: no link
 export const configSchema = z.object({ ownerName: z.string(), cosTitle: z.string(), linearWorkspace: z.string().optional(), linearTeams: z.array(z.string()).optional(), hiddenTabs: z.array(z.string()).optional(), shown: z.array(z.string()).optional() });
 export type Config = z.infer<typeof configSchema>;
 
-// The Feed tab (core/feed.ts). `line`: where a reply goes (lead:<slug> or cos), none for a post that only opens.
 export const feedMsgSchema = z.object({
   id: z.string(),
   who: z.string(),
@@ -551,25 +485,6 @@ export const feedSchema = z.object({
 });
 export type Feed = z.infer<typeof feedSchema>;
 
-// ---- the work board's data (2026-11-23, SCOPE st-070570dd pieces 1 and 3; core/work-board.ts, core/tasks.ts). No UI here.
-// A card is a task: a lead's status step with a stable id (t-xxxxxx). Threads, PRs, deliverables and cards attach to it
-// and its column is derived from them, in this precedence: a hand move (while the attachments' signature `sig` is what
-// it was at the move), then Shipped, Waiting on you, Blocked, In review, In progress, Planned.
-// - Shipped: the lead marked the step done (whatever is live); or it has at least one PR or deliverable (closed PRs and
-//   withdrawn deliverables aside), every PR is merged, every deliverable approved, and no attached thread is still live
-//   (a PR a thread reported with orch_report that bb never read counts, with an unknown state, so it blocks this)
-//   (since: the last merge or approval). A merged PR with a live thread stays In progress until the thread is resolved.
-// - Waiting on you: an open card at the owner's level (deferred and held ones too, flagged), a deliverable in the owner's
-//   review, or an open PR ready to merge.
-// - Blocked: the step's own blocker (orch_status steps[].blocker); the lead's project blockers, on its current step's
-//   task; or an attached live thread in error.
-// - In review: an open (not draft) PR that doesn't need its thread's fix (CI, a reviewer, or nothing named yet).
-// - In progress: a live thread attached (working or idle), the lead's current step, or a draft PR or one that needs a fix.
-// - Planned: anything else.
-// Bounds: open tasks; Shipped ones shipped since `since` (default 7 days), plus undated ones (the upgrade's) still in
-// the lead's list. Unfiled: only live things (live threads, open or draft PRs a live agent holds, deliverables in review
-// or sent back, open cards) that no task holds. `dropped`: tasks dropped with attachments (their unfiled list), for the CoS to confirm
-// or restore; one dropped with nothing attached never shows. `source: "github"` is for merges read from GitHub (later).
 export const BOARD_COLUMNS = ["planned", "in_progress", "in_review", "waiting", "blocked", "shipped"] as const;
 export type BoardColumn = (typeof BOARD_COLUMNS)[number];
 export const COLUMN_LABEL: Record<BoardColumn, string> = { planned: "Planned", in_progress: "In progress", in_review: "In review", waiting: "Waiting on you", blocked: "Blocked", shipped: "Shipped" };
@@ -582,8 +497,8 @@ const boardPrSchema = z.object({
   review: z.string().nullable(),
   attention: z.string().nullable(),
   wait: z.enum(["ci", "review", "merge", "blocked"]).nullable(),
-  at: z.number(), // when this state was last seen to change (a merge: when it merged, where known)
-  thread: z.string().nullable(), // the address that holds it
+  at: z.number(),
+  thread: z.string().nullable(),
   source: z.enum(["orchestrator", "github"]),
 });
 const boardDeliverableSchema = z.object({ id: z.string(), title: z.string(), state: z.string(), rev: z.number(), at: z.number(), approvedAt: z.number().nullable() });
@@ -594,13 +509,13 @@ export const boardTaskSchema = boardAttachmentsSchema.extend({
   project: z.string(),
   title: z.string(),
   state: z.enum(["open", "shipped", "dropped"]),
-  step: z.object({ n: z.number(), state: z.enum(STEP_STATES) }).nullable(), // its place in the lead's list now (from 1), or null once it left
+  step: z.object({ n: z.number(), state: z.enum(STEP_STATES) }).nullable(),
   column: z.enum(BOARD_COLUMNS),
-  derived: z.enum(BOARD_COLUMNS), // the column without the hand move
-  since: z.number().nullable(), // when it entered the column, where known
-  why: z.string(), // what put it there, a few words
+  derived: z.enum(BOARD_COLUMNS),
+  since: z.number().nullable(),
+  why: z.string(),
   hand: z.object({ column: z.enum(BOARD_COLUMNS), at: z.number(), holds: z.boolean() }).nullable(),
-  sig: z.string(), // the attachments' signature now: a hand move stores it, and holds while it stays the same
+  sig: z.string(),
 });
 export const workBoardSchema = z.object({
   now: z.number(),
@@ -618,41 +533,32 @@ export type BoardTask = z.infer<typeof boardTaskSchema>;
 export type BoardAttachments = z.infer<typeof boardAttachmentsSchema>;
 export type WorkBoard = z.infer<typeof workBoardSchema>;
 
-// the since-T lens (2026-11-23, SCOPE piece 6; core/since.ts): counts from task_moves since T and the allowlist (merges and
-// releases from GitHub's cached read and the log, owner approvals), each moved task's from and to, and merges no task holds
 const sinceColumn = z.enum([...BOARD_COLUMNS, "dropped"]);
 export const boardSinceSchema = z.object({
   since: z.number(),
   now: z.number(),
-  looked: z.number().nullable(), // the feed's seen line: "since I last looked"
+  looked: z.number().nullable(),
   counts: z.object({ shipped: z.number(), new: z.number(), waiting: z.number(), blocked: z.number(), dropped: z.number() }),
   moved: z.record(z.string(), z.object({ from: sinceColumn.nullable(), to: sinceColumn, at: z.number(), isNew: z.boolean() })),
   merged: z.number(),
   releases: z.array(z.object({ tag: z.string(), name: z.string(), at: z.number(), url: z.string() })),
   approved: z.number(),
-  // whose merges counted: the githubLogin setting's, else gh's signed-in login's (each plus tasked PRs), else tasked PRs only
   whose: z.discriminatedUnion("by", [z.object({ by: z.enum(["setting", "gh"]), login: z.string() }), z.object({ by: z.literal("tasked"), login: z.null() })]),
-  // what each figure counted (2026-11-24), so a pill shows exactly its cards; dropped tasks have no card, so their titles
   picks: z.object({ shipped: z.array(z.string()), new: z.array(z.string()), waiting: z.array(z.string()), blocked: z.array(z.string()), merged: z.array(z.string()) }),
   dropped: z.array(z.object({ id: z.string(), title: z.string(), project: z.string() })),
   noTask: z.array(z.object({ url: z.string(), number: z.number().nullable(), title: z.string(), mergedAt: z.number() })),
-  github: z.object({ at: z.number().nullable(), repos: z.number(), errors: z.array(z.string()), pending: z.number() }), // pending: repos waiting their turn for a read
+  github: z.object({ at: z.number().nullable(), repos: z.number(), errors: z.array(z.string()), pending: z.number() }),
 });
 export type BoardSince = z.infer<typeof boardSinceSchema>;
 
-/**
- * The viewer's view choices the plugin keeps (2026-11-24): which of List or Board Projects opens on (null until one is
- * picked), and each work board's folded columns by its board ("-" for every project, else the project's slug; a board
- * missing was never folded). What can't be read is no choice, field by field.
- */
 export const PROJECTS_VIEWS = ["list", "board"] as const;
 export type ProjectsViewPick = (typeof PROJECTS_VIEWS)[number];
 export const viewPrefsSchema = z.object({
   projectsView: z.enum(PROJECTS_VIEWS).nullable().catch(null),
   boardFolds: z.record(z.string(), z.array(z.string())).catch({}),
+  rev: z.number().int().nonnegative().catch(0),
 });
 export type ViewPrefs = z.infer<typeof viewPrefsSchema>;
-/** One change the viewer made: the view picked, or one board's folded columns. */
 export const viewPrefBody = z.union([
   z.object({ projectsView: z.enum(PROJECTS_VIEWS) }).strict(),
   z.object({ board: z.string().min(1).max(40), folded: z.array(z.enum(BOARD_COLUMNS)).max(BOARD_COLUMNS.length) }).strict(),
@@ -661,7 +567,6 @@ export type ViewPrefBody = z.infer<typeof viewPrefBody>;
 
 export const rpcContract = defineRpcContract({
   config: { input: z.null(), output: configSchema },
-  // the one-page guide (USAGE.md), for the How it works view
   howItWorks: { input: z.null(), output: z.object({ markdown: z.string() }) },
   needsYou: { input: z.object({ zone: z.string().max(64) }).strict(), output: needsYouSchema },
   board: { input: z.null(), output: boardSchema },
@@ -673,28 +578,20 @@ export const rpcContract = defineRpcContract({
   outputs: { input: z.null(), output: outputsSchema },
   deliverableFolders: { input: z.null(), output: deliverableFoldersSchema },
   deliverables: { input: z.null(), output: deliverablesSchema },
-  // one deliverable whole, when a card is opened (null: gone)
   deliverable: { input: z.object({ id: z.string().min(1).max(80) }).strict(), output: deliverableSchema.nullable() },
   deliverableIndex: { input: z.null(), output: deliverableIndexSchema },
   scope: { input: z.null(), output: scopeSchema },
   pathways: { input: z.object({ slug: z.string().min(1).max(40), refresh: z.boolean().optional() }).strict(), output: pathwaysViewSchema },
   projectOrder: { input: z.null(), output: projectOrderSchema },
-  // the chat log's read (1.10.0): one project's direct messages, newest first, only when the chat is open
   directHistory: { input: z.object({ slug: z.string().min(1).max(40), before: z.number().nullable().optional(), limit: z.number().int().min(1).max(100).optional() }).strict(), output: z.object({ messages: z.array(directMessageSchema), more: z.boolean() }) },
   feed: { input: z.object({ cursor: z.string().max(200).nullable(), filter: z.enum(FEED_FILTERS) }).strict(), output: feedSchema },
-  // "You and the CoS" on the Chat tab: the owner's tracked messages and the CoS's replies, oldest first
   cosLine: { input: z.object({ before: z.number().nullable() }).strict(), output: z.object({ entries: z.array(z.object({ kind: z.enum(["owner", "cos", "hidden"]), msg: feedMsgSchema.nullable(), re: z.string().nullable(), hidden: z.number() })), more: z.boolean() }) },
-  // a post's conversation before an entry's time ("Show N earlier replies"), or all of it (the desktop pane)
-  // the work board (core/work-board.ts): every project's tasks with their attachments and derived columns. Read-only.
   workBoard: { input: z.object({ since: z.number().nullable().optional(), project: z.string().min(1).max(40).nullable().optional() }).strict(), output: workBoardSchema },
-  // the since-T lens (core/since.ts): read-only; GitHub comes from the background job's cache, never read here
-  // since: T, or null for "since I last looked" (the feed's seen line, resolved by the server; the output's since is T)
   boardSince: { input: z.object({ since: z.number().nullable(), project: z.string().min(1).max(40).nullable().optional() }).strict(), output: boardSinceSchema },
   viewPrefs: { input: z.null(), output: viewPrefsSchema },
   feedThread: { input: z.object({ about: z.string().min(1).max(400), before: z.number().nullable() }).strict(), output: z.object({ messages: z.array(feedMsgSchema), more: z.boolean() }) },
 });
 
-// ---- the write routes (POST, JSON body). Each answers { ok: true } or { ok: false, error: { kind, message } }.
 export const secretBody = z.object({ id: z.string(), rev: z.number().int(), value: z.string().min(1).max(4000), via: z.enum(["desktop", "phone"]) }).strict();
 export const answerBody = z.object({ id: z.string(), rev: z.number().int(), option: z.string().nullable(), text: z.string().max(4000).nullable(), via: z.enum(["desktop", "phone", "voice"]) }).strict();
 export const deferBody = z.object({ id: z.string(), rev: z.number().int(), preset: z.enum(["1h", "evening", "tomorrow", "manual"]), zone: z.string().max(64), via: z.enum(["desktop", "phone", "voice"]) }).strict();
@@ -704,36 +601,25 @@ export const ruleRevokeBody = z.object({ id: z.string() }).strict();
 export const resendBody = z.object({ id: z.string() }).strict();
 export const priorityBody = z.object({ slug: z.string(), priority: z.enum(["urgent", "high", "normal", "low"]) }).strict();
 export const holdBody = z.object({ slug: z.string(), held: z.boolean() }).strict();
-// the owner's direct message to a project's lead (PLAN 3); followUp names an earlier one to the same lead.
-// 2026-11-17: `images` are ids the image write returned for this lead (never paths: a page can't attach a file of its
-// choosing), at most MAX_IMAGES; a message with images may have no words.
 export const directMessageBody = z
   .object({ slug: z.string(), text: z.string().max(4000), followUp: z.string().nullable().optional(), images: z.array(z.string().min(1).max(40)).max(MAX_IMAGES).optional(), about: z.string().min(1).max(400).nullable().optional(), task: z.string().min(1).max(40).optional() })
   .strict()
   .refine((b) => b.text.trim().length > 0 || (b.images?.length ?? 0) > 0, { message: "a message needs words or an image" });
-// the owner's hand move of a work-board task (SCOPE piece 5): it holds until something attached changes,
-// and its lead is told. A move writes only the task's hand move: it never merges, answers or approves anything.
 export const boardMoveBody = z.object({ task: z.string().min(1).max(40), to: z.enum(BOARD_COLUMNS) }).strict();
-// `task` (2026-11-23): the work-board task it is about (its id), from the board's card panel.
-// one image per write, as base64 (bb's local routes take JSON only); the length cap is checked before anything decodes
 export const directImageBody = z
   .object({ slug: z.string().min(1).max(40), name: z.string().min(1).max(200), mime: z.enum(IMAGE_TYPES), data: z.string().min(1).max(Math.ceil(MAX_IMAGE_BYTES / 3) * 4) })
   .strict();
-// upTo: the newest answer the row showed; the seen cursor never passes it
 export const directSeenBody = z.object({ slug: z.string(), upTo: z.number() }).strict();
 export const archiveBody = z.object({ threadId: z.string() }).strict();
 export const archiveProjectBody = z.object({ slug: z.string().min(1).max(40) }).strict();
 export const outputRemoveBody = z.object({ id: z.string() }).strict();
-// pinned documents: target is a pasted path or URL, or a deliverable id of the project; title is optional
 export const pinBody = z.object({ slug: z.string().min(1).max(40), target: z.string().trim().min(1).max(4000), title: z.string().max(120).nullable().optional() }).strict();
 export const unpinBody = z.object({ id: z.string().min(1).max(40) }).strict();
 export const startLeadBody = z.object({ slug: z.string().min(1).max(40) }).strict();
-// 2026-11-17: with images the bar staged (cosImage), by id; then the words may be empty
 export const cosMessageBody = z
   .object({ text: z.string().trim().max(8000), images: z.array(z.string().min(1).max(40)).max(MAX_IMAGES).optional(), about: z.string().min(1).max(400).nullable().optional() })
   .strict()
   .refine((b) => b.text.length > 0 || (b.images?.length ?? 0) > 0, { message: "a message needs words or an image" });
-// one image for the CoS bar's next send, as directImageBody without the project
 export const cosImageBody = directImageBody.omit({ slug: true });
 export const interactionAnswerBody = z
   .object({
@@ -742,20 +628,14 @@ export const interactionAnswerBody = z
     answers: z.record(z.string(), z.object({ selected: z.array(z.string().max(500)).max(50), freeText: z.string().max(4000).optional() }).strict()),
   })
   .strict();
-// the feed's seen-up-to line (D5): moved when the owner leaves the feed or marks all read, only forward
 export const feedSeenBody = z.object({ upTo: z.number() }).strict();
-// Resend under one of the owner's own messages: delivered again, or batched, unread again and its recipient re-woken
 export const feedResendBody = z.object({ id: z.string().min(1).max(40) }).strict();
 export const roleStartBody = z.object({ role: z.enum(["cos", "steward"]) }).strict();
-// next: what the lead does with it next ("forward this to the team"); it reaches the lead as an item they must ack
 export const approveBody = z.object({ id: z.string(), rev: z.number().int(), note: z.string().max(4000).nullable(), next: z.string().max(4000).nullable().optional() }).strict();
 export const requestChangesBody = z.object({ id: z.string(), rev: z.number().int(), text: z.string().min(1).max(4000) }).strict();
-// the owner's scoping switches in the Projects view (1.13.0): a project's mode, as orch_project_mode sets it; a thread made
-// the scoping thread of an open task (task: its id or name) or of a new one (name), or stopped
 export const projectModeBody = z.object({ slug: z.string().min(1).max(40), mode: z.enum(["scoping", "active"]) }).strict();
 export const scopeThreadBody = z.object({ threadId: z.string().min(1), task: z.string().max(80).nullable().optional(), name: z.string().max(200).nullable().optional() }).strict();
 export const unscopeThreadBody = z.object({ threadId: z.string().min(1) }).strict();
-// the owner's PR-wait changes from the Watchers list (the CoS's are orch_watch): any wait, for any live agent
 const waitWhen = z.enum(["approved", "green", "ready", "merged"]);
 export const watchAddBody = z.object({ to: z.string().min(1).max(120), pr: z.string().trim().min(1).max(300), when: waitWhen, note: z.string().trim().min(1).max(600) }).strict();
 export const watchRetargetBody = z.object({ id: z.string().min(1).max(40), pr: z.string().trim().max(300).nullable().optional(), when: waitWhen.nullable().optional() }).strict();

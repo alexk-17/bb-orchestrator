@@ -1,11 +1,3 @@
-// The work board's since-T lens (2026-11-23, SCOPE piece 6; mockup since-1-picker). Redrawn 2026-11-24 (the owner:
-// "this layout is gross"): the since picker, the "only cards that moved" toggle and "What counts" (an info button's
-// popover) sit inline in the board's one toolbar row, beside List | Board; under them one row of small count pills. A
-// pill that counts tasks on the board (shipped, new, waiting on you, blocked, PRs merged) filters the board to exactly
-// the tasks it counted; one whose things have no card (dropped, releases, PRs on no task) opens their list. Zeros are
-// dimmed, and "on no task" goes at zero. No box, no prose rows, no strip of bare PR chips. The board (its header slot)
-// renders <BoardSince> and gets the lens back through onLens: T, each moved task's from and to, the toggle and the
-// picked pill. Cards render <MovedChip>. The picker's choice and the toggle are saved per viewer (localStorage).
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { experimental_useRpcQuery, useRealtime } from "@get-bb/plugin-sdk/app";
 import { ChevronDown, Info } from "lucide-react";
@@ -14,6 +6,7 @@ import { fileThemText, parseChoice, sinceOf, SINCE_MAX_MS, typedSince, WEEKDAY, 
 import { KIND_TONES, css } from "./palette.ts";
 import { styleHref } from "./style-href.ts";
 import { pillsOf, type Pill } from "./since-pills.ts";
+import type { BoardShown } from "./work-board.tsx";
 import { touches } from "../change-notice.ts";
 import { useChangeNotice } from "./change-listener.ts";
 import { storage } from "./column-widths.ts";
@@ -23,8 +16,6 @@ import { Input } from "./ui/input.tsx";
 import { Button } from "./ui/button.tsx";
 import { cx } from "./ui.tsx";
 
-/** What the board takes from the lens. `since` is null until the first read resolves "since I last looked". `pick`: the
- *  count pill picked, with exactly the tasks it counted (null: none). */
 export interface Lens {
   since: number | null;
   moved: Record<string, SinceMove>;
@@ -32,18 +23,16 @@ export interface Lens {
   pick: { key: SincePick; ids: string[] } | null;
 }
 
-const SINCE_CHANNEL = "board-since"; // board-since.ts publishes it when a GitHub read changes the cache
+const SINCE_CHANNEL = "board-since";
 const CHOICE_KEY = "orch.boardSince.choice";
 const ONLY_KEY = "orch.boardSince.onlyMoved";
 const REFETCH_MS = 1_500;
-/** A typed time is taken once the typing pauses this long, so each keystroke in the date field doesn't re-read the board. */
 const TYPED_MS = 700;
 
 const COLUMN_NAMES: Record<BoardColumn | "dropped", string> = { planned: "Planned", in_progress: "In progress", in_review: "In review", waiting: "Waiting on you", blocked: "Blocked", shipped: "Shipped", dropped: "Dropped" };
 const COUNTED = "A task changing column, a new task, a task dropped with something attached (under dropped only: it has no card), a merge, release or approval, a card now waiting on you.";
 const NOT_COUNTED =
-  "Plan edits (a task dropped with nothing attached, or added and dropped again), the CoS's tidy records, thread status flips (about 5,000 in a weekend), leads' answers to their own threads, notices (imports, mon evolutions, handovers), acks, dream runs.";
-/** Whose merges counted (core/since.ts whoseMerges), in the words of What counts. */
+  "Plan edits (quiet drops: a task dropped with nothing attached, even one added since), the CoS's tidy records, thread status flips (about 5,000 in a weekend), leads' answers to their own threads, notices (imports, mon evolutions, handovers), acks, dream runs.";
 const whoseText = (w: Strip["whose"]) =>
   w.by === "tasked" ? "Only PRs a task holds: no GitHub login is set (githubLogin) or known to gh." : `PRs @${w.login} merged${w.by === "gh" ? " (gh's signed-in login)" : ""}, and PRs a task holds.`;
 
@@ -65,7 +54,6 @@ function save(key: string, v: unknown): void {
 
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const hm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-/** "Sat 11:30" within the week, else "20 Nov 11:30". */
 export function shortWhen(at: number, now: number): string {
   const d = new Date(at);
   return now - at < 6 * 86_400_000 ? `${DAYS[d.getDay()]} ${hm(d)}` : `${d.getDate()} ${d.toLocaleString("en", { month: "short" })} ${hm(d)}`;
@@ -73,14 +61,11 @@ export function shortWhen(at: number, now: number): string {
 const shortDay = (at: number, now: number) => shortWhen(at, now).replace(/ \d\d:\d\d$/, "");
 const hours = (ms: number) => (ms < 48 * 3_600_000 ? `${Math.max(1, Math.round(ms / 3_600_000))} h` : `${Math.round(ms / 86_400_000)} d`);
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-/** A datetime-local value for `at`, local time. */
 const localInput = (at: number) => {
   const d = new Date(at - new Date(at).getTimezoneOffset() * 60_000);
   return d.toISOString().slice(0, 16);
 };
 
-// a pill's tint follows its column's on the board (work-board.tsx), so the pill and the column read as one; the rest
-// stay plain. Picked: filled.
 const pillCss = /* css */ `
 .wb-pill[data-pill="waiting"] { background: color-mix(in srgb, var(--warning, ${css(KIND_TONES.deferred)}) 14%, transparent); }
 .wb-pill[data-pill="blocked"] { background: color-mix(in srgb, var(--destructive, ${css(KIND_TONES.alarm)}) 10%, transparent); }
@@ -89,7 +74,6 @@ const pillCss = /* css */ `
 .wb-pill[data-zero] { opacity: 0.5; }
 `;
 
-/** A pill's button: its figure and words; a zero is dimmed and, unless it is the picked one, does nothing. */
 const pillButton = (p: Pill, on = false) => ({
   variant: "outline" as const,
   size: "xs" as const,
@@ -107,7 +91,6 @@ const pillButton = (p: Pill, on = false) => ({
   ),
 });
 
-/** The chip on a card that moved since T: "new", "shipped Sat" or "moved Sat", with from → to in its title. */
 export function MovedChip({ move, now }: { move: SinceMove | undefined; now: number }) {
   if (!move) return null;
   const day = shortDay(move.at, now);
@@ -128,14 +111,12 @@ function Choice({ on, onClick, children }: { on: boolean; onClick: () => void; c
   );
 }
 
-/** The picker, the strip and the toggle. `project`: the board's filter (null: all projects). */
-export function BoardSince({ project, onLens }: { project: string | null; onLens?: (lens: Lens) => void }) {
+export function BoardSince({ project, onLens, shown }: { project: string | null; onLens?: (lens: Lens) => void; shown?: BoardShown | null }) {
   const [choice, setChoice] = useState<SinceChoice>(() => load(CHOICE_KEY, parseChoice, { kind: "weekday" }));
   const [onlyMoved, setOnlyMoved] = useState<boolean>(() => load(ONLY_KEY, (v) => v === true, false));
   const [open, setOpen] = useState(false);
   const [pill, setPill] = useState<SincePick | null>(null);
   const [sent, setSent] = useState<string | null>(null);
-  // the clock the presets read, a minute at a time (sinceOf steps "Last 24 h" in 15 minutes, so the input holds still)
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 60_000);
@@ -161,7 +142,6 @@ export function BoardSince({ project, onLens }: { project: string | null; onLens
     },
     [],
   );
-  // only a change to what the lens reads (change-notice.ts READS.boardSince): a move, a PR link, a merge, an approval
   useChangeNotice(useCallback((n: unknown) => void (touches(n, "boardSince") && soon()), [soon]));
   useRealtime(SINCE_CHANNEL, soon);
 
@@ -170,7 +150,7 @@ export function BoardSince({ project, onLens }: { project: string | null; onLens
   }, [data, since, onlyMoved, pill, onLens]);
 
   const pick = (c: SinceChoice) => {
-    clearTimeout(typed.current); // a preset chosen while a typed time waits wins
+    clearTimeout(typed.current);
     setChoice(c);
     save(CHOICE_KEY, c);
     setSent(null);
@@ -193,7 +173,8 @@ export function BoardSince({ project, onLens }: { project: string | null; onLens
     choice.kind === "24h" ? "Last 24 h" : choice.kind === "weekday" ? `Since ${WEEKDAY.label}` : choice.kind === "looked" ? `Since I last looked${T ? ` (${shortWhen(T, now)})` : ""}` : `Since ${shortWhen(T ?? now, now)}`;
   const gh = data?.github;
   const when = T !== null ? shortWhen(T, now) : "T";
-  const pills = data ? pillsOf(data, when) : [];
+  // status flips refetch the board, never the strip: the pills follow the board read at the same T
+  const pills = data ? pillsOf(data, when, shown && shown.since === data.since ? shown.ids : null) : [];
   const toggle = (k: SincePick) => setPill((v) => (v === k ? null : k));
   const ago = (at: number) => shortWhen(at, now);
 
@@ -264,7 +245,6 @@ export function BoardSince({ project, onLens }: { project: string | null; onLens
           )}
         </PopoverContent>
       </Popover>
-      {/* the counts: one row of pills under the toolbar (basis-full starts the row) */}
       <div data-since-counts className="flex min-w-0 basis-full flex-wrap items-center gap-1.5" role="group" aria-label={`What changed since ${when}`}>
         {data ? (
           pills.map((p) =>

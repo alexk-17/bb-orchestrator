@@ -1,13 +1,3 @@
-// The work board's since-T lens (SCOPE piece 6). The owner comes back after time away, picks a time, and
-// reads one line of counts and the cards that moved. So:
-// - the counts must match the task_moves log and the allowlist exactly, and nothing else: about 5,000 thread status
-//   flips a weekend must never count, and a quiet drop (a plan edit) isn't news;
-// - every picker option must give its own T ("since I last looked" alone fails after a weekend);
-// - merges come from GitHub as well as the log (the log misses merges), counted once, and the merges no task holds are
-//   listed so the CoS can file them; whose merges count never falls back to everyone's (a colleague's merge isn't news);
-// - the CoS's tidy records and a task added and quietly dropped in the window are plan edits, not news;
-// - gh is only ever asked to read.
-// All data is made up.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
@@ -18,7 +8,7 @@ import { boardSinceSchema } from "../contract.ts";
 import { registerBoardSince, SINCE_REFRESH_MS } from "../board-since.ts";
 import { linkPr } from "../core/tasks.ts";
 import { pillsOf } from "../app/since-pills.ts";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -55,7 +45,6 @@ function setup() {
 const strip = (s: ReturnType<typeof setup>, since: number, extra: Partial<Parameters<typeof sinceStrip>[1]> = {}) =>
   sinceStrip(s.db as never, { since, now: s.clock.t, looked: null, project: null, cache: emptyCache(), attached: new Set(), whose: whoseMerges("", null), ...extra });
 
-/** A made-up weekend: four tasks on Thursday, then moves from Saturday to Sunday, and 300 thread status flips. */
 function weekend() {
   const s = setup();
   const [login, billing, docs, idea] = s.publish([
@@ -65,11 +54,9 @@ function weekend() {
     { title: "Old idea", state: "next" },
   ]);
   s.spawn("T-1", login!);
-  // Saturday 02:00: the login thread flips working/idle 300 times; no column changes
   s.at(SAT + 2 * H);
   for (let i = 0; i < 300; i++) s.e.setStatus("T-1", i % 2 ? "idle" : "active");
   assert.equal(s.e.settleBoard(), 0, "thread status flips move no card");
-  // Saturday 03:10: billing gets a blocker
   s.at(SAT + 3 * H + 10 * 60_000);
   const steps = (o: { loginDone?: boolean; billingBlocked?: boolean; extra?: unknown[]; dropIdea?: boolean }) => [
     { id: login, title: "Login page", state: o.loginDone ? "done" : "current" },
@@ -79,16 +66,13 @@ function weekend() {
     ...(o.extra ?? []),
   ];
   s.publish(steps({ billingBlocked: true }));
-  // Saturday 11:30: login is done; a new task, Search, is added; the old idea leaves the list with nothing attached
   s.at(SAT + 11.5 * H);
   const search = s.publish(steps({ loginDone: true, billingBlocked: true, dropIdea: true, extra: [{ title: "Search", state: "next" }] }))[3]!;
-  // Sunday 09:05: docs has a deliverable in the owner's review; a new task, Push, gets a thread
   s.at(SUN + 9 * H + 5 * 60_000);
   s.e.deliver(s.lead, { title: "Docs preview", summary: "Ready.", proof, task: docs }, place);
   const push = s.publish(steps({ loginDone: true, billingBlocked: true, dropIdea: true, extra: [{ id: search, title: "Search", state: "next" }, { title: "Push", state: "next" }] }))[4]!;
   s.spawn("T-2", push);
   s.e.settleBoard();
-  // Sunday 10:00: billing is unblocked (a round trip back to Planned); Push leaves the list with its thread attached
   s.at(SUN + 10 * H);
   s.publish(steps({ loginDone: true, dropIdea: true, extra: [{ id: search, title: "Search", state: "next" }] }));
   s.at(MON);
@@ -104,7 +88,6 @@ test("the strip counts the task_moves log since T and nothing else: a weekend, c
   assert.deepEqual(st.moved[ids.billing], { from: "planned", to: "planned", at: SUN + 10 * H, isNew: false }, "a round trip is a move, from its first row's from to its last row's to");
   assert.deepEqual(st.moved[ids.login], { from: "in_progress", to: "shipped", at: SAT + 11.5 * H, isNew: false });
   assert.equal(st.moved[ids.search]!.isNew, true);
-  // every count is a moved card, so "only cards that moved" never hides a counted one
   const rows = s.db.prepare(`SELECT COUNT(*) AS n FROM task_moves WHERE at >= ?`).get(FRI18) as { n: number };
   assert.ok(rows.n >= Object.keys(st.moved).length);
 });
@@ -133,9 +116,6 @@ test("now waiting means still waiting: a task that waited and moved on doesn't c
   assert.equal(moved["t-b"], undefined);
 });
 
-// The count pills (2026-11-24): a pill the owner clicks shows exactly the cards its figure counted. A board filter on a
-// task's last column would disagree with the figure: a task blocked on Saturday and unblocked on Sunday "became
-// blocked", and one shipped and pulled back "shipped", though neither sits in that column now.
 test("each figure names exactly the tasks it counted, so its pill shows them, even a task that has moved on since", () => {
   const { s, ids } = weekend();
   const st = strip(s, FRI18);
@@ -148,7 +128,6 @@ test("each figure names exactly the tasks it counted, so its pill shows them, ev
   assert.deepEqual(st.dropped, [{ id: ids.push, title: "Push", project: "demo" }], "a dropped task has no card: the pill lists it by title");
   assert.equal(st.dropped.length, st.counts.dropped);
   assert.doesNotThrow(() => boardSinceSchema.parse(st), "the read's contract carries them");
-  // shipped, then pulled back to review inside the window: still counted, still picked
   const { counts, moved, ids: picked } = countMoves(
     [
       { task: "t-a", project: "p", from_col: "in_review", to_col: "shipped", at: 10, why: null, seq: 1 },
@@ -172,12 +151,10 @@ test("the merged pill shows the tasks holding a merge that counted; merges no ta
   assert.deepEqual(st.noTask.map((m) => m.number), [1302]);
   const pills = pillsOf(st, "Fri 18:00");
   assert.deepEqual(pills.map((p) => `${p.key}:${p.n}:${p.does}`), ["shipped:1:filter", "new:1:filter", "waiting:1:filter", "blocked:1:filter", "dropped:1:list", "merged:2:filter", "releases:0:list", "noTask:1:list"], "the owner's order; things with no card open a list");
-  // with no merge on a task the merged pill has nothing to filter: it lists the merges instead
   const bare = weekend().s;
   const loose = strip(bare, FRI18, { cache, attached: new Set(), whose: whoseMerges("robin-example", null) });
   assert.deepEqual(loose.picks.merged, []);
   assert.equal(pillsOf(loose, "Fri 18:00").find((p) => p.key === "merged")!.does, "list");
-  // a quiet window: zeros (the header dims them) and no "on no task" pill at all
   const quiet = pillsOf(strip(s, MON + 1), "Mon 09:00");
   assert.ok(quiet.every((p) => p.n === 0), "every figure is 0");
   assert.equal(quiet.find((p) => p.key === "noTask"), undefined, "the merges-on-no-task pill goes at zero");
@@ -206,8 +183,6 @@ test("each picker option gives its own T, and the saved choice survives junk", (
   assert.deepEqual(parseChoice(null), { kind: "weekday" });
   assert.deepEqual(parseChoice({ kind: "looked" }), { kind: "looked" });
 });
-
-// ---------------------------------------------------------------- GitHub
 
 const MERGED_JSON = [
   { number: 1302, url: "https://github.com/acme-co/widgets/pull/1302", title: "Fix the widget spinner", mergedAt: "2026-11-21T14:00:00Z", author: { login: "robin-example" } },
@@ -257,9 +232,6 @@ test("the repos come from each project's PR events", () => {
   assert.deepEqual([...sinceRepos(s.db as never, MON, [])], [["acme-co/site", ["other"]], ["acme-co/widgets", ["demo", "other"]]]);
 });
 
-// The GitHub cache (Codex review, two rounds): reading is capped, keeping is not. A merge inside the picker's longest
-// window is never dropped because too many repos are active, because its PR's events are old, or because another
-// project shares its repo; and repos nothing names any more leave the cache, failed reads included.
 const D = 86_400_000;
 const merge = (repo: string, n: number, at: number, author: string | null): GhMerge => ({ url: `https://github.com/${repo}/pull/${n}`, number: n, title: `PR ${n}`, mergedAt: at, author });
 const entry = (projects: string[], merged: GhMerge[], o: Partial<SinceCache["repos"][string]> = {}): SinceCache["repos"][string] => ({ at: MON - H, tried: MON - H, projects, merged, releases: [], error: null, ...o });
@@ -270,11 +242,9 @@ test("51 active repos: 50 are read a pass, the 51st keeps its merge, waits its t
   s.at(MON);
   const ev = s.db.prepare(`INSERT INTO events (at, kind, project, address, thread_id, value, ref, note) VALUES (?, 'pr', 'demo', NULL, NULL, 'open', ?, '1')`);
   const names = Array.from({ length: 51 }, (_, i) => `acme-co/repo-${String(i).padStart(2, "0")}`);
-  names.forEach((r, i) => ev.run(MON - i * H, `https://github.com/${r}/pull/1`)); // repo-50 is the least recently active
+  names.forEach((r, i) => ev.run(MON - i * H, `https://github.com/${r}/pull/1`));
   const repos = sinceRepos(s.db as never, MON, []);
   assert.equal(repos.size, 51, "every active repo is one to read");
-  // last pass read all 51; repo-50 holds the owner's merge and the most recent try, so it's the one left for later
-  // (and a tasked merge of unknown author, #6)
   const prev: SinceCache = { at: MON - H, repos: Object.fromEntries(names.map((r) => [r, entry(["demo"], r === "acme-co/repo-50" ? [merge(r, 5, MON - 2 * H, "robin-example"), merge(r, 6, MON - 3 * H, null)] : [], { tried: r === "acme-co/repo-50" ? MON - H : MON - 2 * H })])) };
   const poll = sincePoll(repos, prev);
   assert.equal(poll.length, SINCE_POLL_CAP);
@@ -307,29 +277,26 @@ test("a task's PR opened 31 days ago that merges today is still read, and its me
 });
 
 test("the background job's board read names a task's PR whose only event is 31 days old", () => {
-  // the real path: a thread on a task logged its PR 31 days ago; the job reads the board as the service does
   const s = setup();
   const [task] = s.publish([{ title: "Legacy fix", state: "current" }]);
   const t = s.spawn("T-9", task!);
   const url = "https://github.com/acme-co/legacy/pull/9";
   s.at(MON);
   s.db.prepare(`INSERT INTO events (at, kind, project, address, thread_id, value, ref, note) VALUES (?, 'pr', 'demo', ?, ?, 'open', ?, '9')`).run(MON - 31 * D, t.address, t.threadId, url);
-  linkPr(s.db as never, url, task!, "bb", t.address, MON - 31 * D); // as Engine.prSeen links it (task_prs)
+  linkPr(s.db as never, url, task!, "bb", t.address, MON - 31 * D);
   const prs = boardPrs(s.e.workBoard({ since: MON - SINCE_MAX_MS, project: null }));
   assert.deepEqual(prs.map(({ url, project, resolved }) => ({ url, project, resolved })), [{ url, project: "demo", resolved: false }], "the board holds the task's PR");
   assert.deepEqual([...sinceRepos(s.db as never, MON, prs)], [["acme-co/legacy", ["demo"]]]);
 });
 
 test("an unfinished task's 1,000 closed PRs from a retired thread leave the cache; its open PR's repo stays", () => {
-  // Codex round 3: a merged or closed PR on the board keeps nothing read for good. Only an unresolved one does; a
-  // resolved one follows the 30-day and 14-day rules like any other PR event
   const s = setup();
   const [task] = s.publish([{ title: "Long project", state: "current" }]);
   const t = s.spawn("T-9", task!);
   s.at(MON - 60 * D);
   const ev = s.db.prepare(`INSERT INTO events (at, kind, project, address, thread_id, value, ref, note) VALUES (?, 'pr', 'demo', ?, ?, ?, ?, '1')`);
   const dead = Array.from({ length: 1000 }, (_, i) => `old-org/closed-${i}`);
-  const link = (url: string) => linkPr(s.db as never, url, task!, "bb", t.address, MON - 60 * D); // as Engine.prSeen links them
+  const link = (url: string) => linkPr(s.db as never, url, task!, "bb", t.address, MON - 60 * D);
   dead.forEach((r) => (ev.run(MON - 60 * D, t.address, t.threadId, "closed", `https://github.com/${r}/pull/1`), link(`https://github.com/${r}/pull/1`)));
   ev.run(MON - 60 * D, t.address, t.threadId, "open", "https://github.com/acme-co/live/pull/7");
   link("https://github.com/acme-co/live/pull/7");
@@ -357,9 +324,6 @@ test("a repo two projects share stays in both, though one project's PR events ar
 });
 
 test("1,000 dead repos leave the cache, failed reads included; a merge inside the window outlives its repo's last mention", () => {
-  // years of history: 1,000 repos last named 60+ days ago, each kept by an old cache with a failed read. The log last
-  // saw their PRs open, but no live thread reads them and no task holds them, so they aren't on the board: stale opens
-  // don't keep a repo read
   const s = setup();
   s.at(MON);
   const ev = s.db.prepare(`INSERT INTO events (at, kind, project, address, thread_id, value, ref, note) VALUES (?, 'pr', 'demo', NULL, NULL, 'open', ?, '1')`);
@@ -372,13 +336,10 @@ test("1,000 dead repos leave the cache, failed reads included; a merge inside th
   const next = { at: MON, ...sinceKeep(prev, repos, new Map(), MON) };
   assert.deepEqual(Object.keys(next.repos), ["old-org/recent"], "only the repo whose merge is inside the 14 days stays");
   assert.equal(strip(s, MON - 7 * D, { cache: next, whose: whoseMerges("robin-example", null) }).merged, 1);
-  // and with all 1,000 on the board, a pass still reads only SINCE_POLL_CAP of them
   const onBoard = dead.map((r) => ({ url: `https://github.com/${r}/pull/1`, project: "demo" }));
   assert.equal(sincePoll(sinceRepos(s.db as never, MON, onBoard), prev).length, SINCE_POLL_CAP);
 });
 
-// The background service itself, over repeated passes (Codex round 4): a fake bb with one connected machine whose gh
-// answers per repo and pass; the plugin kv in memory; sleep ends each pass, and the run stops after `passes`.
 function service(s: ReturnType<typeof setup>, activity: (repo: string, pass: number) => RepoRead) {
   const kv = new Map<string, unknown>();
   const calls: string[][] = [];
@@ -457,7 +418,6 @@ test("the service builds each pass on the last: rotation reaches all 51 repos, a
 
 test("merges: GitHub's and the log's, once each, the owner's or a task's; those no task holds are listed for the CoS", () => {
   const { s } = weekend();
-  // the log saw only 1290 (its thread was live), and one merge GitHub has no read for yet
   const ev = s.db.prepare(`INSERT INTO events (at, kind, project, address, thread_id, value, ref, note) VALUES (?, 'pr', 'demo', NULL, NULL, 'merged', ?, ?)`);
   ev.run(SAT + 11 * H, "https://github.com/acme-co/widgets/pull/1290", "1290");
   ev.run(SUN + 2 * H, "https://github.com/acme-co/widgets/pull/1295", "1295");
@@ -466,8 +426,6 @@ test("merges: GitHub's and the log's, once each, the owner's or a task's; those 
   const st = strip(s, FRI18, { cache, attached, whose: whoseMerges("Robin-Example", null) });
   assert.equal(st.merged, 2, "1302 (the owner's) and 1290 (tasked); 1250 is before T; a colleague's 1311 isn't the owner's; 1295 has no known author yet");
   assert.deepEqual(st.noTask.map((m) => m.number), [1302], "the tasked 1290 left out");
-  // an untasked merge whose author isn't known (only the log has seen it, or GitHub names no author: a deleted account)
-  // might be a colleague's, so it never counts as the owner's; a task holding it makes it count
   assert.equal(strip(s, FRI18, { cache, attached: new Set([...attached, "https://github.com/acme-co/widgets/pull/1295"]), whose: whoseMerges("Robin-Example", null) }).merged, 3, "1295 counts once a task holds it");
   const ghost: SinceCache = { ...cache, repos: { "acme-co/widgets": { ...cache.repos["acme-co/widgets"]!, merged: [...cache.repos["acme-co/widgets"]!.merged, { url: "https://github.com/acme-co/widgets/pull/1320", number: 1320, title: "By a deleted account", mergedAt: SUN, author: null }] } } };
   assert.equal(strip(s, FRI18, { cache: ghost, attached, whose: whoseMerges("Robin-Example", null) }).merged, 2, "a GitHub merge with no author doesn't count");
@@ -504,12 +462,9 @@ test("whose merges: the setting, else gh's signed-in login, else tasked PRs only
   s.db.prepare(`INSERT INTO events (at, kind, project, address, thread_id, value, ref, note) VALUES (?, 'pr', 'demo', NULL, NULL, 'merged', ?, ?)`).run(SUN + 2 * H, "https://github.com/acme-co/widgets/pull/1295", "1295");
   const cache: SinceCache = { at: MON, ghLogin: "sam-example", repos: { "acme-co/widgets": { at: MON, projects: ["demo"], merged: parseMerged(MERGED_JSON), releases: [], error: null } } };
   const attached = new Set(["https://github.com/acme-co/widgets/pull/1290"]);
-  // gh is signed in as sam-example: sam's 1311 and the tasked 1290; robin's untasked 1302 isn't sam's, and the log's
-  // untasked 1295 has no known author
   const gh = strip(s, FRI18, { cache, attached, whose: whoseMerges("", cache.ghLogin) });
   assert.deepEqual(gh.whose, { by: "gh", login: "sam-example" });
   assert.equal(gh.merged, 2);
-  // tasked only: 1290 alone; the log's untasked 1295 and every author's untasked merge stay out, so nothing waits to be filed
   const tasked = strip(s, FRI18, { cache, attached, whose: whoseMerges("", null) });
   assert.equal(tasked.merged, 1, "with no login known, only PRs a task holds count, never all four in the repo");
   assert.deepEqual(tasked.noTask, []);
@@ -520,16 +475,12 @@ test("whose merges: the setting, else gh's signed-in login, else tasked PRs only
 test("the CoS's tidy rows: a record whose from equals its to isn't a move, and a merge into another task isn't a drop", () => {
   const row = (seq: number, task: string, from_col: string | null, to_col: string, at: number, why: string | null) => ({ task, project: "p", from_col, to_col, at, why, seq });
   const rows = [
-    // a: waits on the owner, then the CoS files a PR on it: a record, the task stays waiting
     row(1, "t-a", "planned", "waiting", 10, "card d-1 waits on the owner"),
     row(2, "t-a", "waiting", "waiting", 20, "cos: file pr https://github.com/acme-co/widgets/pull/1"),
-    // b: dropped with attachments before T; the CoS confirms the drop in the window
     row(3, "t-b", "in_progress", "dropped", 1, "dropped with attachments"),
     row(4, "t-b", "dropped", "dropped", 30, "cos: confirm drop"),
-    // c: the CoS merges c into d: c goes to dropped (why cos: merge), d logs its own record
     row(5, "t-c", "planned", "dropped", 40, "cos: merge into t-d"),
     row(6, "t-d", "planned", "planned", 40, "cos: merge t-c \"Login\" in"),
-    // e: dropped quietly before T, restored by the CoS in the window
     row(7, "t-e", "planned", "dropped", 2, "dropped"),
     row(8, "t-e", "dropped", "planned", 50, "cos: restore"),
   ];
@@ -557,6 +508,56 @@ test("a task added and quietly dropped inside the window counts in neither new n
   assert.equal(countMoves(rows, 15).counts.new, 0, "a T after x's add sees only its quiet drop");
 });
 
+test("a filter pill counts by the board's own rule: a task filed against a PR merged before T, and a shipped task with no date off the lead's list, have no card and no count", () => {
+  const s = setup();
+  const url = "https://github.com/acme-co/widgets/pull/9000";
+  s.db.prepare(`INSERT INTO pr_readings (url, number, state, sig, seen_at, read_at) VALUES (?, 9000, 'merged', 'merged', ?, ?)`).run(url, THU, THU);
+  s.at(SAT);
+  const [filed, undated, open] = s.publish([
+    { title: "File a merged PR", state: "next" },
+    { title: "Shipped with no date", state: "next" },
+    { title: "Still open", state: "next" },
+  ]);
+  linkPr(s.db as never, url, filed!, "cos", null, SAT);
+  s.publish([
+    { id: filed, title: "File a merged PR", state: "next" },
+    { id: open, title: "Still open", state: "next" },
+  ]);
+  s.db.prepare(`UPDATE tasks SET state = 'shipped', shipped_at = NULL WHERE id = ?`).run(undated!);
+  s.e.settleBoard();
+  const cards = new Set(s.e.workBoard({ since: FRI18 }).projects.flatMap((p) => p.tasks.map((t) => t.id)));
+  assert.deepEqual([filed, undated, open].map((id) => cards.has(id!)), [false, false, true], "the board: shipped by its PR's merge before T, shipped with no date off the list, open");
+  const st = strip(s, FRI18);
+  assert.deepEqual(st.picks.new, [open], "only the new task the board shows");
+  assert.equal(st.counts.new, 1);
+  assert.deepEqual(pillsOf(st, "Fri").find((p) => p.key === "new")?.n, 1, "the pill's number is its cards");
+});
+
+test("between strip reads the pills count the cards of the board read at the same T: a thread's status ships a card off the board without reading the strip again", () => {
+  const { s, ids } = weekend();
+  const st = strip(s, FRI18);
+  const pill = (shown: ReadonlySet<string> | null, key: string) => pillsOf(st, "Fri", shown).find((p) => p.key === key)!;
+  assert.equal(st.picks.new.length, 1, JSON.stringify(st.picks));
+  const gone = st.picks.new[0]!;
+  const board = new Set([...Object.values(st.picks).flat(), ids.login].filter((id) => id !== gone));
+  assert.equal(pill(board, "new").n, st.counts.new - 1, "the board no longer shows one new task: one fewer");
+  assert.equal(pill(null, "new").n, st.counts.new, "no board at this T yet: the strip's own count");
+  const src = (f: string) => readFileSync(new URL(`../app/${f}`, import.meta.url), "utf8");
+  assert.match(src("board-since.tsx"), /pillsOf\(data, when, shown && shown\.since === data\.since \? shown\.ids : null\)/, "only a board read at the strip's T");
+  assert.match(src("work-board.tsx"), /since\(project, setLens, onBoard\)/, "the board hands over the cards it shows");
+  assert.match(src("projects.tsx"), /<BoardSince project=\{project\} onLens=\{onLens\} shown=\{shown\} \/>/);
+});
+
+test("What counts excludes only quiet drops: a task added and dropped with something attached counts under dropped", () => {
+  const src = readFileSync(new URL("../app/board-since.tsx", import.meta.url), "utf8");
+  const notCounted = /const NOT_COUNTED =\s*"([^"]+)"/.exec(src)?.[1] ?? "";
+  assert.match(notCounted, /^Plan edits \(quiet drops: a task dropped with nothing attached, even one added since\)/);
+  assert.doesNotMatch(notCounted, /added and dropped/, "an added task dropped with its thread is in the dropped pill");
+  const row = (seq: number, from_col: string | null, to_col: string, at: number, why: string | null) => ({ task: "t-a", project: "p", from_col, to_col, at, why, seq });
+  assert.equal(countMoves([row(1, null, "planned", 10, null), row(2, "planned", "dropped", 12, "dropped with attachments")], 5).counts.dropped, 1);
+  assert.equal(countMoves([row(1, null, "planned", 10, null), row(2, "planned", "dropped", 12, null)], 5).counts.dropped, 0, "a quiet drop: a plan edit");
+});
+
 test("a typed time counts only once it is a whole time in the last 14 days, so the dates a date field passes through read nothing", () => {
   const now = Date.parse("2026-11-24T16:00:00");
   assert.equal(typedSince("2026-11-22T00:00", now), Date.parse("2026-11-22T00:00"));
@@ -566,12 +567,9 @@ test("a typed time counts only once it is a whole time in the last 14 days, so t
   assert.equal(typedSince("", now), null, "a cleared field");
 });
 
-// Codex's review (2026-11-25): "2 new" showed 1 card, the other new task having been dropped since. A pill that filters
-// the board counts only tasks the board shows, so its number and its cards can't disagree at any T.
 test("every task behind a pill that filters the board is a card the board shows at that T; a task dropped since is under dropped only", async () => {
   const { columnsOf } = await import("../app/work-board-model.ts");
   const { s, ids } = weekend();
-  // login (shipped Saturday) holds a PR merged on Sunday: at T Sunday the board no longer shows login, shipped before T
   const tasked = "https://github.com/acme-co/widgets/pull/1290";
   linkPr(s.db as never, tasked, ids.login, "bb", "thread:demo:1", SAT);
   const cache: SinceCache = { at: MON, repos: { "acme-co/widgets": entry(["demo"], [merge("acme-co/widgets", 1290, SUN + H, "robin-example")]) } };
@@ -592,10 +590,8 @@ test("every task behind a pill that filters the board is a card the board shows 
   assert.deepEqual(check(SUN).picks.merged, [], "shipped before T, login has no card: the merge is listed instead");
   const st = check(FRI18);
   assert.ok(!st.picks.new.includes(ids.push) && st.dropped.some((d) => d.id === ids.push), "push: dropped with its thread, listed under dropped by title");
-  // an archived project has no board: none of its tasks is in a pill that filters it
   s.db.prepare(`UPDATE projects SET archived_at = ? WHERE slug = 'demo'`).run(MON);
   assert.deepEqual(Object.values(check(FRI18).picks).flat(), []);
-  // shipped or blocked, then dropped with its things: under dropped only; restored since: counted again
   const row = (seq: number, task: string, from_col: string | null, to_col: string, at: number, why: string | null) => ({ task, project: "p", from_col, to_col, at, why, seq });
   const gone = countMoves([row(1, "t-a", "in_review", "shipped", 10, null), row(2, "t-a", "shipped", "dropped", 12, "dropped with attachments"), row(3, "t-b", "planned", "blocked", 10, null), row(4, "t-b", "blocked", "dropped", 12, "dropped with attachments")], 5);
   assert.deepEqual(gone.counts, { shipped: 0, new: 0, waiting: 0, blocked: 0, dropped: 2 });

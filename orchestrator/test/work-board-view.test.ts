@@ -1,14 +1,3 @@
-// The work board's view (SCOPE piece 2). The owner opens the board to see, across projects, what is in
-// flight, shipped and waiting on them, so:
-// - every task the read returns sits in exactly the column the read derived (the view never re-derives), and a project
-//   filter shows that project's tasks and no other's;
-// - Waiting on you and Blocked put the longest wait first, Shipped the newest first: the top card is the one to act on;
-// - a card's chips name what is attached, a hand move shows "moved by you" only while it holds;
-// - a phone opens on what waits on the owner;
-// - the board's URL survives a reload, Back and bb's extra encoding, and no project slug can be mistaken for it;
-// - the board refetches only on a change to what it reads (the lag fix's notices), never on an unrelated one;
-// - under the since lens, "only cards that moved" leaves exactly the cards that moved since T, so the owner's catch-up
-//   view never hides a move or pads it with cards that stood still; off, the lens hides nothing.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -92,7 +81,6 @@ test("a PR linked to the task but never read says unknown, not open: the card mu
 });
 
 test("a task's card opens answerable wherever the owner answers it: Needs you's cards, its deferred, or a scoping card from Scope", () => {
-  // made-up cards; only the id matters to where a card is found
   const card = (id: string) => ({ id, rev: 1 }) as unknown as NeedsYou["cards"][number];
   const needs = { cards: [card("c-open")], deferred: [card("c-later")], presets: [] } as unknown as NeedsYou;
   const scope = { projects: [{ slug: "kite", cards: [card("c-scoping")] }], badge: 1 } as unknown as Scope;
@@ -129,7 +117,6 @@ test("the board's URL survives a reload and Back, with or without a project and 
   for (const r of places) assert.deepEqual(fromPath(toPath(r, VIEWS), VIEWS), r, toPath(r, VIEWS));
   assert.equal(toPath(places[0]!, VIEWS), "projects/~board");
   assert.equal(toPath(places[2]!, VIEWS), "projects/~board/-/t-1a2b3c");
-  // bb encodes the sub-path once more: the board still lands
   assert.equal(canonical(`projects/~board/${encodeURIComponent(encodeURIComponent("kite-app"))}/${encodeURIComponent(encodeURIComponent("t-1a2b3c"))}`, VIEWS), "projects/~board/kite-app/t-1a2b3c");
   assert.equal(canonical("projects/%7Eboard", VIEWS), "projects/~board");
 });
@@ -145,7 +132,6 @@ test("the board refetches only on a change to what it reads (change-notice.ts RE
   assert.equal(touchesBoard({}), true, "a notice that names nothing: refetch");
   assert.equal(touchesBoard(null), true);
   assert.equal(touchesBoard({ tables: null }), true, "a change that can't be named: refetch");
-  // a hand move writes tasks; a PR linked to a task writes task_prs; the rest is what a card shows
   for (const t of ["tasks", "task_prs", "decisions", "deliverables", "prs", "pr_readings", "status", "lead_status", "spawns"]) assert.equal(touchesBoard({ tables: [t] }), true, t);
   for (const t of ["task_moves", "inbox_entries", "rules", "xp", "outputs", "multiplayer_beats"]) assert.equal(touchesBoard({ tables: [t] }), false, t);
   const src = readFileSync(new URL("../app/work-board.tsx", import.meta.url), "utf8");
@@ -153,7 +139,7 @@ test("the board refetches only on a change to what it reads (change-notice.ts RE
 });
 
 test("the why line drops record ids: the owner reads words, the chips name the things", () => {
-  const card = ["d", "20000101T000000Z", "abc123"].join("-"); // a made-up card id, built so no id sits in the source
+  const card = ["d", "20000101T000000Z", "abc123"].join("-");
   assert.equal(whyText(`card ${card} waits on the owner`), "card waits on the owner");
   assert.equal(whyText("deliverable v-6029956225bb in review"), "deliverable in review");
   assert.equal(whyText("PR #12 waits on CI"), "PR #12 waits on CI");
@@ -191,7 +177,6 @@ test("a picked count pill shows exactly the tasks it counted, in their own colum
   const b = boardOf([task("t-1", "kite", "planned"), task("t-2", "kite", "waiting"), task("t-3", "pine", "shipped", { since: 9 }), task("t-4", "pine", "planned"), task("t-5", "kite", "in_review")]);
   const moved: BoardLens["moved"] = { "t-3": { from: "in_review", to: "shipped", at: 9, isNew: false }, "t-4": { from: "blocked", to: "planned", at: 8, isNew: false }, "t-1": { from: null, to: "planned", at: 4, isNew: true } };
   const ids = (cols: ReturnType<typeof columnsOf>) => cols.flatMap((c) => c.tasks.map((t) => `${c.column}:${t.id}`));
-  // "blocked" counted t-4, blocked on Saturday and back in Planned now: the pill shows it where it is
   const blocked = columnsOf(b, null, { since: 1, moved, onlyMoved: false, pick: { key: "blocked", ids: ["t-4"] } });
   assert.deepEqual(ids(blocked), ["planned:t-4"]);
   assert.deepEqual(blocked.map((c) => c.tasks.length), [1, 0, 0, 0, 0, 0], "the column counts are the pill's");
@@ -203,7 +188,6 @@ test("a picked count pill shows exactly the tasks it counted, in their own colum
 test("a phone showing a column with none of a picked pill's cards moves to one that has them; one that has them stays (Codex's review)", () => {
   const b = boardOf([task("t-1", "kite", "planned"), task("t-2", "kite", "shipped"), task("t-3", "pine", "shipped"), task("t-4", "pine", "waiting")]);
   const lens = (key: string, ids: string[]): BoardLens => ({ since: 1, moved: {}, onlyMoved: false, pick: { key, ids } });
-  // Planned picked by hand, then "2 shipped": Planned holds none of them, so the board shows Shipped and its 2 cards
   const shipped = columnsOf(b, null, lens("shipped", ["t-2", "t-3"]));
   const at = columnAfterPick("planned", shipped) ?? firstColumn(shipped);
   assert.equal(at, "shipped");

@@ -1,10 +1,3 @@
-// Each project's colour on the work board (2026-11-24, the owner: "we need more color coding to know what project each
-// task is associated with"). The owner tells a card's project at a glance by its colour, so:
-// - a project keeps one colour: the same whatever order the projects come in, whatever the filter, and the one the rest
-//   of the app gives it (its accent, else the sidebar's hue) whenever nothing clashes with it;
-// - no two projects on the board share a colour while there are hues to go round, though the sidebar's hash puts
-//   several on one hue (with five projects, about two times in three);
-// - the colours stay readable as the chip's words, on the tinted card, in both themes, and as the pressed filter chip.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -15,7 +8,6 @@ import { TYPES } from "../mons.ts";
 
 const slugs = (n: number, prefix = "proj") => Array.from({ length: n }, (_, i) => `${prefix}-${i}`);
 const of = (list: string[], monType: (s: string) => string | null = () => null) => list.map((slug) => ({ slug, monType: monType(slug) }));
-/** Two made-up slugs the sidebar's hash puts on one hue, found at run time, in slug order. */
 function clashing(): [string, string] {
   const seen = new Map<Tone, string>();
   for (const s of slugs(200, "clash")) {
@@ -43,18 +35,15 @@ test("a project keeps its colour whatever the order, and keeps its sidebar colou
   const one = boardTones(of(list));
   const back = boardTones(of([...list].reverse()));
   for (const s of list) assert.equal(back.get(s), one.get(s), `${s}: the order the read lists projects in changes nothing`);
-  // the projects whose own hue no older project holds (here none has an age: by slug) are the sidebar's colours exactly
   const held = new Set<Tone>();
   for (const s of [...list].sort()) {
     const own = projectTone(s);
     if (!held.has(own)) assert.equal(one.get(s), own, `${s} keeps the sidebar's colour`);
     held.add(one.get(s)!);
   }
-  // a project added later that clashes with nobody moves no one
   const extra = slugs(400, "new").find((s) => !held.has(projectTone(s)) && !new Set(one.values()).has(projectTone(s)))!;
   const more = boardTones(of([...list, extra]));
   for (const s of list) assert.equal(more.get(s), one.get(s), `${s} is unchanged by ${extra}`);
-  // the board reads every project, the project read and the board's own list, so a duplicate keeps its accent
   const both = boardTones([{ slug: "kite-0", monType: "water" }, { slug: "kite-0" }]);
   assert.equal(both.get("kite-0"), accentTone("water"));
 });
@@ -64,24 +53,18 @@ test("with the pokemon setting on, the project's accent is its colour, as on its
   assert.equal(t.get("alpha"), accentTone("fire"));
   assert.equal(t.get("beta"), accentTone("water"));
   assert.equal(t.get("gamma"), projectTone("gamma"), "a project with no type: the sidebar's hue");
-  // past 18 projects two share a type: the later slug takes a hue, so the two still look apart
   const shared = boardTones([{ slug: "alpha", monType: "fire" }, { slug: "omega", monType: "fire" }]);
   assert.equal(shared.get("alpha"), accentTone("fire"));
   assert.notEqual(shared.get("omega"), shared.get("alpha"), "two projects of one type are told apart");
   assert.equal(shared.get("omega"), projectTone("omega"));
-  // a type unknown to this build is no accent
   assert.equal(boardTones([{ slug: "delta", monType: "cosmic" }]).get("delta"), projectTone("delta"));
 });
 
-// Codex's review (2026-11-25): allocated in slug order, a new project whose slug sorts first took an older one's hue or
-// accent, and the older one changed colour on every board. Oldest first, a new project only takes what is left.
 test("adding a project leaves every existing project's colour unchanged, more projects than hues and accents included", () => {
   const made = (list: string[], from = 1) => list.map((slug, i) => ({ slug, monType: null, createdAt: from + i }));
   for (const n of [5, PROJECT_HUES.length + 3]) {
     const old = made(slugs(n, "kite"));
     const before = boardTones(old);
-    // forty newcomers, each made after all of them; their slugs sort before every old one's, and many hash onto a hue an
-    // old project holds or was moved off
     for (const slug of slugs(40, "aaa")) {
       const after = boardTones([...old, { slug, monType: null, createdAt: 1000 }]);
       for (const p of old) assert.equal(after.get(p.slug), before.get(p.slug), `${n} projects: ${p.slug} unchanged by ${slug}`);
@@ -89,13 +72,11 @@ test("adding a project leaves every existing project's colour unchanged, more pr
     const shuffled = boardTones([...old].reverse());
     for (const p of old) assert.equal(shuffled.get(p.slug), before.get(p.slug), "the order the read lists them in changes nothing");
   }
-  // past 18 projects two share a type: the newer one, whatever its slug, takes a hue; the older keeps its accent
   const older = { slug: "zeta", monType: "fire", createdAt: 1 };
   assert.equal(boardTones([older]).get("zeta"), accentTone("fire"));
   const two = boardTones([older, { slug: "alpha", monType: "fire", createdAt: 2 }]);
   assert.equal(two.get("zeta"), accentTone("fire"), "the older keeps the accent");
   assert.equal(two.get("alpha"), projectTone("alpha"), "the newer takes its hue");
-  // the board's own list carries no age: a project only it knows counts as newest
   const unknown = boardTones([...made(["kite-0", "kite-1"]), { slug: "aaa-0" }]);
   assert.equal(unknown.get("kite-0"), boardTones(made(["kite-0", "kite-1"])).get("kite-0"));
   const src = readFileSync(new URL("../server.ts", import.meta.url), "utf8");
@@ -109,8 +90,6 @@ test("more projects than hues: every project still has a colour, and the chip na
   assert.equal(new Set(t.values()).size, PROJECT_HUES.length, "every hue is used before any is shared");
 });
 
-// readability: the chip's words (the page background) on the project's colour, which is also the picked filter chip; the
-// filter's dot on the card surface; the card's words on its tint. Light: oklch 100%; dark: oklch 19.5% (palette.test.ts).
 type Rgb = [number, number, number];
 const hex = (h: string): Rgb => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)) as Rgb;
 const lin = (c: number) => (c / 255 <= 0.04045 ? c / 255 / 12.92 : ((c / 255 + 0.055) / 1.055) ** 2.4);
@@ -125,7 +104,6 @@ const grey = (l: number): Rgb => {
   const c = enc(l ** 3);
   return [c, c, c];
 };
-/** bb's card and its ink (--foreground: oklch 14.5% light, 98.5% dark) */
 const CARD = { light: grey(1), dark: grey(0.195) };
 const INK = { light: grey(0.145), dark: grey(0.985) };
 
@@ -146,4 +124,26 @@ test("every project colour reads: the chip's words on it, its dot on the card, t
       if (title < 7) fails.push(`${name} ${theme}: card title ${title.toFixed(2)}`);
     }
   assert.deepEqual(fails, []);
+});
+
+const oklab = (h: string): Rgb => {
+  const [r, g, b] = hex(h).map(lin) as Rgb;
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s, 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s];
+};
+const apart = (a: string, b: string) => Math.hypot(...oklab(a).map((v, i) => v - oklab(b)[i]!));
+
+test("no two types' colours read as one: every pair is at least 0.06 apart in OKLab in both themes, each still 4.5:1 as text", () => {
+  const close: string[] = [];
+  for (const theme of ["light", "dark"] as const)
+    for (let i = 0; i < TYPES.length; i++)
+      for (let j = i + 1; j < TYPES.length; j++) {
+        const d = apart(TYPES[i]!.tone[theme], TYPES[j]!.tone[theme]);
+        if (d < 0.06) close.push(`${theme}: ${TYPES[i]!.type} ~ ${TYPES[j]!.type} ${d.toFixed(3)}`);
+      }
+  assert.deepEqual(close, [], "projects of different types side by side on the board and in the sidebar");
+  for (const t of TYPES) for (const theme of ["light", "dark"] as const) assert.ok(contrast(CARD[theme], hex(t.tone[theme])) >= 4.5, `${t.type} ${theme}: its words read`);
+  assert.equal(apart("#ffffff", "#000000").toFixed(3), "1.000", "OKLab's lightness runs 0 to 1");
 });

@@ -1,17 +1,3 @@
-// Projects (layout B, 2026-11-16; the components of 2026-11-17, thread orchestrator:40's approved mockups): the list on the
-// left, the selected project on the right, the message box under its name, no top strip. A list row is the project's
-// lead, its name, one state chip (kit.ts STATE_CHIP), the one number that matters as a chip, and the status's age; quiet
-// projects are one dim line. The detail (project-book.tsx) is section cards: Pinned, the goal, Needs | Blocked, then
-// Now | PRs + Record, then Timeline, Flow, Dependencies and Pathways (2026-11-20). Under 1200 px the same rows make one
-// column and a tapped row opens the project's page, with a Back row. Scoping entries are children of their project's row
-// (2026-11-22: they were a group on top, which showed the project twice with two different counts).
-// Priority, Hold, Archive and "Pin a document…" are in the ⋯ menu; archived projects sit behind a toggle. Above them, the
-// standing agents on one line. The writes go through the page gate (store.ts), like every other.
-//
-// The Agents tab went on 2026-11-16: what only it showed (unread, level, context window) is on the thread cards now,
-// and a live thread's branch on its project's Flow view.
-// 2026-11-17 (the shadcn pass): the rows are Items, the filters a ToggleGroup (32 px), the ⋯ app/ui's DropdownMenu with a
-// priority submenu, Archive's confirm an AlertDialog, and every button a Button.
 import { styleHref } from "./style-href.ts";
 import { useElementWidth, usePaneFits } from "./panes.tsx";
 import { usePaneId } from "./key-state.ts";
@@ -62,24 +48,18 @@ import { openStep, saveViewCopy, useProjectsView, type OpenAt, type Opening } fr
 type Query = { data: Projects | undefined; error: { message: string } | null; refetch: () => Promise<void> };
 type Project = Projects[number];
 
-/** The priority's colour as a small dot (the word is always beside it). */
 function PriorityDot({ p }: { p: Priority }) {
   return <span aria-hidden className="inline-block size-2 shrink-0 rounded-full" style={{ background: css(PRIORITY_TONES[p]) }} />;
 }
 
-/** Opens Needs you on the owner's card (or an agent's own prompt): the view, then that card scrolled into sight. */
 export type OpenCard = (selector: string) => void;
 
-/**
- * A click on the row's own surface opens the project's page; one on its buttons, links, menus or the archive prompt
- * doesn't. A menu's items render in a portal: their clicks bubble here through React but aren't inside the row's DOM.
- */
+/** A menu's items render in a portal: their clicks bubble here through React but aren't inside the row's DOM. */
 const onSurface = (e: MouseEvent<HTMLElement>) => {
   const t = e.target as HTMLElement;
   return e.currentTarget.contains(t) && !t.closest("button, a, input, textarea, select, label, [role^=menu], [role=group], [role=dialog], [role=listbox], [role=option], [data-lanes], [data-book]");
 };
 
-/** Ask for status (PLAN 1.6): only while the status is missing or old, and not while an earlier ask is unanswered. */
 function askStatusFor(project: Project, now: number, refetchAll: () => void): (() => void) | null {
   if (!project.lead || project.heldAt !== null || (project.status && !statusStale(project, now))) return null;
   if (project.direct?.messages.some((m) => m.text === ASK_STATUS_TEXT && m.state !== "closed")) return null;
@@ -89,11 +69,6 @@ function askStatusFor(project: Project, now: number, refetchAll: () => void): ((
   };
 }
 
-/**
- * The ⋯ menu: pin a document, start or end scoping, priority, hold and archive. On a narrow panel it also holds what has no button there: Ask for status and
- * Start lead. (Message went on 2026-11-17: the composer is always open under the name of an open project.)
- * Start/End scoping (1.13.0) is the owner's direct switch, with no card: orch_project_mode's own engine path.
- */
 function MoreMenu({ project, busy, refetchAll, narrow, onArchive, askStatus, askInMenu = false, onPin }: { project: Project; busy: boolean; refetchAll: () => void; narrow: boolean; onArchive: () => void; askStatus: (() => void) | null; askInMenu?: boolean; onPin?: () => void }) {
   const held = project.heldAt !== null;
   const setPriority = (priority: Priority) => {
@@ -166,7 +141,6 @@ function MoreMenu({ project, busy, refetchAll, narrow, onArchive, askStatus, ask
   );
 }
 
-/** Archive's confirm (2026-11-17: shadcn's AlertDialog): what goes and what stays, then Cancel or Archive project. */
 function ArchiveConfirm({ project, open, busy, refetchAll, onDone }: { project: Project; open: boolean; busy: boolean; refetchAll: () => void; onDone: () => void }) {
   const archive = () => {
     onDone();
@@ -195,10 +169,6 @@ function ArchiveConfirm({ project, open, busy, refetchAll, onDone }: { project: 
   );
 }
 
-/**
- * The lead's Pokémon (shiny, as in the sidebar), or with a personas pack its person (2026-11-18), opening its thread; a
- * neutral avatar with the setting off or no lead.
- */
 function Face({ project, size }: { project: Project; size: 24 | 32 }) {
   const navigate = useBbNavigate();
   const h = leadHead(project);
@@ -216,13 +186,11 @@ function Face({ project, size }: { project: Project; size: 24 | 32 }) {
   );
 }
 
-/** Pathways on the project's page (web: the opened project's head; it no longer sits on the rows, where it covered the name). */
 function PathwaysLink({ slug }: { slug: string }) {
   const navigate = useBbNavigate();
   return <Button variant="outline" size="sm" data-open-pathways={slug} onClick={() => navigate.toPluginPanel(PANEL_PATH, { subPath: `pathways/${encodeURIComponent(slug)}` })}>Pathways →</Button>;
 }
 
-/** A page's Back row (card-390): the way back to the list, at the gutter, and the page's ⋯ at the right. */
 function BackRow({ onBack, children }: { onBack: () => void; children?: ReactNode }) {
   return (
     <div className="flex min-w-0 items-center justify-between" data-page-back="">
@@ -235,7 +203,6 @@ function BackRow({ onBack, children }: { onBack: () => void; children?: ReactNod
   );
 }
 
-/** An archived project: one line, its name and when it was archived; Start lead brings it back. */
 function ArchivedRow({ project, busy, refetchAll, onOpen }: { project: Project; busy: boolean; refetchAll: () => void; onOpen: (slug: string) => void }) {
   const startLead = () => {
     const body: z.input<typeof startLeadBody> = { slug: project.slug };
@@ -269,11 +236,10 @@ function ArchivedRow({ project, busy, refetchAll, onOpen }: { project: Project; 
 }
 
 const STANDING = [
-  { role: "cos", label: null }, // the cosTitle setting
+  { role: "cos", label: null },
   { role: "steward", label: "Steward" },
 ] as const;
 
-/** The CoS and the Steward on one line: each with its state, or Start when none is live (an archived one isn't). */
 function StandingAgents({ agents, full, busy, refetchAll }: { agents: Board["agents"] | undefined; full: Agents | undefined; busy: boolean; refetchAll: () => void }) {
   const { cosTitle } = useIdentity();
   return (
@@ -291,7 +257,6 @@ function StandingAgents({ agents, full, busy, refetchAll }: { agents: Board["age
           return (
             <span key={role} data-standing-role={role}>
               {i ? " · " : ""}
-              {/* 2026-11-18, with a personas pack: the pair, and the name that opens its profile card */}
               <StandingFace face={a} address={role} label={label} level={f?.level ?? null} />{" "}
               {a ? (
                 <>
@@ -320,10 +285,8 @@ function StandingAgents({ agents, full, busy, refetchAll }: { agents: Board["age
   );
 }
 
-/** Layout B: the wide tab's own CSS and the list row (proposal 2). Selection is a tint, never a coloured edge. */
 const layoutCss = /* css */ `
 [data-orch] .orch-cc .b-body { display: grid; grid-template-columns: minmax(280px, min(480px, 40%)) minmax(0, 1fr); gap: 32px; align-items: start; }
-/* the detail beside the list lays its cards out from its own width (a 720 px pane gives it about 400) */
 [data-orch] .orch-cc .b-body > .detail { container: orchcc / inline-size; }
 [data-orch] .orch-cc .k-plist { display: flex; flex-direction: column; gap: 4px; }
 [data-orch] .orch-cc .k-prow { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; column-gap: 12px; align-items: center; min-height: 56px; padding: 8px 12px; border-radius: 8px; cursor: pointer; }
@@ -335,25 +298,15 @@ const layoutCss = /* css */ `
 [data-orch] .orch-cc .k-prow .k-name .name { overflow: hidden; text-overflow: ellipsis; min-height: 24px; font-weight: 600; }
 [data-orch] .orch-cc .k-prow .k-mon { font-size: 12px; line-height: 16px; color: var(--orch-muted); flex: none; }
 [data-orch] .orch-cc .k-prow .k-type { font-size: 12px; line-height: 16px; font-weight: 600; flex: none; }
-/* the chips wrap whole onto a second line rather than being cut (2026-11-22: with a scoping chevron's column the
-   second chip read "Scc…"); a row with room looks as before */
 [data-orch] .orch-cc .k-prow .k-sub { display: flex; flex-wrap: wrap; row-gap: 4px; align-items: center; gap: 8px; font-size: 12px; line-height: 16px; color: var(--orch-muted); white-space: nowrap; overflow: visible; }
 [data-orch] .orch-cc .k-prow .k-sub > * { white-space: nowrap; }
 [data-orch] .orch-cc .k-prow .k-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 [data-orch] .orch-cc .k-prow[data-quiet="true"] { min-height: 40px; padding-top: 4px; padding-bottom: 4px; }
 [data-orch] .orch-cc .k-prow[data-quiet="true"] .name { font-weight: 400; color: var(--orch-muted); }
-/* a project's scoping children (2026-11-22): the chevron in a fourth column (kept empty on the list's other rows, so the
-   counts line up), the children indented under the name. The list says it holds a chevron (data-folds) rather than a
-   :has() asking it: an ancestor :has() makes every element added or removed on bb's page restyle (typing-lag.test.ts) */
+/* the list says it holds a chevron (data-folds) rather than a :has() asking: an ancestor :has() restyles the page on every insert */
 [data-orch] .orch-cc .k-plist[data-folds] > .k-prow { grid-template-columns: 32px minmax(0, 1fr) auto 32px; }
-/* the tree, measured against bb's sidebar threads under their lead (2026-11-22): one straight 1 px hairline at 70% down
-   from under the parent's face (its centre: 12 px padding + 16), no elbows; each child a full-width 6 px-radius row
-   whose content starts 16 px right of the line: a round 28 px scope-icon tile in bb's portrait slot, then a 13/16 regular
-   title (right of the project's name, as bb's) over an 11/18 second line; hover and selected share the accent
-   background; rows 1 px apart */
 [data-orch] .orch-cc .k-kids { margin-top: -2px; }
-/* every property an earlier build of these rules set is set again here: React never removes a hoisted <style>, so a
-   window open across an update keeps the old rules beside these (2026-11-22: the old list border drew a second line) */
+/* React never removes a hoisted <style>, so every property an earlier version set is set again here */
 [data-orch] .orch-cc .k-kids > ul { position: relative; display: flex; flex-direction: column; gap: 1px; margin: 0 0 4px; padding: 0; border: 0; list-style: none; }
 [data-orch] .orch-cc .k-kids > ul::before { content: ""; position: absolute; top: 0; bottom: 0; left: 28px; z-index: 1; pointer-events: none; border-left: 1px solid var(--border); opacity: 0.7; }
 [data-orch] .orch-cc .k-krow { position: static; display: grid; grid-template-columns: 28px minmax(0, 1fr); column-gap: 6px; flex-direction: row; flex-wrap: nowrap; align-items: center; justify-content: stretch; gap: 0 6px; min-height: 28px; margin: 0; padding: 5px 8px 5px 44px; border: 0; border-radius: 6px; cursor: pointer; }
@@ -362,7 +315,6 @@ const layoutCss = /* css */ `
 [data-orch] .orch-cc .k-krow .k-main { display: flex; flex-direction: column; align-items: flex-start; gap: 0; min-width: 0; max-width: 100%; line-height: 16px; }
 [data-orch] .orch-cc .k-krow .name { display: block; max-width: 100%; height: 16px; text-align: left; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 16px; font-weight: 400; color: var(--foreground); }
 [data-orch] .orch-cc .k-krow .k-sub { display: flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0; font-size: 11px; line-height: 18px; color: var(--orch-muted); white-space: nowrap; }
-/* the portrait slot of bb's child rows (28 px, round) holds the Scoping chip's icon, so the title starts right of the project's name */
 [data-orch] .orch-cc .k-ktile { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 999px; color: var(--orch-muted); background: color-mix(in srgb, var(--foreground) 8%, transparent); }
 [data-orch] .orch-cc .k-ktile .k-i { width: 14px; height: 14px; }
 [data-orch] .orch-cc .k-list-h { margin: 12px 0 0; padding: 0 12px; font-size: 12px; line-height: 16px; font-weight: 400; color: var(--orch-muted); }
@@ -374,33 +326,19 @@ const layoutCss = /* css */ `
 [data-orch] .orch-cc .k-dhead .k-type { font-weight: 600; }
 [data-orch] .orch-cc .k-dhead .acts { margin-left: auto; }
 [data-orch] .orch-cc .k-dfixed, [data-orch] .orch-cc .k-dcards { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-/* 2026-11-17, the owner: "the left navigation bar should stay in the same locations and also the header card should
-   only the cards should scroll". Wide, the tab takes the pane's height (panes.tsx [data-fits-pane]): the list scrolls on its own
-   when it is taller, the project's name row and chat card stay put, and only its section cards scroll, from the top
-   again for each project (the detail is keyed by project). One column keeps the one scroll of the pane */
 [data-orch] [data-fits-pane] > .orch-cc { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; padding-bottom: 0; }
 [data-orch] [data-fits-pane] > .orch-cc .hits { flex: none; max-height: 35vh; overflow-y: auto; }
 [data-orch] [data-fits-pane] .b-body { flex: 1 1 0; min-height: 0; grid-template-rows: minmax(0, 1fr); align-items: stretch; }
 [data-orch] [data-fits-pane] .b-body > .k-listpane { min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding-bottom: 32px; }
 [data-orch] [data-fits-pane] .b-body > .detail { min-height: 0; }
-/* the fixed head (2026-11-20, 1.36.1, the lead: "the message box must be whole without scrolling"): it is never cut below
-   its own height while the cards keep 48 px, so a closed chat's head shows whole. Nothing in it shrinks (a flex box's
-   minimum is its children's flex bases, so a shrinking chat card let its row slide under the message box in 1.36.0).
-   An open transcript's height is measured instead (head-fit.ts): what two thirds of the detail leave after the rest of
-   the head, so the cards keep at least a third. When even that can't fit (a short window), the head scrolls inside
-   itself and the message box stays stuck to the bottom of what shows, over what scrolls under it. It keeps the cards'
-   scrollbar room, so its right edge lines up with theirs */
+/* nothing in the fixed head shrinks: a flex box's minimum is its children's flex bases, so a shrinking chat card let its row slide under the message box */
 [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed { flex: none; min-height: 0; max-height: calc(100% - 48px); overflow-y: auto; scrollbar-gutter: stable; margin: -2px; padding: 2px; }
 [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed > .k-chatcard, [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed .k-chat, [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed .k-chat > * { flex: none; }
 [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed > .k-chatcard { overflow: clip; }
 [data-orch] [data-fits-pane] .b-body > .detail > .k-dfixed .k-composer { position: sticky; bottom: 0; z-index: 1; background: var(--card); }
-/* the measured height, in either layout (on its own page the room is the pane's visible height below the head) */
 [data-orch] .orch-cc .k-dfixed .k-chat > .k-leadthread { height: var(--k-transcript-h, var(--k-leadthread-h, 480px)); }
 [data-orch] .orch-cc .k-dfixed .k-chat > .k-chat__log { max-height: var(--k-transcript-h, 480px); }
 [data-orch] [data-fits-pane] .b-body > .detail > .k-dcards { flex: 1 1 0; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding-bottom: 32px; }
-/* a phone (2026-11-20, the owner: "way too much empty space"): one compact row per project on the 16 px gutter (face,
-   name, state, working, one count, age), rows split by a line; the standing agents and the filters one line each. Only in
-   bb's phone layout (phone.ts): a narrow desktop pane keeps the web rows */
 [data-orch] .orch-cc[data-phone] .k-plist { gap: 0; }
 [data-orch] .orch-cc[data-phone] .k-prow { align-items: start; min-height: 44px; padding: 4px 0; border-radius: 0; border-width: 0 0 1px; border-color: var(--border); }
 [data-orch] .orch-cc[data-phone] .k-prow:hover { background: none; }
@@ -408,16 +346,12 @@ const layoutCss = /* css */ `
 [data-orch] .orch-cc[data-phone] .k-prow .k-main { gap: 2px; }
 [data-orch] .orch-cc[data-phone] .k-prow .k-name .name { min-height: 20px; height: 20px; }
 [data-orch] .orch-cc[data-phone] .k-prow [data-list-scoping] { display: none; }
-/* the working count wraps under the state chip rather than being cut by the side column */
 [data-orch] .orch-cc[data-phone] .k-prow .k-sub { flex-wrap: wrap; row-gap: 2px; overflow: visible; }
 [data-orch] .orch-cc[data-phone] .k-prow .k-sub > * { white-space: nowrap; }
 [data-orch] .orch-cc[data-phone] .k-prow .k-side { gap: 2px; }
 [data-orch] .orch-cc[data-phone] .k-prow .k-side .k-age { order: -1; line-height: 18px; }
 [data-orch] .orch-cc[data-phone] .k-prow[data-quiet="true"] { padding: 6px 0; }
-/* denser still (2026-11-21, the owner: "too much wasted space"): 18 px chips and 4 px row padding (above), every field
-   kept; the row itself stays the 44 px tap target */
 [data-orch] .orch-cc[data-phone] .k-prow .k-chip { height: 18px; padding-inline: 6px; font-size: 12px; line-height: 16px; }
-/* a phone: the project row has no side padding, so the line sits under the face's centre at 16 px; rows keep a 44 px tap height */
 [data-orch] .orch-cc[data-phone] .k-kids { border-bottom: 1px solid var(--border); padding: 0 0 6px; }
 [data-orch] .orch-cc[data-phone] .k-prow[data-fold="open"] { border-bottom-width: 0; }
 [data-orch] .orch-cc[data-phone] .k-kids > ul { margin: 0; padding: 0; border: 0; }
@@ -425,8 +359,6 @@ const layoutCss = /* css */ `
 [data-orch] .orch-cc[data-phone] .k-krow { min-height: 44px; padding: 5px 8px 5px 32px; border-radius: 6px; }
 [data-orch] .orch-cc[data-phone] .k-krow:hover { background: none; }
 [data-orch] .orch-cc[data-phone] .k-krow[data-selected="true"] { background: var(--accent); }
-/* the chevron is a finger's 44 px target on a phone (1.40.13: every control a finger uses); it overlaps the row's 4 px
-   padding, so the row stays its height */
 [data-orch] .orch-cc[data-phone] .k-plist[data-folds] > .k-prow { grid-template-columns: 32px minmax(0, 1fr) auto 44px; }
 [data-orch] .orch-cc[data-phone] .k-prow .k-fold { width: 44px; height: 44px; margin-block: -4px; align-self: center; }
 [data-orch] .orch-cc[data-phone] .k-list-h { padding: 0; margin-top: 16px; }
@@ -442,10 +374,6 @@ const layoutCss = /* css */ `
 [data-orch] .orch-cc[data-phone] .k-dhead :is(.k-mon, .k-type) { display: none; }
 `;
 
-/**
- * A project in the list: its lead's face, name; one state chip and how many work; the one number, and the status's age.
- * No lead title or type (2026-11-20, the owner: "it doesn't really help and just adds clutter"); the opened project has them.
- */
 function ListRow({ project, lanes, now, selected, quiet, kids, onSelect }: { project: Project; lanes: Lane[] | undefined; now: number; selected: boolean; quiet: boolean; kids?: Kids | null; onSelect: () => void }) {
   const r = listRow(project, lanes, now, quiet, kids ? scopeExtra(kids.list) : 0);
   return (
@@ -464,7 +392,6 @@ function ListRow({ project, lanes, now, selected, quiet, kids, onSelect }: { pro
       <Face project={project} size={32} />
       <div className="k-main">
         <div className="k-name">
-          {/* a plain list: the name is the control that selects, and says which project the detail shows */}
           <Button variant="link" className={cn("name", INLINE_LINK, "no-underline hover:underline")} data-select-project={project.slug} aria-current={selected ? "true" : undefined} onClick={onSelect}>
             {project.slug}
           </Button>
@@ -495,10 +422,8 @@ function ListRow({ project, lanes, now, selected, quiet, kids, onSelect }: { pro
   );
 }
 
-/** A project's scoping children (kit.ts ScopeChild): all (for its count), those drawn (a search keeps the matching tasks), whether they show, and the chevron's toggle. */
 type Kids = { list: ScopeChild[]; shown: ScopeChild[]; open: boolean; toggle: () => void };
 
-/** The viewer's last open/closed choice per project, in this browser only; a blocked storage reads as no choice. */
 const FOLD_KEY = (slug: string) => `orch:projects:scope-open:${slug}`;
 function storedFold(slug: string): boolean | null {
   try {
@@ -516,14 +441,6 @@ function storeFold(slug: string, open: boolean) {
   }
 }
 
-/**
- * A project's scoping entries, under its row on a thin tree line (2026-11-22, replacing the Scoping group on top; styled
- * after bb's sidebar, threads under their lead): "Whole project" while it scopes, then each open scoping task by name,
- * with the Scoping chip's icon in the slot where bb's child rows have a portrait (no chip: the icon says it), and what
- * waits on the owner in it. No portraits (2026-11-22, the owner): the chat is always the lead's, which
- * relays a scoping thread's questions, so who plans is no concern of the owner's; only a scoping thread that is stuck
- * says so. A click opens the entry (the scope view beside the list, or its own page).
- */
 function ScopeKids({ slug, kids, selected, onOpen }: { slug: string; kids: ScopeChild[]; selected: string | null; onOpen: (key: string) => void }) {
   return (
     <li className="k-kids" data-scope-children={slug}>
@@ -557,11 +474,6 @@ function ScopeKids({ slug, kids, selected, onOpen }: { slug: string; kids: Scope
   );
 }
 
-/**
- * The selected project: its head (name, state chip, what is for the owner; ⋯), the one-line message box, then the
- * sections (project-book.tsx), the Pinned strip first, and its history and Pathways. Focusing the message box pins the selection: the list's
- * order can change under a draft, and the default selection (the first project) must not swap while the owner types.
- */
 function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPick, now, narrow, needs, scoping = 0, inPlace = false, onBack }: { project: Project; lanes: Lane[] | undefined; busy: boolean; refetchAll: () => void; openCard: OpenCard; onOpen: (slug: string) => void; onPick: () => void; now: number; narrow: boolean; needs: NeedsYou | undefined; scoping?: number; inPlace?: boolean; onBack?: () => void }) {
   const { cosTitle, ownerName } = useIdentity();
   const [confirming, setConfirming] = useState(false);
@@ -569,7 +481,6 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
   const head = leadHead(project);
   const askStatus = askStatusFor(project, now, refetchAll);
   const st = projectState(project, lanes);
-  // what waits in its scoping children too, as its list row counts it (kit.ts listRow)
   const forYou = needCount(project, lanes) + scoping;
   const leadLane = lanes?.find((l) => l.agent.role === "lead");
   const leadLevel = leadLane ? leadLane.agent.level : null;
@@ -579,15 +490,12 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
     void write(WRITES.startLead, body, { kind: "other", where: `lead:${project.slug}`, after: refetchAll });
   };
   const held = project.heldAt !== null;
-  // the open transcript gets what the head's room leaves (head-fit.ts), so the message box is whole without scrolling
   const headFit = useHeadFit<HTMLDivElement>();
   const more = <MoreMenu project={project} busy={busy} refetchAll={refetchAll} narrow={narrow} onArchive={() => setConfirming(true)} askStatus={askStatus} askInMenu onPin={() => setPinning(true)} />;
   return (
     <div className="detail" data-project={project.slug} data-detail-panel={project.slug} data-held={held ? "true" : "false"} style={accentVars(project.monType)}>
       <ProjectRefs.Provider value={{ project: project.slug, prs: project.prs ?? [] }}>
-        {/* the head: stays put above the cards in the wide layout (layoutCss) */}
         <div className="k-dfixed" ref={headFit} data-detail-head={project.slug}>
-          {/* a phone's project page: the Back row holds the ⋯, so the head is one line */}
           {onBack ? <BackRow onBack={onBack}>{more}</BackRow> : null}
           <div className="k-dhead">
             {inPlace ? null : (
@@ -622,8 +530,6 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
               )}
             </span>
           </div>
-          {/* 2026-11-18: the lead's profile card, compact, right under the header (with a personas pack only). It holds the
-              lead's Lv, party and team, so the header above doesn't repeat them, at any width */}
           {head.persona && project.lead ? <ProfileCard persona={head.persona} address={project.lead.address} project={project.slug} level={leadLevel} party={party} /> : null}
           {project.lead ? (
             <ChatCard slug={project.slug}>
@@ -642,7 +548,6 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
               />
             </ChatCard>
           ) : project.direct?.messages.length ? (
-            // no lead running (none started, or archived): the direct-message log so far, read-only until Start lead
             <ChatCard slug={project.slug}>
               <ChatLog project={project} now={now} cos={cosTitle} busy={busy} refetchAll={refetchAll} onPick={onPick} />
             </ChatCard>
@@ -651,7 +556,6 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
           <PageError where={`lead:${project.slug}`} />
           <ArchiveConfirm project={project} open={confirming} busy={busy} refetchAll={refetchAll} onDone={() => setConfirming(false)} />
         </div>
-        {/* the section cards: the one region of the detail that scrolls in the wide layout */}
         <div className="k-dcards" data-cards-scroll={project.slug}>
           <ProjectBook
             project={project}
@@ -667,7 +571,6 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
             busy={busy}
             refetchAll={refetchAll}
           />
-          {/* a phone's project page holds its history and Pathways; on web they are the Timeline page */}
           {onBack ? <ProjectSections project={project} lanes={lanes} openCard={openCard} ownerName={ownerOnScreen(ownerName).name} /> : null}
           {onBack ? <PathwaysPart slug={project.slug} narrow /> : null}
         </div>
@@ -676,7 +579,6 @@ function DetailPanel({ project, lanes, busy, refetchAll, openCard, onOpen, onPic
   );
 }
 
-/** On a phone the filter row fits the screen with the shorter word (2026-11-20: "With waits" ran off the edge). */
 const SHORT_FILTER_WORD: Partial<Record<Filter, string>> = { waits: "Waits" };
 
 type ScopeQuery = { data: Scope | undefined; error: { message: string } | null; refetch: () => Promise<void> };
@@ -709,25 +611,18 @@ export function ProjectsView({
   lanesFrom: Agents | undefined;
   needs: NeedsYou | undefined;
   openCard: OpenCard;
-  /** The open project page (projects/<slug>), null for the list. The panel keeps it, so pane focus can't close it. */
   detail: string | null;
-  /** The selected project (the pane's route): beside the list when wide, its own page with Back when narrow. */
   picked: string | null;
   onPick: (slug: string | null) => void;
-  /** Opening or leaving a project's page: the URL follows, so a link or the browser's back button works. */
   onDetail: (slug: string | null) => void;
-  /** What the references in a row's text resolve against (refs.ts); null: plain text. */
   refs: SharedRefs | null;
-  /** Scope, folded in (2026-11-20; its entries are the projects' children since 2026-11-22): its read, the open entry (scope/<key>) and how to open one. */
   scope: ScopeQuery;
   scopeOpen: string | null;
   onScope: (key: string | null) => void;
-  /** An old pathways/<slug> link: the project's page opens with Pathways open. */
   pathwaysOpen?: boolean;
   deliverables: Deliverables | undefined;
   mons: ReadonlyMap<string, FaceOf>;
   accents: ReadonlyMap<string, string | null>;
-  /** The work board (projects/~board): its project filter and open task; null shows the list. */
   board?: BoardPlace | null;
   onBoard?: (place: BoardPlace | null, how?: "push" | "replace") => void;
 }) {
@@ -738,60 +633,44 @@ export function ProjectsView({
   const [showArchived, setShowArchived] = useState(false);
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
-  // the chevrons the viewer has pressed in this view, by project, with what was in sight then (kit.ts childrenOpen)
   const [toggled, setToggled] = useState<Record<string, FoldPress>>({});
-  // what the results follow: the box's words once typing pauses (search.tsx useSettled)
   const found = useSettled(query);
-  // a chevron pressed during a search lasts as long as that search (kit.ts childrenOpen): once it clears, the same words
-  // searched again show the matching children
   useEffect(() => {
     if (!found.trim()) setToggled((t) => (Object.values(t).some((x) => x.q.trim()) ? Object.fromEntries(Object.entries(t).filter(([, x]) => !x.q.trim())) : t));
   }, [found]);
-  // a press made while one of its project's entries was open forgets that entry once another (or none) is open, so
-  // opening it again later shows the children (kit.ts leftEntry)
   useEffect(() => {
     setToggled((t) => leftEntry(t, scopeOpen));
   }, [scopeOpen]);
   const [width, root] = useElementWidth();
-  // this pane's own elements: a second Projects pane must not scroll with this one
+  // a second Projects pane must not scroll with this one
   const pane = usePaneId();
   const here = pane ? `[data-pane="${CSS.escape(pane)}"]` : "[data-orch]";
-  // bb's phone layout (not a pane width; the lead, 2026-11-20): there a project opens as its own page with a Back row
   const phone = useTouchPhone();
   const narrow = width > 0 && width <= 640;
   const wide = isWide(width);
-  // List or Board, as the viewer last picked (view-pref.ts): Projects opening on its bare list moves to the board,
-  // replacing the list's entry; never once the page settled, so Back from the board to the list stays on the list
   const kept = useProjectsView();
   const [opening, setOpening] = useState<Opening>("waiting");
   const at: OpenAt = board ? (board.project === null && board.task === null ? "board" : "other") : !detail && !picked && !scopeOpen && !pathwaysOpen ? "list" : "other";
   const step = openStep(opening, kept, at);
   const toBoard = step.move === "board" && at === "list";
-  // after this mount's effects: the app's own (app.tsx, a parent, so it runs after this one) settles the URL the page
-  // opened on first, and a move made before it would be undone by it
+  // after this mount's effects: the app's own, in a parent, settles the URL first, and a move made before it would be undone
   useEffect(() => {
     if (step.next === opening && !step.move) return;
     const t = setTimeout(() => {
       setOpening(step.next);
-      // the plugin's word settled it: this browser's copy follows, so the next first paint agrees
       if (step.next === "done" && kept.server && kept.server !== kept.copy) saveViewCopy(kept.server);
       if (step.move) onBoard(step.move === "board" ? { project: null, task: null } : null, "replace");
     });
     return () => clearTimeout(t);
   }, [opening, step.next, step.move]);
-  // only the list's root below fits the pane ([data-fits-pane]). The board, the frame before the kept board opens and
-  // the web project page return before it, and the width they'd see is the list's last one (its root is gone), so
-  // asking for them left the pane scrolling nothing with nothing of theirs scrolling either: the Timeline page was cut
-  // off at the pane's bottom
+  // only the list's root fits the pane ([data-fits-pane]): the board and web project page return before it, and asking for them scrolled nothing
   const listShown = !toBoard && !board && !!q.data && !(detail && !phone && q.data.some((p) => p.slug === detail));
   usePaneFits(wide && listShown);
   const now = useMinute();
   const busy = gate.lock !== null;
-  // a page opens from the top, as a new page does
   useEffect(() => {
     if (phone || scopeOpen || (picked && !wide)) document.querySelector(`${here} [data-projects-width]`)?.closest(".orch-pane__scroll")?.scrollTo({ top: 0 });
   }, [detail, scopeOpen, phone, picked]);
-  // List | Board (the work board, SCOPE piece 2)
   const switcher = (
     <ToggleGroup
       type="single"
@@ -801,7 +680,6 @@ export function ProjectsView({
       data-projects-view={board ? "board" : "list"}
       value={board ? "board" : "list"}
       onValueChange={(v) => {
-        // a click on the view already shown comes as "": that view is the pick, and the page stays on it
         const to = v === "board" || v === "list" ? v : board ? "board" : "list";
         setOpening("done");
         kept.pick(to);
@@ -816,13 +694,12 @@ export function ProjectsView({
       </ToggleGroupItem>
     </ToggleGroup>
   );
-  // the board is on its way: no list for a frame first
   if (toBoard) return null;
   if (board)
     return (
       <div className="orch-cc tab pb-8" data-phone={phone || undefined} data-projects-tab="" data-layout="board">
         <BoardView place={board} onPlace={(p, how) => onBoard(p, how)} switcher={switcher}
-          since={(project, onLens) => <BoardSince project={project} onLens={onLens} />}
+          since={(project, onLens, shown) => <BoardSince project={project} onLens={onLens} shown={shown} />}
           movedChip={(move, now) => <MovedChip move={move} now={now} />}
           reads={{ needs, scope: scope.data, deliverables, projects: q.data, refetchAll }}
         />
@@ -833,15 +710,13 @@ export function ProjectsView({
   const lanes = buildLanes(lanesFrom, needs);
   const open = (slug: string | null) => {
     const p = slug ? all.find((x) => x.slug === slug) : undefined;
-    if (p && phone) markSeen(p, refetchAll); // a phone's page shows the lead's chat, so its notes are seen
+    if (p && phone) markSeen(p, refetchAll);
     onDetail(slug);
   };
   const linked = detail ? all.find((p) => p.slug === detail) : undefined;
-  // web: a project's page is its history and Pathways, as before the phone pass
   if (linked && !phone) return <ProjectDetail project={linked} lanes={lanes.get(linked.slug)} onBack={() => open(null)} openCard={openCard} ownerName={you.name} pathwaysOpen={pathwaysOpen} />;
   const cards = needs?.cards ?? [];
   const live = all.filter((p) => p.archivedAt === null);
-  // each project's scoping children (kit.ts ScopeChild) and what waits in each
   const scoping = scope.data?.projects ?? [];
   const entries = scopeEntries(scoping);
   const kidsBy = new Map<string, ScopeChild[]>();
@@ -851,10 +726,8 @@ export function ProjectsView({
   const count = (f: Filter) => live.filter((p) => fits(f, p)).length;
   const hits = found.trim() ? searchLoaded(live, lanes, cards, found, (w) => waitLine(w, now, cosTitle).text) : [];
   const filtered = live.filter((p) => fits(filter, p));
-  // a search that matches a scoping task's name keeps its project, with that child
   const searched = new Set(searchedProjects(filtered, hits, found).map((p) => p.slug));
   const shown = filtered.filter((p) => searched.has(p.slug) || childHits(kidsOf(p), found).length > 0).sort(attentionOrder(lanes, now, (p) => needCount(p, lanes.get(p.slug)) + scopeExtra(kidsOf(p))));
-  // the scoping tasks the search matched by name, in the projects the list shows: the search box counts and lists them
   const taskHits: TaskHit[] = found.trim() ? shown.flatMap((p) => childHits(kidsOf(p), found).map((k) => ({ project: p.slug, key: k.entry.key, name: k.entry.task!.name }))) : [];
   const quietOne = (p: Project) => quietWithScope(isQuiet(p, lanes.get(p.slug), now), kidsOf(p));
   const main = shown.filter((p) => !quietOne(p));
@@ -872,12 +745,10 @@ export function ProjectsView({
     return { list, shown: hit.length ? hit : list, open: isOpen, toggle };
   };
   const archived = filter === "all" && !found.trim() ? all.filter((p) => p.archivedAt !== null).sort((a, b) => (b.archivedAt ?? 0) - (a.archivedAt ?? 0)) : [];
-  // a click in the list: the detail beside it, or its own page in a narrow pane, shows the project's direct line, so its notes are seen
   const pick = (p: Project) => {
     onPick(p.slug);
     markSeen(p, refetchAll);
   };
-  // a click on a project's name in the hits: its page on a phone, else select it beside the list or open its row in place
   const reach = (slug: string) => {
     if (filterHides(slug, filtered)) setFilter("all");
     const p = live.find((x) => x.slug === slug);
@@ -888,13 +759,12 @@ export function ProjectsView({
   const ordered = [...main, ...quiet];
   const selected = scopeOpen ? undefined : (ordered.find((p) => p.slug === picked) ?? ordered[0]);
   const pickedPage = picked ? live.find((p) => p.slug === picked) : undefined;
-  // `page`: the project is already the page (a phone's projects/<slug>). Picking it there would route to projects/@<slug>,
-  // which a phone draws as the list: a tap in the message box threw the owner out of the project (2026-11-20).
+  // `page`: picking the project there would route to projects/@<slug>, which a phone draws as the list
   const detailPanel = (p: Project, o: { onBack?: () => void; inPlace?: boolean; page?: boolean } = {}) => <DetailPanel key={p.slug} project={p} lanes={lanes.get(p.slug)} busy={busy} refetchAll={refetchAll} openCard={openCard} onOpen={open} onPick={o.page ? () => {} : () => onPick(p.slug)} now={now} narrow={narrow} needs={needs} scoping={scopeExtra(kidsOf(p))} onBack={o.onBack} inPlace={o.inPlace} />;
   const scopePage = scopeOpen ? <ScopeView q={scope} projects={all} deliverables={deliverables} refetchAll={refetchAll} mons={mons} accents={accents} focus={scopeOpen} entryOnly fits={wide} /> : null;
   const styles = (
     <>
-      {/* a changed block gets a new href: React keeps a style by its href, so a window open across an update would keep the old rules */}
+      {/* a changed block gets a new href: React keeps a style by its href */}
       <style href={styleHref("orch-cc", ccCss)} precedence="default">
         {ccCss}
       </style>
@@ -924,7 +794,6 @@ export function ProjectsView({
       </style>
     </>
   );
-  // one column: a scoping entry opens as its own page, with a way back (card-390); on a phone a project does too
   const page = wide ? null : scopePage ? (
     <>
       <BackRow onBack={() => onScope(null)} />
@@ -944,8 +813,6 @@ export function ProjectsView({
       ))}
     </ToggleGroup>
   );
-  // a phone (2026-11-21, the owner: "too much wasted space"; the lead's call): the filters scroll sideways with a 44 px
-  // search icon at the end of their row, which opens the same search, focused, on a line of its own
   const searchShown = !phone || searching || query !== "";
   const top = phone ? (
     <div className="top" data-top-row="">
@@ -1000,7 +867,6 @@ export function ProjectsView({
         </Fragment>
       );
     });
-  // a list with a chevron in it gives every row the chevron's column, so the counts line up (the CSS's k-plist[data-folds])
   const folds = (ps: Project[]) => (ps.some((p) => kidsOf(p).length > 0) ? "" : undefined);
   const list = (
     <div className={wide ? "k-listpane" : undefined} data-projects-list="">
@@ -1022,7 +888,6 @@ export function ProjectsView({
   );
   return (
     <RefsContext.Provider value={refs}>
-    {/* measured at the pane's full width; one column keeps the reading column's width (max-w-3xl less its padding) */}
     <div ref={root} data-projects-width={width} data-fits-pane={wide || undefined}>
     <div className={cx("orch-cc tab pb-8", !wide && "narrow-book")} data-phone={phone || undefined} data-projects-tab="" data-layout={wide ? "list-detail" : "column"} data-page={page ? (scopeOpen ? "scope" : "project") : undefined} style={wide ? undefined : { maxWidth: 1000, marginInline: "auto" }}>
       {styles}
@@ -1032,7 +897,6 @@ export function ProjectsView({
         </div>
       ) : (
         <>
-          {/* a phone: the standing agents after the list, so the projects come first */}
           {phone ? null : <StandingAgents agents={agents} full={lanesFrom} busy={busy} refetchAll={refetchAll} />}
           {top}
           {found.trim() ? <SearchHits q={found} hits={hits} tasks={taskHits} projects={live} now={now} onOpen={reach} /> : null}

@@ -1,20 +1,13 @@
-// The since header's count pills (2026-11-24, the owner's list: shipped, new, waiting on you, blocked, dropped, PRs merged,
-// releases, and the merges on no task as one pill). Pure, so a test reads exactly what the header draws.
 import type { BoardSince as Strip } from "../contract.ts";
 import type { SincePick } from "../core/since.ts";
 
-/** One count pill: a figure, its words, and what a click does (filter the board, or open a list). */
 export type Pill = { key: SincePick | "dropped" | "releases" | "noTask"; n: number; text: string; does: "filter" | "list"; title: string };
 
-/**
- * The pills for a strip, in the owner's order: shipped, new, waiting on you, blocked, dropped, PRs merged, releases,
- * then "PRs on no task", only when there are some. A filter pill names the tasks it shows; a merge pill whose merges no
- * task holds has nothing to show, so it filters nothing (n stays the merges counted).
- */
-export function pillsOf(d: Strip, when: string): Pill[] {
+export function pillsOf(d: Strip, when: string, shown: ReadonlySet<string> | null = null): Pill[] {
   const tasks = (n: number) => (n === 1 ? "task" : "tasks");
-  const c = d.counts;
-  const onTasks = d.picks.merged.length;
+  const on = (k: SincePick) => (shown ? d.picks[k].filter((id) => shown.has(id)).length : d.picks[k].length);
+  const c = { ...d.counts, shipped: on("shipped"), new: on("new"), waiting: on("waiting"), blocked: on("blocked") };
+  const onTasks = on("merged");
   const pills: Pill[] = [
     { key: "shipped", n: c.shipped, text: "shipped", does: "filter", title: `Show the ${c.shipped} ${tasks(c.shipped)} shipped since ${when}` },
     { key: "new", n: c.new, text: "new", does: "filter", title: `Show the ${c.new} ${tasks(c.new)} added since ${when}` },

@@ -1,17 +1,9 @@
-// Folding the work board's columns (2026-11-24, the owner: "I don't need to see everything shipped"). The owner opens the
-// board to what is moving, so:
-// - Shipped starts folded, on a board the viewer never folded and when storage is blocked or holds junk;
-// - what the viewer folds or opens is kept per board, opening Shipped included (an empty list is not "nothing kept"),
-//   and the plugin's word wins over this browser's copy once it lands, unless the viewer changed something meanwhile;
-// - one board's folds never leak into another's (all projects vs one project);
-// - a folded column keeps its place in its row, so the rows (six, or three by two) never reshuffle.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import { BOARD_COLUMNS, type BoardColumn } from "../contract.ts";
 import { FOLDED_FIRST, boardOf, boardRows, drawnFolds, foldCopyKey, loadFoldCopy, resolveFolds, saveFoldCopy } from "../app/board-fold.ts";
 
-/** A browser's storage, as far as the copy uses it. */
 function memory(seed: Record<string, string> = {}) {
   const m = new Map(Object.entries(seed));
   return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), m };
@@ -61,7 +53,6 @@ test("blocked or junk storage never breaks the board: no copy, and a save that f
   assert.equal(loadFoldCopy("-", blocked), null);
   assert.doesNotThrow(() => saveFoldCopy("-", set("blocked"), blocked));
   for (const junk of ["{", "{}", '"shipped"', "42"]) assert.equal(loadFoldCopy("-", memory({ [foldCopyKey("-")]: junk })), null, junk);
-  // columns this build doesn't know (an old or newer list) are dropped, the rest kept, from the copy or the plugin
   assert.deepEqual(loadFoldCopy("-", memory({ [foldCopyKey("-")]: '["waiting","archived",3,null]' })), set("waiting"));
   assert.deepEqual(sorted(resolveFolds({ mine: undefined, server: ["archived", "blocked"], copy: null })), ["blocked"]);
 });

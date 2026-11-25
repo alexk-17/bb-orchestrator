@@ -1,10 +1,3 @@
-// Projects remembers List or Board (2026-11-24, the owner: "The Projects view should remember whether you last picked
-// Board or List"). The owner who works from the board shouldn't pick it again on every visit, so:
-// - Board kept opens Projects on the board after a reload or in a new window, from the plugin's word or, for the first
-//   paint, this browser's copy; nothing kept anywhere is List;
-// - the plugin's word wins once it lands, while the page is still where the copy put it;
-// - only the bare list moves, and only as the page opens: a link stays where it put the page, and Back never bounces;
-// - the copy in this browser never breaks the page when storage is blocked or holds junk.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
@@ -17,7 +10,6 @@ const memory = (seed: Record<string, string> = {}) => {
   return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v) };
 };
 type Kept = { server: ProjectsViewPick | null | undefined; copy: ProjectsViewPick | null };
-/** Projects opening: each word as it arrives, the page following each move, until it settles. */
 function open(words: Kept[], at: OpenAt = "list"): { at: OpenAt; moves: string[]; phase: Opening } {
   let phase: Opening = "waiting";
   const moves: string[] = [];
@@ -51,10 +43,8 @@ test("the plugin's word wins over this browser's copy once it lands", () => {
 test("only the bare list moves, and only as the page opens", () => {
   for (const at of ["board", "other"] as const) assert.deepEqual(open([{ server: "list", copy: "list" }], at), { at, moves: [], phase: "done" }, `a link that opened ${at} stays`);
   assert.deepEqual(open([{ server: "board", copy: null }], "other"), { at: "other", moves: [], phase: "done" }, "an open project is never swapped for the board");
-  // opened on the copy, then the viewer went elsewhere before the plugin's word: no correction yanks them back
   const s = openStep("copy:board", { server: "list", copy: "board" }, "other");
   assert.deepEqual(s, { next: "done", move: null });
-  // settled for good: Back to the list later never bounces to the board
   assert.deepEqual(openStep("done", { server: "board", copy: "board" }, "list"), { next: "done", move: null });
 });
 
@@ -83,7 +73,6 @@ test("Projects keeps the toggle's pick, settles for good on it, and moves by rep
   assert.match(src, /: !detail && !picked && !scopeOpen && !pathwaysOpen \? "list" : "other";/, "only the bare list is the list");
 });
 
-/** A post the test answers by hand, in any order: what was sent, and a way to answer each. */
 function posts() {
   const sent: { body: ViewPrefBody; answer: (o: Outcome) => void }[] = [];
   const post = (body: ViewPrefBody) => new Promise<Outcome>((answer) => void sent.push({ body, answer }));
@@ -91,7 +80,7 @@ function posts() {
 }
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
-test("the page's saves go one after another, in the order made, so the server keeps the latest (Codex's review)", async () => {
+test("the page's saves go one after another, in the order made, so the server keeps the latest", async () => {
   const { sent, post } = posts();
   const w = new PrefWrites(post);
   void w.keep({ board: "-", folded: ["shipped"] });
@@ -103,21 +92,18 @@ test("the page's saves go one after another, in the order made, so the server ke
   assert.deepEqual(sent.map((s) => s.body), [{ board: "-", folded: ["shipped"] }, { projectsView: "board" }], "then goes, even after a failed save");
 });
 
-const listKept: ViewPrefs = { projectsView: "list", boardFolds: { "-": ["shipped"] } };
+const listKept: ViewPrefs = { projectsView: "list", boardFolds: { "-": ["shipped"] }, rev: 3 };
 const none = new Map<string, ViewPrefBody>();
 
-test("Projects left and opened again opens on the pick just made, not on the read from before it (Codex's review)", () => {
-  // List kept; the viewer picks Board, goes Home and comes back while the shared read still says List
+test("Projects left and opened again opens on the pick just made, not on the read from before it", () => {
   const w = new PrefWrites(() => new Promise<Outcome>(() => undefined));
   void w.keep({ projectsView: "board" });
   assert.equal(viewWord(listKept, w.own(), false), "board", "the page's own pick wins over the read from before it");
   assert.deepEqual(open([{ server: viewWord(listKept, w.own(), true), copy: "board" }]), { at: "board", moves: ["board"], phase: "done" });
-  // a read being refreshed never settles the opening: it may be from before a pick made since; its fresh word does
   assert.equal(viewWord(listKept, none, true), undefined);
   assert.deepEqual(open([{ server: viewWord(listKept, none, true), copy: "board" }, { server: viewWord({ ...listKept, projectsView: "board" }, none, false), copy: "board" }]), { at: "board", moves: ["board"], phase: "done" });
   assert.equal(viewWord(listKept, none, false), "list", "a read not being refreshed is the plugin's word");
   assert.equal(viewWord(undefined, none, false), undefined, "no read yet: no word");
-  // the board's folds the same way: Shipped opened, then the board left and opened again, stays open
   void w.keep({ board: "-", folded: [] });
   assert.deepEqual(foldWord(listKept, w.own(), "-"), []);
   assert.deepEqual(foldWord(listKept, none, "-"), ["shipped"]);
@@ -128,7 +114,9 @@ test("Projects left and opened again opens on the pick just made, not on the rea
   assert.match(readFileSync(new URL("../app/board-fold.ts", import.meta.url), "utf8"), /const server = foldWord\(prefs, own, board\);/, "the board folds on that word");
 });
 
-test("once the server kept a save, the shared read is refreshed and holds it; with no read mounted, the next one to mount is", async () => {
+const kept = (rev: number): Outcome => ({ ok: true, result: { rev } });
+
+test("once the server kept a save, the shared read is refreshed, and the pick leaves the page's own when a read holds it; with no read mounted, the next one to mount is refreshed", async () => {
   const { sent, post } = posts();
   const w = new PrefWrites(post);
   let reads = 0;
@@ -136,65 +124,94 @@ test("once the server kept a save, the shared read is refreshed and holds it; wi
   void w.keep({ projectsView: "board" });
   await tick();
   assert.ok(w.own().has("view"), "sent, not answered: still the page's own word");
-  sent[0]!.answer({ ok: true });
+  sent[0]!.answer(kept(4));
   await tick();
   assert.equal(reads, 1, "the read is refreshed after the server kept it");
-  assert.equal(w.own().size, 0, "and the save leaves the page's own words: the read holds it");
-  // the viewer went elsewhere before the server answered: no read to refresh, so the page keeps its own word
+  assert.ok(w.own().has("view"), "kept, not read back yet: still the page's own");
+  w.read(4);
+  assert.equal(w.own().size, 0, "the read holds the save: the plugin's word is the pick");
   leave();
   void w.keep({ projectsView: "list" });
   await tick();
-  sent[1]!.answer({ ok: true });
+  sent[1]!.answer(kept(5));
   await tick();
   assert.equal(reads, 1);
-  assert.deepEqual(w.own().get("view"), { projectsView: "list" }, "kept by the server, not read back yet: still the page's own");
+  assert.deepEqual(w.own().get("view"), { projectsView: "list" });
   w.mount(async () => void reads++);
   await tick();
   assert.equal(reads, 2, "the next read to mount is refreshed");
+  w.read(5);
   assert.equal(w.own().size, 0);
 });
 
-test("a change made while the read is refreshed stays the page's own; a save that failed leaves it", async () => {
+test("a refresh that failed, was cancelled or read from before the save leaves the pick and the folds the page's own", async () => {
   const { sent, post } = posts();
   const w = new PrefWrites(post);
-  let done = () => {};
-  w.mount(() => new Promise<void>((r) => (done = r)));
+  let reads = 0;
+  w.mount(async () => void reads++);
+  void w.keep({ projectsView: "board" });
+  void w.keep({ board: "-", folded: [] });
+  await tick();
+  sent[0]!.answer(kept(4));
+  await tick();
+  sent[1]!.answer(kept(5));
+  await tick();
+  assert.equal(reads, 2, "each kept save refreshes the read, and the SDK's refresh resolves however its read ended");
+  assert.equal(viewWord(listKept, w.own(), false), "board", "Projects left and opened again still opens the board");
+  assert.deepEqual(foldWord(listKept, w.own(), "-"), [], "and Shipped stays open");
+  w.read(3);
+  assert.equal(w.own().size, 2, "a read from before both saves hands nothing over");
+  w.read(4);
+  assert.deepEqual([...w.own().keys()], ["folds:-"], "a read holding the pick's save, not the folds'");
+  w.read(5);
+  assert.equal(w.own().size, 0);
+
+  const c = new PrefWrites(post);
+  c.mount(() => Promise.reject(new DOMException("cancelled", "AbortError")));
+  void c.keep({ projectsView: "board" });
+  await tick();
+  sent[2]!.answer(kept(6));
+  await tick();
+  assert.equal(viewWord(listKept, c.own(), false), "board", "a refresh whose read was cancelled hands nothing over");
+});
+
+test("a save from another window, read after this page's, is the pick; a save with no revision stays the page's own", async () => {
+  const { sent, post } = posts();
+  const w = new PrefWrites(post);
+  w.mount(async () => undefined);
   void w.keep({ projectsView: "board" });
   await tick();
-  sent[0]!.answer({ ok: true });
+  sent[0]!.answer(kept(4));
+  await tick();
+  w.read(6);
+  assert.equal(viewWord({ ...listKept, rev: 6 }, w.own(), false), "list", "List saved elsewhere after Board: the read holding it wins");
+  void w.keep({ projectsView: "board" });
+  await tick();
+  sent[1]!.answer({ ok: true, result: null });
+  await tick();
+  w.read(99);
+  assert.equal(viewWord({ ...listKept, rev: 99 }, w.own(), false), "board", "no revision to wait for: the page keeps its pick");
+});
+
+test("a change made while a save is sent stays the page's own; a save that failed leaves it", async () => {
+  const { sent, post } = posts();
+  const w = new PrefWrites(post);
+  w.mount(async () => undefined);
+  void w.keep({ projectsView: "board" });
+  await tick();
+  sent[0]!.answer(kept(4));
   await tick();
   void w.keep({ projectsView: "list" });
-  done();
+  w.read(4);
+  assert.deepEqual(w.own().get("view"), { projectsView: "list" }, "the read holds Board, not List: List stays the page's own");
   await tick();
-  assert.deepEqual(w.own().get("view"), { projectsView: "list" }, "the read began before List was sent: List stays the page's own");
   sent[1]!.answer({ ok: false, kind: "error", message: "offline" });
   await tick();
   assert.equal(w.own().has("view"), false, "a failed save is not the page's word: the plugin's read is");
 });
 
-test("two refreshes at once: only the latest hands the page's saves to the read, as the earlier one's fetch was cancelled", async () => {
-  const { sent, post } = posts();
-  const w = new PrefWrites(post);
-  const ends: (() => void)[] = [];
-  w.mount(() => new Promise<void>((r) => void ends.push(r)));
-  void w.keep({ projectsView: "board" });
-  void w.keep({ board: "-", folded: [] });
-  await tick();
-  sent[0]!.answer({ ok: true });
-  await tick();
-  sent[1]!.answer({ ok: true });
-  await tick();
-  assert.equal(ends.length, 2, "each kept save refreshes the read");
-  ends[0]!();
-  await tick();
-  assert.equal(w.own().size, 2, "the first refresh ended (cancelled by the second) before the read held anything new: both saves stay the page's own");
-  ends[1]!();
-  await tick();
-  assert.equal(w.own().size, 0, "the latest refresh landed: the read holds both");
-});
-
-test("a click on the view already kept writes nothing; a pick that differs from the pending or kept one is written (Codex's review)", () => {
-  const boardKept: ViewPrefs = { projectsView: "board", boardFolds: {} };
+test("a click on the view already kept writes nothing; a pick that differs from the pending or kept one is written", () => {
+  const boardKept: ViewPrefs = { projectsView: "board", boardFolds: {}, rev: 3 };
   assert.equal(pickSave("board", viewWord(boardKept, none, false)), null, "Board kept, Board clicked: no write");
   const w = new PrefWrites(() => new Promise<Outcome>(() => undefined));
   void w.keep({ projectsView: "list" });
@@ -202,7 +219,7 @@ test("a click on the view already kept writes nothing; a pick that differs from 
   assert.deepEqual(pickSave("board", viewWord(boardKept, w.own(), false)), { projectsView: "board" }, "Board kept, List pending, Board clicked: written, or List would land last");
   assert.deepEqual(pickSave("board", viewWord(boardKept, none, true)), { projectsView: "board" }, "the read is being refreshed: no word to trust, so written");
   assert.deepEqual(pickSave("list", viewWord(undefined, none, false)), { projectsView: "list" }, "no read yet: written");
-  assert.deepEqual(pickSave("list", viewWord({ projectsView: null, boardFolds: {} }, none, false)), { projectsView: "list" }, "none kept: written");
+  assert.deepEqual(pickSave("list", viewWord({ projectsView: null, boardFolds: {}, rev: 0 }, none, false)), { projectsView: "list" }, "none kept: written");
   const src = readFileSync(new URL("../app/view-pref.ts", import.meta.url), "utf8");
   assert.match(src, /saveViewCopy\(v\);\n\s+const save = pickSave\(v, server\);\n\s+if \(save\) keep\(save\);/, "the toggle keeps this browser's copy always, and writes the plugin only for a change");
 });

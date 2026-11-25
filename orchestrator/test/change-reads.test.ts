@@ -1,11 +1,3 @@
-// The refresh fan-out fix, against the real server entry on a fake bb host (lag fix, 2026-11-23). The owner's page
-// lagged by seconds: every change made every mounted screen refetch every read, and the agents and needsYou reads asked
-// bb about each of ~32 live agents each time (a 14.7 s project page: 36 reads, 384+ bb calls). Now the change notice
-// names the tables written and each screen refetches only the reads that read one, and bb's thread reads are kept 5 s
-// and shared. Either may never leave a screen stale:
-// - every read reads only tables its change-notice.ts READS entry declares, and a read that shows a status declares it;
-// - bb's news of a thread, and the owner's answer, re-read that thread at once;
-// - the notice after a status flip, an answer, an approval or a prompt touches the reads that show it.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
@@ -29,12 +21,10 @@ const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwA
 const tick = () => new Promise<void>((r) => setTimeout(r, 2));
 const settle = (ms = 200) => new Promise<void>((r) => setTimeout(r, ms));
 
-/** The tables a SELECT reads (FROM and JOIN), for the read map's check. */
 const readTables = (sql: string) => [...sql.replace(/\s+/g, " ").matchAll(/\b(?:FROM|JOIN)\s+([a-z_]+)/gi)].map((m) => m[1]!.toLowerCase());
 
 type Handler = (input: unknown, ctx?: unknown) => unknown;
 
-/** The real server on a fake bb, its database seeded busy (34 agents), every bb SDK call counted. */
 async function host(opts: { batchInbox?: boolean; kv?: unknown } = {}) {
   const root = mkdtempSync(join(tmpdir(), "orch-reads-"));
   roots.push(root);
@@ -45,7 +35,7 @@ async function host(opts: { batchInbox?: boolean; kv?: unknown } = {}) {
   const proof = join(root, "proof.png");
   writeFileSync(proof, Buffer.from(PNG, "base64"));
   const raw = new DatabaseSync(join(root, "data.db"));
-  raw.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF"); // a scratch file: no fsync per write
+  raw.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF");
   const reads = new Set<string>();
   const db: any = {
     name: join(root, "data.db"),
@@ -58,17 +48,14 @@ async function host(opts: { batchInbox?: boolean; kv?: unknown } = {}) {
     },
     close: () => raw.close(),
   };
-  // seeded before the plugin loads, as the land-prs harnesses do (made-up data)
   const clock = { t: Date.now() - 3 * 3_600_000 };
-  // its writes are named as the server names its own (core/write-log.ts): a change made here, which the fake bb can't
-  // cause (a PR reading), still has the notice the server would send for it (seedNotice)
   const seedTables = new ChangeTables(KNOWN_TABLES);
   const seedEngine = new Engine(recordWrites(raw as never, (t) => seedTables.wrote(t)) as never, { now: () => clock.t, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: (t?: readonly string[]) => seedTables.call(t), log: () => {}, files: () => ({ dir: join(root, "state", "deliverables"), kept: join(root, "state", "threads") }) } as never, { batchInbox: opts.batchInbox ?? false, owner: "Robin" });
   const seeded = seedBusy(seedEngine, (ms) => (clock.t += ms), proof);
   const sdkCalls: string[] = [];
   const warnings: string[] = [];
   const prompts = new Map<string, unknown[]>();
-  const slowThreads = new Set<string>(); // bb takes 600 ms to answer for these
+  const slowThreads = new Set<string>();
   const threads = {
     get: async ({ threadId }: { threadId: string }) => (sdkCalls.push(`get:${threadId}`), await (slowThreads.has(threadId) ? new Promise((r) => setTimeout(r, 600)) : tick()), { id: threadId, title: `Made-up ${threadId}`, status: "idle", providerId: "claude", environment: { branchName: "main" } }),
     context: async ({ threadId }: { threadId: string }) => (sdkCalls.push(`context:${threadId}`), await tick(), { usage: { usedTokens: 1_000, modelContextWindow: 200_000, snapshot: { model: "made-up" } } }),
@@ -86,7 +73,6 @@ async function host(opts: { batchInbox?: boolean; kv?: unknown } = {}) {
     list: async () => ({ threads: [] }),
   };
   const noop: any = new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : noop), apply: () => noop });
-  // bb's other SDK areas are absent: a startup job that reaches for one fails and logs, as with a bb that lacks it
   const sdk: any = { threads };
   let handlers: Record<string, Handler> = {};
   const events = new Map<string, (p: any) => unknown>();
@@ -128,13 +114,11 @@ async function host(opts: { batchInbox?: boolean; kv?: unknown } = {}) {
   const announce = async () => {
     void services.get("memory")!.start(stop.signal);
     await settle();
-    // the first flush delivers the seeded mail still waiting: let it finish, so each change below is measured alone
     events.get("thread.active")!({ thread: { id: "thr_busy_cos" } });
-    await calm(); // a flush announces only when it is done
+    await calm();
     await quiet();
     notices.length = 0;
   };
-  /** Until bb was asked nothing for 300 ms. */
   const calm = async () => {
     let n = -1;
     while (n !== sdkCalls.length) {
@@ -142,7 +126,6 @@ async function host(opts: { batchInbox?: boolean; kv?: unknown } = {}) {
       await settle(300);
     }
   };
-  /** Until no notice came for 400 ms: the change's flush and its mail are done. */
   const quiet = async () => {
     let n = -1;
     while (n !== notices.length) {
@@ -151,7 +134,6 @@ async function host(opts: { batchInbox?: boolean; kv?: unknown } = {}) {
     }
   };
   const read = (m: string, input: unknown = null) => Promise.resolve((handlers[m] as Handler)(input, { experimental_caller: { kind: "client" }, experimental_signal: new AbortController().signal }));
-  /** A POST to one of the screens' write routes, from the app's own origin. */
   const post = async (path: string, body: unknown) => {
     const c = {
       req: { url: "http://127.0.0.1:1/x", header: (h: string) => (h === "origin" ? "http://127.0.0.1:1" : h === "sec-fetch-site" ? "same-origin" : undefined), json: async () => body },
@@ -163,7 +145,6 @@ async function host(opts: { batchInbox?: boolean; kv?: unknown } = {}) {
   };
   const seedNotice = () => ({ tables: seedTables.take() });
   seedNotice();
-  /** An agent's tool call, its raw arguments parsed by the tool's own schema as bb does. */
   const tool = async (name: string, raw: unknown, threadId: string) => {
     const t = tools.get(name)!;
     const r = await t.execute(t.parameters.parse(raw), { threadId });
@@ -180,7 +161,7 @@ const INPUTS: Record<ChangeRead, unknown> = {
   agents: null,
   scope: null,
   deliverables: null,
-  deliverable: null, // its id is the seed's (inputOf)
+  deliverable: null,
   deliverableIndex: null,
   outputs: null,
   projectOrder: null,
@@ -189,12 +170,11 @@ const INPUTS: Record<ChangeRead, unknown> = {
   projectBook: { slug: "kite-app" },
   projectHistory: { slug: "kite-app" },
   feed: { cursor: null, filter: "all" },
-  workBoard: { since: 0, project: null }, // a fixed T: the default (now less 7 days) moves with the clock
+  workBoard: { since: 0, project: null },
   boardSince: { since: 0, project: null },
   viewPrefs: null,
 };
 
-/** A read's input: the one card read whole is the seed's deliverable with a PR and a next move (its PR's state shows). */
 const inputOf = (h: { raw: unknown }, m: ChangeRead) =>
   m === "deliverable" ? { id: ((h.raw as { prepare: (q: string) => { get: (t: string) => unknown } }).prepare("SELECT id FROM deliverables WHERE title = ?").get("Made-up deliverable with a next move") as { id: string }).id } : INPUTS[m];
 
@@ -204,24 +184,21 @@ test(`every read reads only the tables its READS entry declares${batchInbox ? " 
   const missing: string[] = [];
   for (const m of Object.keys(READS) as ChangeRead[]) {
     const declared = READS[m];
-    if (!declared) continue; // refetched on every change
+    if (!declared) continue;
     h.reads.clear();
     await h.read(m, inputOf(h, m));
-    // sqlite_master is the schema (the board checks task_prs is there): no write names it, a schema change refetches all
+    // sqlite_master is the schema: no write names it, a schema change refetches all
     for (const t of h.reads) if (t !== "sqlite_master" && !(declared as readonly string[]).includes(t)) missing.push(`${m} reads ${t}`);
   }
   h.stop.abort();
   assert.deepEqual(missing, [], "add each to change-notice.ts READS, or the screen misses that change");
 });
 
-/** What the screen shows: the read's answer, without the clock it was read at (and Needs you's presets, from the clock). */
 const shownOf = (h: Awaited<ReturnType<typeof host>>, m: ChangeRead) => h.read(m, inputOf(h, m)).then((o) => JSON.stringify(o, (k, v) => (k === "now" || k === "presets" ? undefined : v)));
 
 test("a read whose answer shows a thread's status declares STATUS, or LIVE when it shows only archived or not", async () => {
   const h = await host();
   const { cos, leads, threads } = h.seeded;
-  // every status a thread can have, on the CoS, a lead and its threads; "stopped" is left only by "active" or "archived".
-  // Archived last, and not on the threads: archiving a thread retires its role (a change of "agents", which these declare).
   const who = [cos, leads[0]!, ...threads.filter((t) => t.project === "kite-app")];
   const steps: [string, boolean][] = [["active", false], ["error", false], ["idle", false], ["active", false], ["stopped", false], ["active", false], ["idle", false]];
   const undeclared: string[] = [];
@@ -237,7 +214,6 @@ test("a read whose answer shows a thread's status declares STATUS, or LIVE when 
       if (now !== before) undeclared.push(`${m} shows ${to}`);
       before = now;
     }
-    // into archived and out again: only a read that declares LIVE may show it
     for (const to of ["archived", "active"]) {
       for (const a of [cos, leads[0]!]) h.seedEngine.setStatus(a.threadId, to);
       const now = await shownOf(h, m);
@@ -263,12 +239,11 @@ test("a second agents read asks bb nothing; bb's news of one thread re-reads onl
   const t = h.seeded.threads[3]!.threadId;
   for (const ev of ["thread.active", "thread.idle", "thread.failed", "thread.unarchived", "thread.deleted", "experimental_thread.read"]) {
     await h.events.get(ev)!({ thread: { id: t }, lastAssistantText: "", error: null });
-    await h.calm(); // the event's own flush (mail to the lead) asks bb itself, uncached: not the read's
+    await h.calm();
     h.sdkCalls.length = 0;
     await h.read("agents");
     assert.deepEqual(h.sdkCalls.sort(), [`context:${t}`, `get:${t}`], `after ${ev}`);
   }
-  // archived in bb: its role retires, so the read no longer lists it (and asks bb nothing of it)
   await h.events.get("thread.archived")!({ thread: { id: t } });
   await h.calm();
   h.sdkCalls.length = 0;
@@ -291,7 +266,6 @@ test("a new prompt shows on Needs you at once, and the owner's answer takes it o
   const shown = ((await h.read("needsYou", { zone: "UTC" })) as { interactions: { id: string }[] }).interactions;
   assert.deepEqual(shown.map((i) => i.id), ["ix-1"]);
   await h.post(WRITES.interactionAnswer, { threadId: t, interactionId: "ix-1", answers: { q1: { selected: ["a"] } } });
-  // the app refetches right after its write: a kept "pending" here would bring the card back
   assert.deepEqual(((await h.read("needsYou", { zone: "UTC" })) as { interactions: unknown[] }).interactions, []);
   h.stop.abort();
 });
@@ -307,7 +281,6 @@ test("a lead's prompt answered in bb itself leaves the feed: Needs you's read te
   await h.quiet();
   assert.ok(JSON.stringify(await h.read("feed", INPUTS.feed)).includes("ix-feed"), "the lead's prompt is on the feed");
   h.notices.length = 0;
-  // answered in bb's own thread view: bb sends no event for that, only the thread's turn going on (a status flip)
   h.prompts.set(lead, []);
   await h.events.get("thread.active")!({ thread: { id: lead } });
   await h.calm();
@@ -315,12 +288,12 @@ test("a lead's prompt answered in bb itself leaves the feed: Needs you's read te
   const flip = h.notices.at(-1) as { tables: string[] };
   assert.ok(touches(flip, "needsYou") && !touches(flip, "feed"), JSON.stringify(flip));
   h.notices.length = 0;
-  await h.read("needsYou", { zone: "UTC" }); // the page's refetch on that notice
+  await h.read("needsYou", { zone: "UTC" });
   await h.quiet();
   assert.ok(h.notices.some((n) => touches(n, "feed")), `a notice the feed refetches on: ${JSON.stringify(h.notices)}`);
   assert.ok(!JSON.stringify(await h.read("feed", INPUTS.feed)).includes("ix-feed"), "gone from the feed");
   h.notices.length = 0;
-  await h.read("needsYou", { zone: "UTC" }); // the refetch that notice causes: the same prompts, no further notice
+  await h.read("needsYou", { zone: "UTC" });
   await h.quiet();
   assert.deepEqual(h.notices, []);
   h.stop.abort();
@@ -338,7 +311,6 @@ test("concurrent reads of the same RPC wait on one computation: one bb call per 
   h.stop.abort();
 });
 
-/** The reads a notice refetches, by name. */
 const touched = (n: unknown) => (Object.keys(READS) as ChangeRead[]).filter((m) => touches(n, m));
 
 test("the notice after each change refetches the reads that show it, and not the others", async () => {
@@ -347,7 +319,6 @@ test("the notice after each change refetches the reads that show it, and not the
   const last = () => h.notices.at(-1) as { tables: string[] | null };
   const t = h.seeded.threads[7]!;
 
-  // a status flip: the screens with a status, not the deliverables, the feed or the config
   await h.events.get("thread.active")!({ thread: { id: t.threadId } });
   await h.calm();
   await h.quiet();
@@ -355,26 +326,22 @@ test("the notice after each change refetches the reads that show it, and not the
   for (const m of ["board", "projects", "agents", "scope", "projectHistory", "needsYou"] as ChangeRead[]) assert.ok(touches(last(), m), `${m} shows a status`);
   for (const m of ["deliverables", "config", "projectOrder", "feed", "directHistory"] as ChangeRead[]) assert.ok(!touches(last(), m), `${m} shows no status`);
 
-  // its turn ends: its lead is told (mail), so the feed refetches too
   await h.events.get("thread.idle")!({ thread: { id: t.threadId }, lastAssistantText: "Made-up: done" });
   await h.quiet();
   assert.ok(touches(last(), "feed"));
   assert.ok(touches(last(), "deliverables"), "mail can be a next move's outcome, which Delivered shows");
   assert.ok(!touches(last(), "config"));
 
-  // the owner answers a card: it leaves Needs you, and the screens that list cards refetch
   const card = h.seeded.open[0]!;
   h.notices.length = 0;
   await h.post(WRITES.answer, { id: card.id, rev: card.rev, option: card.ask!.options[0]!.id, text: null, via: "desktop" });
   await h.quiet();
   assert.ok(touches(last(), "needsYou") && touches(last(), "feed") && touches(last(), "board"), JSON.stringify(last()));
-  // the write's notice, then its flush's: neither may say "everything" (that refetched every read twice per answer)
   assert.ok(h.notices.every((n: any) => Array.isArray(n.tables)), JSON.stringify(h.notices));
   assert.ok(!touches(last(), "config") && !touches(last(), "projectOrder"), JSON.stringify(h.notices));
   const open = ((await h.read("needsYou", { zone: "UTC" })) as { cards: { id: string }[] }).cards.map((c) => c.id);
   assert.ok(!open.includes(card.id), "answered: off Needs you");
 
-  // the owner approves a deliverable: Delivered refetches
   const d = h.seeded.delivered[0]!;
   h.notices.length = 0;
   await h.post(WRITES.approve, { id: d.id, rev: d.rev, note: null });
@@ -382,14 +349,12 @@ test("the notice after each change refetches the reads that show it, and not the
   assert.ok(touches(last(), "deliverables"), JSON.stringify(last()));
   assert.ok(h.notices.every((n: any) => Array.isArray(n.tables) && !n.tables.includes("*")), JSON.stringify(h.notices));
 
-  // a prompt in bb: Needs you, and the feed that shows the leads' prompts
   h.notices.length = 0;
   await h.events.get("interaction.pending")!({ thread: { id: t.threadId }, interaction: { id: "ix-2" } });
   await h.quiet();
   assert.ok(last().tables!.includes(BB));
   assert.ok(touches(last(), "needsYou") && touches(last(), "feed") && !touches(last(), "config"));
 
-  // a settings save can't be named: everything
   h.notices.length = 0;
   for (const f of h.settingsChange) f({ ...h.settingsValues(), cosTitle: "Made-up title" });
   await settle();
@@ -399,8 +364,6 @@ test("the notice after each change refetches the reads that show it, and not the
 });
 
 test("the since lens refetches on a move and on a PR linked to a task, and not on a thread's status or a rule", async (tc) => {
-  // the strip counts moves and tasked merges: a card moved must show in its counts from the move's own notice, and the
-  // thousands of status flips a weekend brings must not refetch it
   const h = await host();
   tc.after(() => h.stop.abort());
   await h.announce();
@@ -412,9 +375,7 @@ test("the since lens refetches on a move and on a PR linked to a task, and not o
   assert.ok(h.notices.some((n) => touches(n, "boardSince")), JSON.stringify(h.notices));
   const st = (await h.read("boardSince", INPUTS.boardSince)) as { moved: Record<string, { to: string }> };
   assert.equal(st.moved[t.id]?.to, "blocked", "the refetched strip shows the move");
-  // a PR linked to a task: its notice names task_prs, which the lens reads (its tasked merges)
   assert.ok(touches({ tables: ["task_prs"] }, "boardSince"));
-  // a rule added, and a thread's status flips: neither is in the strip
   h.notices.length = 0;
   await h.post(WRITES.ruleAdd, { text: "Made-up rule", project: null, kinds: ["question"], expiresInDays: null, source: "test" });
   await h.quiet();
@@ -423,9 +384,8 @@ test("the since lens refetches on a move and on a PR linked to a task, and not o
 });
 
 test("a card moved on the work board refetches the board; a write it doesn't show leaves the board alone", async (tc) => {
-  // the owner moves a card: the board must show it where it was put, at once, from the move's own notice
   const h = await host();
-  tc.after(() => h.stop.abort()); // a failed check must not leave the services running
+  tc.after(() => h.stop.abort());
   await h.announce();
   const last = () => h.notices.at(-1) as { tables: string[] | null };
   const board = (await h.read("workBoard", INPUTS.workBoard)) as { projects: { tasks: { id: string; column: string; state: string }[] }[] };
@@ -437,7 +397,6 @@ test("a card moved on the work board refetches the board; a write it doesn't sho
   assert.ok(touches(last(), "workBoard"), JSON.stringify(last()));
   const moved = ((await h.read("workBoard", INPUTS.workBoard)) as typeof board).projects.flatMap((p) => p.tasks).find((x) => x.id === t.id)!;
   assert.equal(moved.column, "blocked", "the refetched board shows the move");
-  // a rule added: the main board shows rules, the work board doesn't, so it stays put
   h.notices.length = 0;
   await h.post(WRITES.ruleAdd, { text: "Made-up rule", project: null, kinds: ["question"], expiresInDays: null, source: "test" });
   await h.quiet();
@@ -447,12 +406,9 @@ test("a card moved on the work board refetches the board; a write it doesn't sho
 });
 
 test("each CoS tidy refetches the work board and its since lens; a write neither shows leaves both alone", async (tc) => {
-  // the CoS merges, restores, files and confirms from its chat: the owner's open board must show each at once, from
-  // the tidy's own notice, and the since strip must log it (task_moves by cos)
   const h = await host();
   tc.after(() => h.stop.abort());
   await h.announce();
-  // three tasks of one project: a keeps going, b is merged into it, c is dropped, confirmed and restored
   const th = h.seeded.threads[0]!;
   const project = th.project!;
   const lead = h.seeded.leads.find((l) => l.project === project)!;
@@ -470,16 +426,14 @@ test("each CoS tidy refetches the work board and its since lens; a write neither
   await both("file a PR no thread holds", { action: "file", kind: "pr", ref: "https://github.com/made-up/repo/pull/5", task: a });
   await both("merge", { action: "merge", task: b, into: a });
   await both("file a thread", { action: "file", kind: "thread", ref: th.address, task: c });
-  publish(["Made-up keep"]); // b is merged into a; c leaves the steps: dropped, its thread to Unfiled
+  publish(["Made-up keep"]);
   await h.quiet();
   await both("confirm", { action: "confirm", task: c });
   await both("restore", { action: "restore", task: c });
-  // list writes nothing: no notice, so nothing refetches
   h.notices.length = 0;
   await h.tool("orch_board_tidy", { action: "list" }, "thr_busy_cos");
   await h.quiet();
   assert.ok(!h.notices.some((n) => touches(n, "workBoard") || touches(n, "boardSince")), JSON.stringify(h.notices));
-  // a rule added: neither the board nor the lens shows rules
   h.notices.length = 0;
   await h.post(WRITES.ruleAdd, { text: "Made-up rule", project: null, kinds: ["question"], expiresInDays: null, source: "test" });
   await h.quiet();
@@ -488,11 +442,9 @@ test("each CoS tidy refetches the work board and its since lens; a write neither
 
 test("each change's notice touches every read whose answer it changed", async (tc) => {
   const h = await host();
-  tc.after(() => h.stop.abort()); // a failed check must not leave the services running
+  tc.after(() => h.stop.abort());
   await h.announce();
   const reads = (Object.keys(READS) as ChangeRead[]).filter((m) => READS[m]);
-  // one after another, in READS order: the feed shows the prompts the last needsYou read found. A time from this run (an
-  // open segment ends now) is only the clock: the seed's own times are hours older.
   const since = Date.now() - 1_000;
   const clockFree = (k: string, v: unknown) => (k === "now" || k === "presets" ? undefined : typeof v === "number" && v >= since && v < since + 3_600_000 ? "t" : v);
   const snap = async () => {
@@ -505,7 +457,6 @@ test("each change's notice touches every read whose answer it changed", async (t
   const again = await snap();
   for (const m of reads) assert.equal(again[m], first[m], `${m} reads the same twice with no change`);
   const missed: string[] = [];
-  /** Makes a change; every read whose answer it changed must be touched by a notice it caused. Returns those reads. */
   const change = async (what: string, run: () => unknown) => {
     const before = await snap();
     await h.quiet();
@@ -531,7 +482,6 @@ test("each change's notice touches every read whose answer it changed", async (t
   type CardPr = { checks: string | null };
   const cardChecks = async () => ((await h.read("needsYou", INPUTS.needsYou)) as { cards: { prs: CardPr[] }[] }).cards.flatMap((c) => c.prs).map((p) => p.checks);
 
-  // a lead archived in bb: the feed stops offering a reply on its line; back when its thread runs again
   const lead = leads[2]!;
   assert.equal(await lineLive(lead.address), true);
   assert.ok((await change("lead archived", () => h.events.get("thread.archived")!({ thread: { id: lead.threadId } }))).includes("feed"));
@@ -541,14 +491,11 @@ test("each change's notice touches every read whose answer it changed", async (t
   await change("CoS archived", () => h.events.get("thread.archived")!({ thread: { id: cos.threadId } }));
   await change("CoS back", () => h.events.get("thread.active")!({ thread: { id: cos.threadId } }));
 
-  // the checks of a PR a card is about fail: the card shows it (bb's reading comes from the open-PRs pass, which the fake
-  // bb has none of: the seed engine records it, and its notice is the server's)
   assert.deepEqual(await cardChecks(), ["passing"]);
   assert.ok((await change("a card's PR fails its checks", () => h.seedEngine.prSeen(threads[10]!, "env-busy-10", pr(110, "open", "failing")))).includes("needsYou"));
   assert.deepEqual(await cardChecks(), ["failing"], "Needs you shows the PR's new checks");
   await change("a waited PR fails its checks in bb", () => h.seedEngine.prSeen(threads[5]!, "env-busy-5", pr(105, "open", "failing")));
 
-  // a thread's other states
   const t = threads[8]!;
   await change("thread failed", () => h.events.get("thread.failed")!({ thread: { id: t.threadId }, error: { message: "Made-up failure" } }));
   await change("thread active", () => h.events.get("thread.active")!({ thread: { id: t.threadId } }));
@@ -561,12 +508,12 @@ test("each change's notice touches every read whose answer it changed", async (t
 
 test("a read slower than 500 ms logs one line, with the event loop's delay", async () => {
   const h = await host();
-  await h.announce(); // the services run: the loop's delay is sampled
+  await h.announce();
   await h.read("agents");
   assert.deepEqual(h.warnings.filter((w) => w.startsWith("slow read")), [], "a fast read logs nothing");
   const t = h.seeded.threads[4]!.threadId;
   h.slowThreads.add(t);
-  await h.events.get("thread.active")!({ thread: { id: t } }); // bb's news: the next read asks bb again
+  await h.events.get("thread.active")!({ thread: { id: t } });
   await h.read("agents");
   const slow = h.warnings.filter((w) => w.startsWith("slow read"));
   h.stop.abort();
@@ -575,66 +522,53 @@ test("a read slower than 500 ms logs one line, with the event loop's delay", asy
 });
 
 test("which change refetches which read", () => {
-  // what each listener refetches for a notice naming one table (an older server's notice, {}, refetches all)
   const reads = (...names: string[]) => Object.keys(READS).filter((m) => names.includes(m) || READS[m as ChangeRead] === null);
   assert.deepEqual(touched({}), Object.keys(READS));
   assert.deepEqual(touched({ tables: null }), Object.keys(READS));
-  // outputs, deliverableFolders and projectBook read the disk too: every notice
   assert.deepEqual(touched({ tables: [] }), ["outputs", "deliverableFolders", "projectBook"]);
   assert.deepEqual(touched({ tables: [STATUS] }), reads("needsYou", "board", "projects", "agents", "scope", "projectHistory", "workBoard"));
   assert.deepEqual(touched({ tables: ["deliverables"] }), reads("projects", "scope", "deliverables", "deliverable", "deliverableIndex", "feed", "workBoard", "boardSince"));
-  // only a deliverable written changes the index of every card's revisions (Delivered's search and Files)
-  assert.deepEqual(touched({ tables: ["decisions"] }), reads("needsYou", "board", "projects", "scope", "projectHistory", "feed", "workBoard"));
+  assert.deepEqual(touched({ tables: ["decisions"] }), reads("needsYou", "board", "projects", "scope", "projectHistory", "feed", "workBoard", "boardSince"));
   assert.deepEqual(touched({ tables: [BB] }), reads("needsYou", "agents", "scope", "feed"));
-  // mail: a lead's ack of a next move shows on Delivered; Needs you shows no mail
   assert.deepEqual(touched({ tables: ["items"] }), reads("board", "projects", "deliverables", "deliverable", "directHistory", "projectHistory", "feed"));
-  // a PR's reading: the cards about it, a wait's PR, the sidebar's and a project's PRs, PR proof
-  assert.deepEqual(touched({ tables: ["prs"] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "deliverable", "projectHistory", "workBoard"));
-  // the work board's own tables: a hand move (tasks, with its task_moves log) or a PR linked to a task refetches only
-  // the board and its since lens (which counts the move log and the tasked merges); the log alone, only the lens
+  assert.deepEqual(touched({ tables: ["prs"] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "deliverable", "projectHistory", "workBoard", "boardSince"));
+  assert.deepEqual(touched({ tables: ["pr_readings"] }), reads("board", "workBoard", "boardSince"), "a PR read merged can ship a card off the board, and its count with it");
   assert.deepEqual(touched({ tables: ["tasks", "task_moves"] }), reads("workBoard", "boardSince"));
   assert.deepEqual(touched({ tables: ["task_prs"] }), reads("workBoard", "boardSince"));
   assert.deepEqual(touched({ tables: ["task_moves"] }), reads("boardSince"));
-  // an agent archived or back: besides the status flip's reads, the feed's reply line and Delivered's lead persona
   assert.deepEqual(touched({ tables: [STATUS, LIVE] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "deliverable", "projectHistory", "feed", "workBoard"));
 });
 
-// The viewer's view choices (2026-11-24, the owner: "The Projects view should remember whether you last picked Board or
-// List", and the board's folds kept per viewer): kept in the plugin's kv, so a reload, a new window or the plugin starting
-// again opens on them
-test("the viewer's pick of Board and a board's folds are kept by the plugin and read back after a restart", async () => {
+test("the viewer's pick of Board and a board's folds are kept by the plugin and read back after a restart, each save with the next revision", async () => {
   const kept = new Map<string, unknown>();
   const kv = { get: async (k: string) => kept.get(k) ?? null, set: async (k: string, v: unknown) => void kept.set(k, structuredClone(v)), delete: async (k: string) => void kept.delete(k) };
   const first = await host({ kv });
   try {
-    assert.deepEqual(await first.read("viewPrefs"), { projectsView: null, boardFolds: {} }, "a fresh install holds nothing: List, and Shipped folded");
-    await first.post(WRITES.viewPref, { projectsView: "board" });
+    assert.deepEqual(await first.read("viewPrefs"), { projectsView: null, boardFolds: {}, rev: 0 }, "a fresh install holds nothing: List, and Shipped folded");
+    assert.deepEqual(await first.post(WRITES.viewPref, { projectsView: "board" }), { ok: true, result: { rev: 1 } }, "a save answers with its revision, so the page can tell a read holding it from one before it");
     await first.post(WRITES.viewPref, { board: "-", folded: [] });
-    await first.post(WRITES.viewPref, { board: "kite-app", folded: ["planned", "shipped"] });
-    assert.deepEqual(await first.read("viewPrefs"), { projectsView: "board", boardFolds: { "-": [], "kite-app": ["planned", "shipped"] } });
+    assert.deepEqual(await first.post(WRITES.viewPref, { board: "kite-app", folded: ["planned", "shipped"] }), { ok: true, result: { rev: 3 } });
+    assert.deepEqual(await first.read("viewPrefs"), { projectsView: "board", boardFolds: { "-": [], "kite-app": ["planned", "shipped"] }, rev: 3 });
   } finally {
     first.stop.abort();
   }
   const again = await host({ kv });
   try {
-    assert.deepEqual(await again.read("viewPrefs"), { projectsView: "board", boardFolds: { "-": [], "kite-app": ["planned", "shipped"] } }, "the plugin started again (a reload, a new window): Board, Shipped open on all projects, kite-app's folds");
-    await again.post(WRITES.viewPref, { projectsView: "list" });
-    assert.deepEqual(await again.read("viewPrefs"), { projectsView: "list", boardFolds: { "-": [], "kite-app": ["planned", "shipped"] } }, "a new pick changes the pick alone");
+    assert.deepEqual(await again.read("viewPrefs"), { projectsView: "board", boardFolds: { "-": [], "kite-app": ["planned", "shipped"] }, rev: 3 }, "the plugin started again (a reload, a new window): Board, Shipped open on all projects, kite-app's folds");
+    assert.deepEqual(await again.post(WRITES.viewPref, { projectsView: "list" }), { ok: true, result: { rev: 4 } }, "the revision goes on across a restart");
+    assert.deepEqual(await again.read("viewPrefs"), { projectsView: "list", boardFolds: { "-": [], "kite-app": ["planned", "shipped"] }, rev: 4 }, "a new pick changes the pick alone");
     kept.set("viewPrefs", { projectsView: "grid", boardFolds: { "-": ["blocked"] } });
-    assert.deepEqual(await again.read("viewPrefs"), { projectsView: null, boardFolds: { "-": ["blocked"] } }, "an unreadable field is no choice, the rest stands");
+    assert.deepEqual(await again.read("viewPrefs"), { projectsView: null, boardFolds: { "-": ["blocked"] }, rev: 0 }, "an unreadable field is no choice, the rest stands");
     kept.set("viewPrefs", "junk");
-    assert.deepEqual(await again.read("viewPrefs"), { projectsView: null, boardFolds: {} }, "something unreadable is no choice, never an error");
+    assert.deepEqual(await again.read("viewPrefs"), { projectsView: null, boardFolds: {}, rev: 0 }, "something unreadable is no choice, never an error");
   } finally {
     again.stop.abort();
   }
 });
 
-// Codex's review (2026-11-25): Board picked while a fold saves lost the Board. Each save reads the kept choices and
-// writes them back whole, so two at once each wrote back the other's old value. The kv's read yields on a timer here, as
-// a real store's does, so the saves would overlap.
 test("saves of different choices at once all survive: the pick, and two boards' folds", async () => {
   const kept = new Map<string, unknown>();
-  let failNext = false; // the next kv write throws
+  let failNext = false;
   const kv = {
     get: async (k: string) => {
       const v = structuredClone(kept.get(k) ?? null);
@@ -657,13 +591,13 @@ test("saves of different choices at once all survive: the pick, and two boards' 
       h.post(WRITES.viewPref, { board: "-", folded: ["planned", "shipped"] }),
       h.post(WRITES.viewPref, { board: "kite-app", folded: ["blocked"] }),
     ]);
-    assert.deepEqual(await h.read("viewPrefs"), { projectsView: "board", boardFolds: { "-": ["planned", "shipped"], "kite-app": ["blocked"] } });
-    // a save that fails fails alone: the one after it still runs and keeps the rest
+    assert.deepEqual(await h.read("viewPrefs"), { projectsView: "board", boardFolds: { "-": ["planned", "shipped"], "kite-app": ["blocked"] }, rev: 3 });
     failNext = true;
     const [failed, next] = await Promise.allSettled([h.post(WRITES.viewPref, { projectsView: "list" }), h.post(WRITES.viewPref, { board: "-", folded: [] })]);
     assert.equal(failed.status, "rejected", "the save that failed says so");
     assert.equal(next.status, "fulfilled", "the save after it still runs");
-    assert.deepEqual(await h.read("viewPrefs"), { projectsView: "board", boardFolds: { "-": [], "kite-app": ["blocked"] } });
+    assert.deepEqual(next.status === "fulfilled" && next.value, { ok: true, result: { rev: 4 } }, "a failed save takes no revision");
+    assert.deepEqual(await h.read("viewPrefs"), { projectsView: "board", boardFolds: { "-": [], "kite-app": ["blocked"] }, rev: 4 });
   } finally {
     h.stop.abort();
   }

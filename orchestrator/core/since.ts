@@ -1,27 +1,14 @@
-// The work board's since-T lens (2026-11-23, SCOPE piece 6): what happened on the board since a time T the
-// owner picks. Everything counted comes from two places only, so the strip always matches its own "What counts":
-// - task_moves rows at or after T (core/work-board.ts settleColumns logs one per column change), never thread status
-//   flips, answers, notices, acks or dream runs;
-// - the allowlist: merges and releases (read from GitHub by a background job, because the orchestrator's own PR log
-//   misses merges, plus the log's own merges), and the owner's deliverable approvals.
-// Pure: no node: imports, so the page may import its presets and types.
 import { z } from "zod";
 import type { BoardColumn, WorkBoard } from "../contract.ts";
 import type { Db } from "./db.ts";
 import { LOGIN_RE } from "./open-prs.ts";
+import { readBoard } from "./work-board.ts";
 
-// ---------------------------------------------------------------- the picker
-
-/** The picker's choice, saved per viewer (the page's localStorage). */
 export type SinceChoice = { kind: "24h" } | { kind: "weekday" } | { kind: "looked" } | { kind: "at"; at: number };
-/** How far back a picked time and the GitHub cache reach. */
 export const SINCE_MAX_MS = 14 * 86_400_000;
-/** "Last 24 h" moves in steps of this, so the read's input stays the same between renders. */
 export const SINCE_STEP_MS = 15 * 60_000;
-/** The weekday preset: the last Friday 18:00 (local time) before now, the end of the working week. */
 export const WEEKDAY = { day: 5, hour: 18, label: "Fri 18:00" } as const;
 
-/** The last WEEKDAY.day at WEEKDAY.hour, local time, strictly before `now`. */
 export function lastWeekday(now: number): number {
   const d = new Date(now);
   d.setHours(WEEKDAY.hour, 0, 0, 0);
@@ -30,7 +17,6 @@ export function lastWeekday(now: number): number {
   return d.getTime();
 }
 
-/** T for a choice. `looked`: the feed's seen line (null before the first look: the last 24 h). */
 export function sinceOf(c: SinceChoice, now: number, looked: number | null): number {
   const day = Math.floor(now / SINCE_STEP_MS) * SINCE_STEP_MS - 86_400_000;
   if (c.kind === "weekday") return lastWeekday(now);
@@ -39,8 +25,6 @@ export function sinceOf(c: SinceChoice, now: number, looked: number | null): num
   return day;
 }
 
-/** A typed time (a datetime-local value) as T, or null while it is unfinished or outside the last SINCE_MAX_MS: a date
- *  field passes through dates like year 0002 or the 2nd of the month on its way to the one being typed. */
 export function typedSince(value: string, now: number): number | null {
   const at = new Date(value).getTime();
   return Number.isFinite(at) && at >= now - SINCE_MAX_MS && at <= now ? at : null;
@@ -53,26 +37,19 @@ export function parseChoice(raw: unknown): SinceChoice {
   return { kind: "weekday" };
 }
 
-// ---------------------------------------------------------------- GitHub (read-only, through the host's gh)
-
 const REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
-/** How many merged PRs and releases one repo read keeps. */
 export const SINCE_GH_LIMIT = 200;
 
-/** Fixed gh argument lists (no shell, nothing the page or an agent passes but a checked repo and day). */
 export const sinceGhArgs = {
-  /** A repo's PRs merged on or after `day` (YYYY-MM-DD). */
   merged(repo: string, day: string): string[] {
     if (!REPO.test(repo)) throw new Error(`not a repo: ${JSON.stringify(repo)}`);
     if (!DAY.test(day)) throw new Error(`not a day: ${JSON.stringify(day)}`);
     return ["pr", "list", "--repo", repo, "--state", "merged", "--search", `merged:>=${day}`, "--limit", String(SINCE_GH_LIMIT), "--json", "number,url,title,mergedAt,author"];
   },
-  /** The login gh is signed in as (a GET of the signed-in user; only its login is kept). */
   login(): string[] {
     return ["api", "user", "--jq", ".login"];
   },
-  /** A repo's latest releases. */
   releases(repo: string): string[] {
     if (!REPO.test(repo)) throw new Error(`not a repo: ${JSON.stringify(repo)}`);
     return ["release", "list", "--repo", repo, "--limit", "30", "--json", "tagName,name,publishedAt,isDraft"];
@@ -84,7 +61,6 @@ const releaseSchema = z.object({ tag: z.string(), name: z.string(), at: z.number
 export type GhMerge = z.infer<typeof mergeSchema>;
 export type GhRelease = z.infer<typeof releaseSchema>;
 
-/** gh pr list's JSON: merged PRs, each once, dated. */
 export function parseMerged(raw: unknown): GhMerge[] {
   if (!Array.isArray(raw)) throw new Error("gh pr list: not a list");
   const out: GhMerge[] = [];
@@ -96,7 +72,6 @@ export function parseMerged(raw: unknown): GhMerge[] {
   return out;
 }
 
-/** gh release list's JSON: published releases (drafts left out). */
 export function parseReleases(raw: unknown, repo: string): GhRelease[] {
   if (!Array.isArray(raw)) throw new Error("gh release list: not a list");
   const out: GhRelease[] = [];
@@ -108,13 +83,11 @@ export function parseReleases(raw: unknown, repo: string): GhRelease[] {
   return out;
 }
 
-/** gh api user --jq .login's output: a login, or null. */
 export function parseLogin(raw: unknown): string | null {
   const s = typeof raw === "string" ? raw.trim() : "";
   return LOGIN_RE.test(s) ? s : null;
 }
 
-/** The host methods the background job calls: one repo's merges since a day and its releases; gh's signed-in login. */
 export const sinceHostDefs = {
   "board.repoActivity": {
     input: z.object({ repo: z.string().regex(REPO), day: z.string().regex(DAY) }).strict(),
@@ -128,13 +101,6 @@ export const sinceHostDefs = {
   },
 } as const;
 
-/**
- * Whose merges count (the lead's answer, 2026-11-23), in this order, never every merge in the repos:
- * - setting: the githubLogin setting, when it is a login;
- * - gh: else the login gh is signed in as on the machine (the background job's cached read);
- * - tasked: else only PRs a task holds.
- * With a login, a merge counts when that login wrote it or a task holds it.
- */
 export type MergeWhose = { by: "setting" | "gh"; login: string } | { by: "tasked"; login: null };
 export function whoseMerges(setting: string, ghLogin: string | null | undefined): MergeWhose {
   const s = setting.trim().replace(/^@/, "");
@@ -143,32 +109,18 @@ export function whoseMerges(setting: string, ghLogin: string | null | undefined)
   return { by: "tasked", login: null };
 }
 
-/** A PR event this recent makes its repo one to read (longer than SINCE_MAX_MS: a PR opened earlier can merge inside the window). */
 export const SINCE_REPO_ACTIVE_MS = 30 * 86_400_000;
-/** At most this many repos are read in one pass. More take turns, the longest unread first; none is dropped for it. */
 export const SINCE_POLL_CAP = 50;
 
-/** A PR on the board, for sinceRepos: `resolved` (merged or closed) with `at`, when that state was seen. */
 export type BoardPr = { url: string; project: string; resolved?: boolean; at?: number };
 
-/**
- * The board's PRs with their projects: each task's and each project's Unfiled ones (an open PR a live thread reads).
- * An unresolved one (open, or of unknown state) keeps its repo read for good; a merged or closed one, even on an
- * unfinished task, counts only as activity at the time its state was seen (sinceRepos' 30 days), like a PR event. That
- * time matters: a PR first linked after it merged is logged with no PR event (Engine.prSeen with linking).
- */
+// a resolved PR counts only as activity at the time its state was seen: one linked after it merged has no PR event
 export function boardPrs(board: WorkBoard): BoardPr[] {
   return board.projects.flatMap((p) => [...p.tasks.flatMap((t) => t.prs), ...p.unfiled.prs].map((x) => ({ url: x.url, project: p.slug, resolved: x.state !== null && /^(merged|closed)$/i.test(x.state), at: x.at })));
 }
 
 const repoOf = (url: string) => /^https:\/\/github\.com\/([A-Za-z0-9-]+\/[A-Za-z0-9._-]+)\/pull\/\d+/.exec(url)?.[1] ?? null;
 
-/**
- * The repos to read, with their projects. A repo is read while an unresolved PR on the board is in it (`onBoard`: a
- * task's PR, or an open PR in a project's Unfiled), however old its events, or while a PR event or a resolved board PR's
- * reading named it in the last SINCE_REPO_ACTIVE_MS. Its projects are every project whose PR events ever named it, plus the board's, so a repo
- * two projects share stays in both.
- */
 export function sinceRepos(db: Db, now: number, onBoard: BoardPr[]): Map<string, string[]> {
   const seen = new Map<string, { last: number; projects: Set<string> }>();
   for (const r of db.prepare(`SELECT ref, project, MAX(at) AS at FROM events WHERE kind = 'pr' AND ref IS NOT NULL GROUP BY ref, project`).all() as { ref: string; project: string | null; at: number }[]) {
@@ -189,18 +141,14 @@ export function sinceRepos(db: Db, now: number, onBoard: BoardPr[]): Map<string,
   return new Map([...out].sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, [...v].sort()]));
 }
 
-/** What the background job keeps (plugin kv, and in memory): each repo's last read, and gh's login (absent in older caches). */
 export interface SinceCache {
   at: number | null;
   ghLogin?: string | null;
-  /** `at`: the last good read; `tried`: the last attempt (older caches lack it). */
   repos: Record<string, { at: number; tried?: number; projects: string[]; merged: GhMerge[]; releases: GhRelease[]; error: string | null }>;
-  /** Repos to read that the last pass left for a later turn (over SINCE_POLL_CAP). */
   pending?: string[];
 }
 export const emptyCache = (): SinceCache => ({ at: null, repos: {} });
 
-/** This pass's repos: at most SINCE_POLL_CAP, the longest since tried first (never tried first of all), then by name. */
 export function sincePoll(repos: Map<string, string[]>, prev: SinceCache): string[] {
   const tried = (r: string) => prev.repos[r]?.tried ?? prev.repos[r]?.at ?? 0;
   return [...repos.keys()].sort((a, b) => tried(a) - tried(b) || a.localeCompare(b)).slice(0, SINCE_POLL_CAP);
@@ -208,14 +156,6 @@ export function sincePoll(repos: Map<string, string[]>, prev: SinceCache): strin
 
 export type RepoRead = { merged: GhMerge[]; releases: GhRelease[] } | { error: string };
 
-/**
- * The next cache from the last one, this pass's repos (sinceRepos) and its reads. Reading and keeping are separate:
- * - a repo to read keeps its entry, read this pass or not (a failed or skipped one keeps its last read; skipped ones
- *   are listed in `pending`);
- * - any other repo's entry stays only while it still holds a merge or release inside SINCE_MAX_MS, the picker's
- *   longest window, so 1,000 repos with years-old PRs leave nothing behind, failed reads included;
- * - every entry holds only merges and releases inside that window.
- */
 export function sinceKeep(prev: SinceCache, repos: Map<string, string[]>, reads: Map<string, RepoRead>, now: number): Pick<SinceCache, "repos" | "pending"> {
   const from = now - SINCE_MAX_MS;
   type Entry = SinceCache["repos"][string];
@@ -237,16 +177,12 @@ export function sinceKeep(prev: SinceCache, repos: Map<string, string[]>, reads:
   return { repos: out, pending };
 }
 
-// ---------------------------------------------------------------- the strip
-
-/** One task's move since T: the first in-window row's from, the last one's to and when. */
 export interface SinceMove {
   from: BoardColumn | "dropped" | null;
   to: BoardColumn | "dropped";
   at: number;
   isNew: boolean;
 }
-/** The figures a pill filters the board by. */
 export const SINCE_PICKS = ["shipped", "new", "waiting", "blocked", "merged"] as const;
 export type SincePick = (typeof SINCE_PICKS)[number];
 export interface SinceStrip {
@@ -258,44 +194,21 @@ export interface SinceStrip {
   merged: number;
   releases: GhRelease[];
   approved: number;
-  /** Whose merges counted (whoseMerges). */
   whose: MergeWhose;
-  /**
-   * What each figure counted, so a pill shows exactly its cards (2026-11-24): the task ids behind shipped, new, waiting
-   * and blocked, and the tasks holding a counted merge. Dropped tasks have no card, so they come with their titles.
-   */
   picks: Record<SincePick, string[]>;
   dropped: { id: string; title: string; project: string }[];
-  /** Merged PRs since T no task holds, newest first. */
   noTask: { url: string; number: number | null; title: string; mergedAt: number }[];
-  /** `pending`: this project's repos the last pass left for a later turn. */
   github: { at: number | null; repos: number; errors: string[]; pending: number };
 }
 
 type MoveRow = { task: string; project: string; from_col: string | null; to_col: string; at: number; why: string | null; seq: number };
 
-/**
- * A drop counts only when it moved something to Unfiled (core/tasks.ts dropTask; settleColumns' why). A quiet drop is
- * a plan edit: SCOPE measured 162 in one weekend, most of them never reaching the CoS. The CoS folding a task into
- * another (core/board-tidy.ts, why "cos: merge into …") isn't a drop either: its work carries on in the other task.
- */
 const countsAsDrop = (r: MoveRow) => r.why === "dropped with attachments";
-/** A row that changed a column. The CoS's tidy tools also log records whose from equals their to (a confirmed drop, a filed PR): not moves. */
 const isMove = (r: MoveRow) => r.from_col !== r.to_col;
 
-/**
- * The strip's figures from task_moves since T (the log only, column changes only):
- * - moved: tasks with a row at or after T; its from is the first such row's from_col, its to the last row's to_col;
- * - shipped, blocked: tasks with a row into that column; dropped: into dropped with attachments; new: a row with no
- *   from (a task's first row); waiting: tasks whose latest row of all is into waiting and is at or after T;
- * - a task dropped now has no card on the board, so it is in no pill that filters the board (2026-11-25, Codex's
- *   review: "2 new" showed 1 card): dropped with attachments, it is under dropped only; dropped quietly or merged away,
- *   in no number (a plan edit).
- */
 export function countMoves(rows: MoveRow[], since: number): Pick<SinceStrip, "counts" | "moved"> & { ids: Record<keyof SinceStrip["counts"], string[]> } {
   const byTask = new Map<string, MoveRow[]>();
   for (const r of [...rows].filter(isMove).sort((a, b) => a.seq - b.seq)) byTask.set(r.task, [...(byTask.get(r.task) ?? []), r]);
-  // each figure's tasks; the figure is how many (so a pill's cards and its number can't disagree)
   const ids: Record<keyof SinceStrip["counts"], string[]> = { shipped: [], new: [], waiting: [], blocked: [], dropped: [] };
   const moved: Record<string, SinceMove> = {};
   for (const [task, all] of byTask) {
@@ -316,16 +229,11 @@ export function countMoves(rows: MoveRow[], since: number): Pick<SinceStrip, "co
   return { counts, moved, ids };
 }
 
-/**
- * The PRs a task holds: the durable task_prs links (core/tasks.ts linkPr) of every task not dropped, as the board puts
- * them on their cards, in one project or all. These are the tasked merges.
- */
 export function taskedPrs(db: Db, project: string | null): Set<string> {
   const rows = db.prepare(`SELECT p.url FROM task_prs p JOIN tasks t ON t.id = p.task WHERE t.state <> 'dropped' AND (? IS NULL OR p.project = ?)`).all(project, project) as { url: string }[];
   return new Set(rows.map((r) => r.url));
 }
 
-/** The approvals since T: each owner approval in a deliverable's feedback, dated at or after T. */
 export function countApprovals(db: Db, since: number, project: string | null): number {
   let n = 0;
   for (const r of db.prepare(`SELECT project, json FROM deliverables WHERE updated_at >= ?`).all(since) as { project: string | null; json: string }[]) {
@@ -333,25 +241,15 @@ export function countApprovals(db: Db, since: number, project: string | null): n
     try {
       for (const f of (JSON.parse(r.json) as { feedback?: { outcome?: string; at?: string }[] }).feedback ?? []) if (f.outcome === "approved" && Date.parse(f.at ?? "") >= since) n++;
     } catch {
-      /* a broken row counts nothing */
     }
   }
   return n;
 }
 
-/**
- * The strip for T. `attached`: every PR URL a task holds (the board's read). `whose`: whoseMerges; a merge counts when a
- * task holds it, or, with a login, when GitHub names that login as its author. An unknown author (a merge only the log
- * has seen so far, a deleted account) never counts on its own. Merges are GitHub's (the cache) and the log's.
- */
 export function sinceStrip(db: Db, o: { since: number; now: number; looked: number | null; project: string | null; cache: SinceCache; attached: Set<string>; whose: MergeWhose }): SinceStrip {
   const rows = (o.project ? db.prepare(`SELECT * FROM task_moves WHERE project = ?`).all(o.project) : db.prepare(`SELECT * FROM task_moves`).all()) as MoveRow[];
   const { moved, ids } = countMoves(rows, o.since);
-  // a pill that filters the board holds only tasks it shows a card for (core/work-board.ts readBoard): none dropped, in an
-  // archived project, or shipped before T
-  const shown = new Set(
-    (db.prepare(`SELECT t.id FROM tasks t JOIN projects p ON p.slug = t.project WHERE p.archived_at IS NULL AND t.state <> 'dropped' AND (t.state <> 'shipped' OR t.shipped_at IS NULL OR t.shipped_at >= ?)`).all(o.since) as { id: string }[]).map((r) => r.id),
-  );
+  const shown = new Set(readBoard(db, o.now, { since: o.since, project: o.project }).projects.flatMap((p) => p.tasks.map((t) => t.id)));
   for (const k of ["shipped", "new", "waiting", "blocked"] as const) ids[k] = ids[k].filter((id) => shown.has(id));
   const counts = { shipped: ids.shipped.length, new: ids.new.length, waiting: ids.waiting.length, blocked: ids.blocked.length, dropped: ids.dropped.length };
   const inProject = (projects: string[]) => !o.project || projects.includes(o.project);
@@ -369,7 +267,6 @@ export function sinceStrip(db: Db, o: { since: number; now: number; looked: numb
     for (const m of r.merged) if (m.mergedAt >= o.since) merges.set(m.url, m);
     for (const x of r.releases) if (x.at >= o.since) releases.push(x);
   }
-  // the log's merges too: a merge GitHub hasn't been read for yet still counts
   for (const r of db.prepare(`SELECT ref, note, project, MIN(at) AS at FROM events WHERE kind = 'pr' AND value = 'merged' AND ref IS NOT NULL GROUP BY ref`).all() as { ref: string; note: string | null; project: string | null; at: number }[]) {
     const url = r.ref.replace(/\/+$/, "");
     if (r.at < o.since || merges.has(url) || (o.project && r.project !== o.project)) continue;
@@ -377,7 +274,6 @@ export function sinceStrip(db: Db, o: { since: number; now: number; looked: numb
   }
   const login = o.whose.login?.toLowerCase() ?? null;
   const counted = [...merges.values()].filter((m) => o.attached.has(m.url) || (login !== null && m.author !== null && m.author.toLowerCase() === login));
-  // the tasks holding a counted merge (the PRs a task holds: taskedPrs' links), for the merged pill
   const holders = new Set<string>();
   const countedUrls = new Set(counted.map((m) => m.url));
   for (const l of db.prepare(`SELECT p.task, p.url FROM task_prs p JOIN tasks t ON t.id = p.task WHERE t.state <> 'dropped' AND (? IS NULL OR p.project = ?)`).all(o.project, o.project) as { task: string; url: string }[])
@@ -409,7 +305,6 @@ export function sinceStrip(db: Db, o: { since: number; now: number; looked: numb
   };
 }
 
-/** The one message "file them" sends to the CoS. */
 export function fileThemText(noTask: SinceStrip["noTask"], since: number): string {
   const when = new Date(since).toISOString().slice(0, 16).replace("T", " ");
   return [`Merged since ${when} UTC with no task on the work board. Please file each one on its task, with the tidy tool:`, ...noTask.map((m) => `- ${m.url}${m.title ? ` ${m.title}` : ""}`)].join("\n");
