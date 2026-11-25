@@ -44,6 +44,9 @@ import {
   CHANGED_CHANNEL,
   holdBody,
   boardMoveBody,
+  viewPrefBody,
+  viewPrefsSchema,
+  type ViewPrefs,
   directMessageBody,
   directImageBody,
   cosImageBody,
@@ -378,6 +381,13 @@ export default async function plugin(bb: BbPluginApi) {
   const openPrs = registerOpenPrs(bb, engine, () => cfg);
   // the work board's since lens: GitHub merges and releases read by its own background job, never on the read
   const boardSince = registerBoardSince(bb, { db, engine, login: () => cfg.githubLogin, mark, sleep });
+  // the viewer's view choices (Projects' List or Board, the board's folds) in the plugin's kv; bb runs the plugin for one
+  // person, so the kv is the viewer's own; anything unreadable there is no choice yet
+  const VIEW_PREFS = "viewPrefs";
+  const viewPrefs = async (): Promise<ViewPrefs> => {
+    const kept = viewPrefsSchema.safeParse(await bb.storage.kv.get<unknown>(VIEW_PREFS));
+    return kept.success ? kept.data : { projectsView: null, boardFolds: {} };
+  };
   // after the engine, whose migrations made its tables; dry-run unless the setting is exactly false
   const reviewQueue = registerReviewQueue(bb, { db, dryRun: () => cfg.reviewQueueDryRun !== false });
   const multiplayer = registerMultiplayer(bb, { db, engine, dir: join(dataDir, "multiplayer"), settings: () => cfg, routes: effectiveRoutes });
@@ -2336,6 +2346,7 @@ export default async function plugin(bb: BbPluginApi) {
           priority: p.priority,
           heldAt: p.heldAt,
           archivedAt: p.archivedAt,
+          createdAt: p.createdAt,
           mode: p.mode,
           lead: lead ? { address: lead.address, threadId: lead.threadId, status: lead.status, mon: lead.mon, persona: engine.personaOf(lead, assigned) } : null,
           monType: engine.accentType(p.slug), // the project accent: none with the setting off
@@ -2597,6 +2608,9 @@ export default async function plugin(bb: BbPluginApi) {
     async boardSince(input) {
       return sinceRead(db, engine, await boardSince.cache(), cfg.githubLogin, input);
     },
+    async viewPrefs() {
+      return viewPrefs();
+    },
     async projectHistory({ slug }) {
       const ids = engine.projectThreadIds(slug);
       // bb's provider per thread, asked once per thread for the plugin's life (it never changes)
@@ -2730,6 +2744,20 @@ export default async function plugin(bb: BbPluginApi) {
   write(WRITES.hold, holdBody, (b) => engine.setHold(b.slug, b.held));
   // the owner's direct line to a lead (PLAN 3): an item, never a push; the CoS gets a copy
   write(WRITES.boardMove, boardMoveBody, (b) => engine.boardMove(b.task, b.to));
+  // the viewer's pick of List or Board, or a board's folds, kept in the plugin's kv so every pane, window and device
+  // opens on them. One save at a time, in the order they came: each reads the kept choices and writes them back whole,
+  // so two at once (Board picked while a fold saves) would each write back the other's old value. A failed save fails
+  // only its own request; the next one still runs.
+  let prefSaves: Promise<unknown> = Promise.resolve();
+  write(WRITES.viewPref, viewPrefBody, (b) => {
+    const save = prefSaves.then(async () => {
+      const was = await viewPrefs();
+      const next: ViewPrefs = "projectsView" in b ? { ...was, projectsView: b.projectsView } : { ...was, boardFolds: { ...was.boardFolds, [b.board]: b.folded } };
+      await bb.storage.kv.set(VIEW_PREFS, next);
+    });
+    prefSaves = save.catch(() => undefined);
+    return save;
+  });
   write(WRITES.directMessage, directMessageBody, (b) => engine.ownerMessage(b.slug, b.text, b.followUp ?? null, b.images ?? [], b.about ?? null, b.task ?? null).id);
   write(WRITES.feedSeen, feedSeenBody, (b) => engine.markFeedSeen(b.upTo));
   write(WRITES.feedResend, feedResendBody, (b) => engine.resendOwner(b.id).id);

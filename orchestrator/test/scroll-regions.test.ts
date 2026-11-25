@@ -70,7 +70,8 @@ test("Projects asks its pane to fit only while it draws the list that fits: the 
   const shown = view.match(/const listShown = (.*);/)?.[1] ?? "";
   // every early return draws something other than the list's root, so each one is outside listShown; a new one has to
   // be added here, and to listShown when it doesn't draw the root
-  assert.deepEqual(earlyReturns(view), ["board", "!all", "linked && !phone"]);
+  assert.deepEqual(earlyReturns(view), ["toBoard", "board", "!all", "linked && !phone"]);
+  assert.match(shown, /!toBoard\b/, "nor does the frame before the kept board opens (it draws nothing)");
   assert.match(shown, /!board\b/, "the board draws no [data-fits-pane] root");
   assert.match(shown, /!!q\.data\b/, "nor does the loading state (all = q.data)");
   assert.match(shown, /!\(detail && !phone && q\.data\.some\(\(p\) => p\.slug === detail\)\)/, "nor does the web project page (linked && !phone)");

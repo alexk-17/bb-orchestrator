@@ -56,7 +56,9 @@ export const READS = {
   workBoard: ["agents", STATUS, "decisions", "deliverables", "events", "lead_status", "pr_readings", "prs", "projects", "spawns", "tasks", "task_pr_owners", "task_prs"],
   // the since lens (core/since.ts): the move log, the log's merges, the tasked PRs (task_prs of tasks not dropped), the
   // owner's approvals and the feed's seen line; GitHub's cached read is plugin kv, which board-since.ts announces itself
-  boardSince: ["cursors", "deliverables", "events", "task_moves", "task_prs", "tasks"],
+  boardSince: ["cursors", "deliverables", "events", "projects", "task_moves", "task_prs", "tasks"],
+  // the viewer's view choices (List or Board): plugin kv, read when a page opens and changed only by the viewer's pick
+  viewPrefs: [],
 } satisfies Record<string, readonly string[] | null>;
 
 export type ChangeRead = keyof typeof READS;

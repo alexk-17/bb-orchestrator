@@ -117,7 +117,7 @@ export const tint = (t: Tone): string => `color-mix(in srgb, ${css(t)} ${TINT * 
  * Each project's colour for its sidebar section header (2026-11-13: "colour-coded, like a bar"): a stable pick from
  * this set, hashed from the slug, so a project keeps its colour. Light text on dark, dark on light.
  */
-const PROJECT_HUES: readonly Tone[] = [
+export const PROJECT_HUES: readonly Tone[] = [
   { light: "#1d4ed8", dark: "#93c5fd" }, // blue
   { light: "#0f766e", dark: "#5eead4" }, // teal
   { light: "#b45309", dark: "#fcd34d" }, // amber

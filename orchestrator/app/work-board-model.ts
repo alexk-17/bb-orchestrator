@@ -12,18 +12,22 @@ export interface LensMove {
   at: number;
   isNew: boolean;
 }
-/** The since lens the board reads with: T (null: the read's 7-day default), what moved since T, and "only cards that moved". */
+/** The since lens the board reads with: T (null: the read's 7-day default), what moved since T, "only cards that moved",
+ *  and the count pill picked in the header (2026-11-24): its key and exactly the tasks it counted. */
 export interface BoardLens {
   since: number | null;
   moved: Record<string, LensMove>;
   onlyMoved: boolean;
+  pick?: { key: string; ids: string[] } | null;
 }
 
-/** The columns, in the board's order, each with its cards; `project` null is every project. With the lens's "only cards
- *  that moved" on, a column keeps only the cards that moved since T, so its count and the phone's picker follow. */
+/** The columns, in the board's order, each with its cards; `project` null is every project. With a count pill picked, a
+ *  column keeps only the cards that pill counted; else, with "only cards that moved" on, only the cards that moved since
+ *  T. Either way its count and the phone's picker follow. */
 export function columnsOf(board: WorkBoard, project: string | null, lens: BoardLens | null = null): { column: BoardColumn; tasks: BoardTask[] }[] {
   const all = board.projects.filter((p) => !project || p.slug === project).flatMap((p) => p.tasks);
-  const tasks = lens?.onlyMoved ? all.filter((t) => Object.hasOwn(lens.moved, t.id)) : all;
+  const picked = lens?.pick ? new Set(lens.pick.ids) : null;
+  const tasks = picked ? all.filter((t) => picked.has(t.id)) : lens?.onlyMoved ? all.filter((t) => Object.hasOwn(lens.moved, t.id)) : all;
   return BOARD_COLUMNS.map((column) => {
     const mine = tasks.filter((t) => t.column === column);
     // Shipped newest first; Waiting on you and Blocked longest-waiting first; the rest as the leads list them
@@ -37,6 +41,12 @@ export function columnsOf(board: WorkBoard, project: string | null, lens: BoardL
 export function firstColumn(cols: { column: BoardColumn; tasks: BoardTask[] }[]): BoardColumn {
   if (cols.find((c) => c.column === "waiting")?.tasks.length) return "waiting";
   return cols.find((c) => c.tasks.length > 0)?.column ?? "planned";
+}
+
+/** The column picked by hand once a count pill is picked or changed: kept while it holds some of the pill's cards, else
+ *  none, so the one-column board shows the first that does (firstColumn). */
+export function columnAfterPick(picked: BoardColumn | null, cols: { column: BoardColumn; tasks: BoardTask[] }[]): BoardColumn | null {
+  return picked && cols.find((c) => c.column === picked)?.tasks.length ? picked : null;
 }
 
 /**

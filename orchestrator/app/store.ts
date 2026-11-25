@@ -126,6 +126,14 @@ export function stage(path: string, body: unknown): Promise<Outcome> {
   return post(path, body);
 }
 
+/**
+ * A view choice the plugin keeps for the viewer (2026-11-24: List or Board), outside the gate: it changes nothing the
+ * page shows (the page already moved), so it never holds the page or drops the viewer's next click.
+ */
+export function keepPref(path: string, body: unknown): Promise<Outcome> {
+  return post(path, body);
+}
+
 export type WriteOptions = {
   /** The card written, for its mark while the page holds, and to hide it once the write took. */
   card?: { id: string; rev: number; hide: Hide };

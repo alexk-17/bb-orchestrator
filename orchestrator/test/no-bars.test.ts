@@ -16,6 +16,12 @@ const FILES = [
   "work-board.tsx", "work-board-panel.tsx", "work-board-drag.ts",
   // its since lens (2026-11-24): the strip and the moved-card chip
   "board-since.tsx",
+  // each project's colour on the board (2026-11-24): a tinted chip, a card tint and the filter's chips, never an edge
+  "project-colour.ts",
+  // folding its columns (2026-11-24): a folded column is its header in place, never a strip
+  "board-fold.ts",
+  // Projects remembering List or Board (2026-11-24)
+  "view-pref.ts",
   // 2026-11-17: every shadcn component in app/ui, which every tab is moving onto (read from the folder, so a new one is in)
   ...readdirSync(new URL("../app/ui/", import.meta.url)).filter((f) => /\.tsx?$/.test(f)).map((f) => `ui/${f}`),
 ];

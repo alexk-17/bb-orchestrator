@@ -246,6 +246,9 @@ export interface SinceMove {
   at: number;
   isNew: boolean;
 }
+/** The figures a pill filters the board by. */
+export const SINCE_PICKS = ["shipped", "new", "waiting", "blocked", "merged"] as const;
+export type SincePick = (typeof SINCE_PICKS)[number];
 export interface SinceStrip {
   since: number;
   now: number;
@@ -257,6 +260,12 @@ export interface SinceStrip {
   approved: number;
   /** Whose merges counted (whoseMerges). */
   whose: MergeWhose;
+  /**
+   * What each figure counted, so a pill shows exactly its cards (2026-11-24): the task ids behind shipped, new, waiting
+   * and blocked, and the tasks holding a counted merge. Dropped tasks have no card, so they come with their titles.
+   */
+  picks: Record<SincePick, string[]>;
+  dropped: { id: string; title: string; project: string }[];
   /** Merged PRs since T no task holds, newest first. */
   noTask: { url: string; number: number | null; title: string; mergedAt: number }[];
   /** `pending`: this project's repos the last pass left for a later turn. */
@@ -278,14 +287,16 @@ const isMove = (r: MoveRow) => r.from_col !== r.to_col;
  * The strip's figures from task_moves since T (the log only, column changes only):
  * - moved: tasks with a row at or after T; its from is the first such row's from_col, its to the last row's to_col;
  * - shipped, blocked: tasks with a row into that column; dropped: into dropped with attachments; new: a row with no
- *   from (a task's first row), unless the task left again in the window without counting as a drop (added, then
- *   quietly dropped or merged away: a plan edit, in neither number); waiting: tasks whose latest row of all is into
- *   waiting and is at or after T.
+ *   from (a task's first row); waiting: tasks whose latest row of all is into waiting and is at or after T;
+ * - a task dropped now has no card on the board, so it is in no pill that filters the board (2026-11-25, Codex's
+ *   review: "2 new" showed 1 card): dropped with attachments, it is under dropped only; dropped quietly or merged away,
+ *   in no number (a plan edit).
  */
-export function countMoves(rows: MoveRow[], since: number): Pick<SinceStrip, "counts" | "moved"> {
+export function countMoves(rows: MoveRow[], since: number): Pick<SinceStrip, "counts" | "moved"> & { ids: Record<keyof SinceStrip["counts"], string[]> } {
   const byTask = new Map<string, MoveRow[]>();
   for (const r of [...rows].filter(isMove).sort((a, b) => a.seq - b.seq)) byTask.set(r.task, [...(byTask.get(r.task) ?? []), r]);
-  const counts = { shipped: 0, new: 0, waiting: 0, blocked: 0, dropped: 0 };
+  // each figure's tasks; the figure is how many (so a pill's cards and its number can't disagree)
+  const ids: Record<keyof SinceStrip["counts"], string[]> = { shipped: [], new: [], waiting: [], blocked: [], dropped: [] };
   const moved: Record<string, SinceMove> = {};
   for (const [task, all] of byTask) {
     const inWin = all.filter((r) => r.at >= since);
@@ -294,13 +305,15 @@ export function countMoves(rows: MoveRow[], since: number): Pick<SinceStrip, "co
     const last = inWin.at(-1)!;
     const isNew = inWin.some((r) => r.from_col === null);
     moved[task] = { from: first.from_col as SinceMove["from"], to: last.to_col as SinceMove["to"], at: last.at, isNew };
-    if (inWin.some((r) => r.to_col === "shipped")) counts.shipped++;
-    if (inWin.some((r) => r.to_col === "blocked")) counts.blocked++;
-    if (inWin.some((r) => r.to_col === "dropped" && countsAsDrop(r))) counts.dropped++;
-    if (isNew && !(last.to_col === "dropped" && !countsAsDrop(last))) counts.new++;
-    if (all.at(-1) === last && last.to_col === "waiting") counts.waiting++;
+    if (inWin.some((r) => r.to_col === "dropped" && countsAsDrop(r))) ids.dropped.push(task);
+    if (all.at(-1)!.to_col === "dropped") continue;
+    if (inWin.some((r) => r.to_col === "shipped")) ids.shipped.push(task);
+    if (inWin.some((r) => r.to_col === "blocked")) ids.blocked.push(task);
+    if (isNew) ids.new.push(task);
+    if (all.at(-1) === last && last.to_col === "waiting") ids.waiting.push(task);
   }
-  return { counts, moved };
+  const counts = { shipped: ids.shipped.length, new: ids.new.length, waiting: ids.waiting.length, blocked: ids.blocked.length, dropped: ids.dropped.length };
+  return { counts, moved, ids };
 }
 
 /**
@@ -333,7 +346,14 @@ export function countApprovals(db: Db, since: number, project: string | null): n
  */
 export function sinceStrip(db: Db, o: { since: number; now: number; looked: number | null; project: string | null; cache: SinceCache; attached: Set<string>; whose: MergeWhose }): SinceStrip {
   const rows = (o.project ? db.prepare(`SELECT * FROM task_moves WHERE project = ?`).all(o.project) : db.prepare(`SELECT * FROM task_moves`).all()) as MoveRow[];
-  const { counts, moved } = countMoves(rows, o.since);
+  const { moved, ids } = countMoves(rows, o.since);
+  // a pill that filters the board holds only tasks it shows a card for (core/work-board.ts readBoard): none dropped, in an
+  // archived project, or shipped before T
+  const shown = new Set(
+    (db.prepare(`SELECT t.id FROM tasks t JOIN projects p ON p.slug = t.project WHERE p.archived_at IS NULL AND t.state <> 'dropped' AND (t.state <> 'shipped' OR t.shipped_at IS NULL OR t.shipped_at >= ?)`).all(o.since) as { id: string }[]).map((r) => r.id),
+  );
+  for (const k of ["shipped", "new", "waiting", "blocked"] as const) ids[k] = ids[k].filter((id) => shown.has(id));
+  const counts = { shipped: ids.shipped.length, new: ids.new.length, waiting: ids.waiting.length, blocked: ids.blocked.length, dropped: ids.dropped.length };
   const inProject = (projects: string[]) => !o.project || projects.includes(o.project);
   const merges = new Map<string, { url: string; number: number | null; title: string; mergedAt: number; author: string | null }>();
   const releases: GhRelease[] = [];
@@ -357,6 +377,17 @@ export function sinceStrip(db: Db, o: { since: number; now: number; looked: numb
   }
   const login = o.whose.login?.toLowerCase() ?? null;
   const counted = [...merges.values()].filter((m) => o.attached.has(m.url) || (login !== null && m.author !== null && m.author.toLowerCase() === login));
+  // the tasks holding a counted merge (the PRs a task holds: taskedPrs' links), for the merged pill
+  const holders = new Set<string>();
+  const countedUrls = new Set(counted.map((m) => m.url));
+  for (const l of db.prepare(`SELECT p.task, p.url FROM task_prs p JOIN tasks t ON t.id = p.task WHERE t.state <> 'dropped' AND (? IS NULL OR p.project = ?)`).all(o.project, o.project) as { task: string; url: string }[])
+    if (countedUrls.has(l.url) && shown.has(l.task)) holders.add(l.task);
+  const titled = db.prepare(`SELECT id, title, project FROM tasks WHERE id = ?`);
+  const dropped = ids.dropped
+    .map((id) => titled.get(id) as { id: string; title: string; project: string } | undefined)
+    .filter((t) => t !== undefined)
+    .map(({ id, title, project }) => ({ id, title, project }))
+    .sort((a, b) => a.title.localeCompare(b.title));
   const noTask = counted
     .filter((m) => !o.attached.has(m.url))
     .sort((a, b) => b.mergedAt - a.mergedAt)
@@ -371,6 +402,8 @@ export function sinceStrip(db: Db, o: { since: number; now: number; looked: numb
     releases: releases.sort((a, b) => b.at - a.at),
     approved: countApprovals(db, o.since, o.project),
     whose: o.whose,
+    picks: { shipped: ids.shipped, new: ids.new, waiting: ids.waiting, blocked: ids.blocked, merged: [...holders] },
+    dropped,
     noTask,
     github: { at: o.cache.at, repos, errors, pending },
   };

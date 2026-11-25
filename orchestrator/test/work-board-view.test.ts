@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFileSync } from "node:fs";
 import type { BoardTask, NeedsYou, Scope, WorkBoard } from "../contract.ts";
-import { chipsOf, columnsOf, findCard, firstColumn, movedByYou, unfiledCount, whyText, type BoardLens } from "../app/work-board-model.ts";
+import { chipsOf, columnAfterPick, columnsOf, findCard, firstColumn, movedByYou, unfiledCount, whyText, type BoardLens } from "../app/work-board-model.ts";
 import { touches } from "../change-notice.ts";
 import { BOARD, canonical, fromPath, toPath, type Route } from "../app/route.ts";
 import { PROJECT_RE } from "../core/model.ts";
@@ -185,6 +185,33 @@ test('"only cards that moved" keeps exactly the cards that moved since T, in the
   assert.equal(firstColumn(only), "planned", "a phone opens on a column that has a moved card");
   assert.deepEqual(ids(columnsOf(b, "pine", { since: 1, moved, onlyMoved: true })), ["shipped:t-3", "shipped:t-4"], "the project filter still applies");
   assert.deepEqual(ids(columnsOf(b, null, { since: 1, moved, onlyMoved: false })), ids(columnsOf(b, null)), "with the toggle off the lens hides nothing");
+});
+
+test("a picked count pill shows exactly the tasks it counted, in their own columns, over \"only cards that moved\"", () => {
+  const b = boardOf([task("t-1", "kite", "planned"), task("t-2", "kite", "waiting"), task("t-3", "pine", "shipped", { since: 9 }), task("t-4", "pine", "planned"), task("t-5", "kite", "in_review")]);
+  const moved: BoardLens["moved"] = { "t-3": { from: "in_review", to: "shipped", at: 9, isNew: false }, "t-4": { from: "blocked", to: "planned", at: 8, isNew: false }, "t-1": { from: null, to: "planned", at: 4, isNew: true } };
+  const ids = (cols: ReturnType<typeof columnsOf>) => cols.flatMap((c) => c.tasks.map((t) => `${c.column}:${t.id}`));
+  // "blocked" counted t-4, blocked on Saturday and back in Planned now: the pill shows it where it is
+  const blocked = columnsOf(b, null, { since: 1, moved, onlyMoved: false, pick: { key: "blocked", ids: ["t-4"] } });
+  assert.deepEqual(ids(blocked), ["planned:t-4"]);
+  assert.deepEqual(blocked.map((c) => c.tasks.length), [1, 0, 0, 0, 0, 0], "the column counts are the pill's");
+  assert.deepEqual(ids(columnsOf(b, null, { since: 1, moved, onlyMoved: true, pick: { key: "shipped", ids: ["t-3"] } })), ["shipped:t-3"], "the pill wins over the toggle");
+  assert.deepEqual(ids(columnsOf(b, "kite", { since: 1, moved, onlyMoved: false, pick: { key: "shipped", ids: ["t-3"] } })), [], "the project filter still applies");
+  assert.deepEqual(ids(columnsOf(b, null, { since: 1, moved, onlyMoved: true, pick: null })), ["planned:t-1", "planned:t-4", "shipped:t-3"], "no pill: the toggle as before");
+});
+
+test("a phone showing a column with none of a picked pill's cards moves to one that has them; one that has them stays (Codex's review)", () => {
+  const b = boardOf([task("t-1", "kite", "planned"), task("t-2", "kite", "shipped"), task("t-3", "pine", "shipped"), task("t-4", "pine", "waiting")]);
+  const lens = (key: string, ids: string[]): BoardLens => ({ since: 1, moved: {}, onlyMoved: false, pick: { key, ids } });
+  // Planned picked by hand, then "2 shipped": Planned holds none of them, so the board shows Shipped and its 2 cards
+  const shipped = columnsOf(b, null, lens("shipped", ["t-2", "t-3"]));
+  const at = columnAfterPick("planned", shipped) ?? firstColumn(shipped);
+  assert.equal(at, "shipped");
+  assert.equal(shipped.find((c) => c.column === at)!.tasks.length, 2, "the column shown holds the pill's cards");
+  assert.equal(columnAfterPick("shipped", shipped), "shipped", "a column holding some of them stays as picked");
+  assert.equal(columnAfterPick(null, shipped), null, "nothing picked by hand: the first column with cards, as before");
+  const src = readFileSync(new URL("../app/work-board.tsx", import.meta.url), "utf8");
+  assert.match(src, /if \(pickNow !== pickWas\) \{\n\s+setPickWas\(pickNow\);\n\s+setPicked\(columnAfterPick\(picked, cols\)\);/, "checked only when the pill changes, so a tap on an empty column still shows it");
 });
 
 test("the since header sits at one place whether or not the board has loaded; a new T keeps the last board up, and says so if its read fails", () => {

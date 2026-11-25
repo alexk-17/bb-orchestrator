@@ -226,6 +226,8 @@ export const projectsSchema = z.array(
     priority: z.enum(["urgent", "high", "normal", "low"]),
     heldAt: z.number().nullable(),
     archivedAt: z.number().nullable(),
+    // when it was made: the board colours projects oldest first (app/project-colour.ts); optional for an older plugin process
+    createdAt: z.number().optional(),
     // scoping (1.11.0): the owner settles its scope with the lead in the Scope tab; optional for an older plugin process
     mode: z.enum(["scoping", "active"]).optional(),
     lead: z.object({ address: z.string(), threadId: z.string(), status: z.string(), mon: z.string().nullable(), persona: personaSchema.nullish() }).nullable(),
@@ -630,10 +632,32 @@ export const boardSinceSchema = z.object({
   approved: z.number(),
   // whose merges counted: the githubLogin setting's, else gh's signed-in login's (each plus tasked PRs), else tasked PRs only
   whose: z.discriminatedUnion("by", [z.object({ by: z.enum(["setting", "gh"]), login: z.string() }), z.object({ by: z.literal("tasked"), login: z.null() })]),
+  // what each figure counted (2026-11-24), so a pill shows exactly its cards; dropped tasks have no card, so their titles
+  picks: z.object({ shipped: z.array(z.string()), new: z.array(z.string()), waiting: z.array(z.string()), blocked: z.array(z.string()), merged: z.array(z.string()) }),
+  dropped: z.array(z.object({ id: z.string(), title: z.string(), project: z.string() })),
   noTask: z.array(z.object({ url: z.string(), number: z.number().nullable(), title: z.string(), mergedAt: z.number() })),
   github: z.object({ at: z.number().nullable(), repos: z.number(), errors: z.array(z.string()), pending: z.number() }), // pending: repos waiting their turn for a read
 });
 export type BoardSince = z.infer<typeof boardSinceSchema>;
+
+/**
+ * The viewer's view choices the plugin keeps (2026-11-24): which of List or Board Projects opens on (null until one is
+ * picked), and each work board's folded columns by its board ("-" for every project, else the project's slug; a board
+ * missing was never folded). What can't be read is no choice, field by field.
+ */
+export const PROJECTS_VIEWS = ["list", "board"] as const;
+export type ProjectsViewPick = (typeof PROJECTS_VIEWS)[number];
+export const viewPrefsSchema = z.object({
+  projectsView: z.enum(PROJECTS_VIEWS).nullable().catch(null),
+  boardFolds: z.record(z.string(), z.array(z.string())).catch({}),
+});
+export type ViewPrefs = z.infer<typeof viewPrefsSchema>;
+/** One change the viewer made: the view picked, or one board's folded columns. */
+export const viewPrefBody = z.union([
+  z.object({ projectsView: z.enum(PROJECTS_VIEWS) }).strict(),
+  z.object({ board: z.string().min(1).max(40), folded: z.array(z.enum(BOARD_COLUMNS)).max(BOARD_COLUMNS.length) }).strict(),
+]);
+export type ViewPrefBody = z.infer<typeof viewPrefBody>;
 
 export const rpcContract = defineRpcContract({
   config: { input: z.null(), output: configSchema },
@@ -666,6 +690,7 @@ export const rpcContract = defineRpcContract({
   // the since-T lens (core/since.ts): read-only; GitHub comes from the background job's cache, never read here
   // since: T, or null for "since I last looked" (the feed's seen line, resolved by the server; the output's since is T)
   boardSince: { input: z.object({ since: z.number().nullable(), project: z.string().min(1).max(40).nullable().optional() }).strict(), output: boardSinceSchema },
+  viewPrefs: { input: z.null(), output: viewPrefsSchema },
   feedThread: { input: z.object({ about: z.string().min(1).max(400), before: z.number().nullable() }).strict(), output: z.object({ messages: z.array(feedMsgSchema), more: z.boolean() }) },
 });
 
@@ -775,4 +800,5 @@ export const WRITES = {
   feedSeen: "/feed/seen",
   feedResend: "/feed/resend",
   boardMove: "/board/move",
+  viewPref: "/view-pref",
 } as const;

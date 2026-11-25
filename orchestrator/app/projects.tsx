@@ -57,6 +57,7 @@ import { threadCss } from "./thread-card.tsx";
 import { pinsCss } from "./pins.tsx";
 import { BoardView, type BoardPlace } from "./work-board.tsx";
 import { BoardSince, MovedChip } from "./board-since.tsx";
+import { openStep, saveViewCopy, useProjectsView, type OpenAt, type Opening } from "./view-pref.ts";
 
 type Query = { data: Projects | undefined; error: { message: string } | null; refetch: () => Promise<void> };
 type Project = Projects[number];
@@ -759,10 +760,30 @@ export function ProjectsView({
   const phone = useTouchPhone();
   const narrow = width > 0 && width <= 640;
   const wide = isWide(width);
-  // only the list's root below fits the pane ([data-fits-pane]). The board and the web project page return before it, and
-  // the width they'd see is the list's last one (its root is gone), so asking for them left the pane scrolling nothing
-  // with nothing of theirs scrolling either: the Timeline page was cut off at the pane's bottom
-  const listShown = !board && !!q.data && !(detail && !phone && q.data.some((p) => p.slug === detail));
+  // List or Board, as the viewer last picked (view-pref.ts): Projects opening on its bare list moves to the board,
+  // replacing the list's entry; never once the page settled, so Back from the board to the list stays on the list
+  const kept = useProjectsView();
+  const [opening, setOpening] = useState<Opening>("waiting");
+  const at: OpenAt = board ? (board.project === null && board.task === null ? "board" : "other") : !detail && !picked && !scopeOpen && !pathwaysOpen ? "list" : "other";
+  const step = openStep(opening, kept, at);
+  const toBoard = step.move === "board" && at === "list";
+  // after this mount's effects: the app's own (app.tsx, a parent, so it runs after this one) settles the URL the page
+  // opened on first, and a move made before it would be undone by it
+  useEffect(() => {
+    if (step.next === opening && !step.move) return;
+    const t = setTimeout(() => {
+      setOpening(step.next);
+      // the plugin's word settled it: this browser's copy follows, so the next first paint agrees
+      if (step.next === "done" && kept.server && kept.server !== kept.copy) saveViewCopy(kept.server);
+      if (step.move) onBoard(step.move === "board" ? { project: null, task: null } : null, "replace");
+    });
+    return () => clearTimeout(t);
+  }, [opening, step.next, step.move]);
+  // only the list's root below fits the pane ([data-fits-pane]). The board, the frame before the kept board opens and
+  // the web project page return before it, and the width they'd see is the list's last one (its root is gone), so
+  // asking for them left the pane scrolling nothing with nothing of theirs scrolling either: the Timeline page was cut
+  // off at the pane's bottom
+  const listShown = !toBoard && !board && !!q.data && !(detail && !phone && q.data.some((p) => p.slug === detail));
   usePaneFits(wide && listShown);
   const now = useMinute();
   const busy = gate.lock !== null;
@@ -772,7 +793,21 @@ export function ProjectsView({
   }, [detail, scopeOpen, phone, picked]);
   // List | Board (the work board, SCOPE piece 2)
   const switcher = (
-    <ToggleGroup type="single" variant="outline" size="sm" aria-label="View" data-projects-view={board ? "board" : "list"} value={board ? "board" : "list"} onValueChange={(v) => v && (v === "board") !== !!board && onBoard(v === "board" ? { project: null, task: null } : null)}>
+    <ToggleGroup
+      type="single"
+      variant="outline"
+      size="sm"
+      aria-label="View"
+      data-projects-view={board ? "board" : "list"}
+      value={board ? "board" : "list"}
+      onValueChange={(v) => {
+        // a click on the view already shown comes as "": that view is the pick, and the page stays on it
+        const to = v === "board" || v === "list" ? v : board ? "board" : "list";
+        setOpening("done");
+        kept.pick(to);
+        if ((to === "board") !== !!board) onBoard(to === "board" ? { project: null, task: null } : null);
+      }}
+    >
       <ToggleGroupItem value="list" data-view-pick="list">
         List
       </ToggleGroupItem>
@@ -781,6 +816,8 @@ export function ProjectsView({
       </ToggleGroupItem>
     </ToggleGroup>
   );
+  // the board is on its way: no list for a frame first
+  if (toBoard) return null;
   if (board)
     return (
       <div className="orch-cc tab pb-8" data-phone={phone || undefined} data-projects-tab="" data-layout="board">

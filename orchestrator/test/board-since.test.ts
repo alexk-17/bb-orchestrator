@@ -17,6 +17,7 @@ import { boardPrs, countMoves, emptyCache, typedSince, SINCE_POLL_CAP, fileThemT
 import { boardSinceSchema } from "../contract.ts";
 import { registerBoardSince, SINCE_REFRESH_MS } from "../board-since.ts";
 import { linkPr } from "../core/tasks.ts";
+import { pillsOf } from "../app/since-pills.ts";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -98,7 +99,7 @@ function weekend() {
 test("the strip counts the task_moves log since T and nothing else: a weekend, checked by hand", () => {
   const { s, ids } = weekend();
   const st = strip(s, FRI18);
-  assert.deepEqual(st.counts, { shipped: 1, new: 2, waiting: 1, blocked: 1, dropped: 1 }, "login shipped; search and push new; docs waits; billing became blocked; push dropped with its thread (the quiet drop of the old idea is a plan edit)");
+  assert.deepEqual(st.counts, { shipped: 1, new: 1, waiting: 1, blocked: 1, dropped: 1 }, "login shipped; search new; docs waits; billing became blocked; push, added and dropped with its thread, under dropped only: it has no card (the quiet drop of the old idea is a plan edit)");
   assert.deepEqual(Object.keys(st.moved).sort(), [ids.billing, ids.docs, ids.idea, ids.login, ids.push, ids.search].sort(), "every task with a row since T moved, the quiet drop too");
   assert.deepEqual(st.moved[ids.billing], { from: "planned", to: "planned", at: SUN + 10 * H, isNew: false }, "a round trip is a move, from its first row's from to its last row's to");
   assert.deepEqual(st.moved[ids.login], { from: "in_progress", to: "shipped", at: SAT + 11.5 * H, isNew: false });
@@ -111,13 +112,13 @@ test("the strip counts the task_moves log since T and nothing else: a weekend, c
 test("a later T counts only the rows after it; a row before T never counts", () => {
   const { s, ids } = weekend();
   const st = strip(s, SUN);
-  assert.deepEqual(st.counts, { shipped: 0, new: 1, waiting: 1, blocked: 0, dropped: 1 });
+  assert.deepEqual(st.counts, { shipped: 0, new: 0, waiting: 1, blocked: 0, dropped: 1 }, "push, added Sunday and dropped with its thread, is under dropped only");
   assert.deepEqual(Object.keys(st.moved).sort(), [ids.billing, ids.docs, ids.push].sort());
   assert.deepEqual(st.moved[ids.billing], { from: "blocked", to: "planned", at: SUN + 10 * H, isNew: false });
   assert.deepEqual(strip(s, MON + 1).counts, { shipped: 0, new: 0, waiting: 0, blocked: 0, dropped: 0 }, "nothing after the last row");
   assert.equal(Object.keys(strip(s, THU).moved).length, 6, "from Thursday on every task is new");
-  assert.equal(strip(s, THU).counts.new, 5, "the old idea was added and quietly dropped inside the window: a plan edit, not new");
-  assert.equal(strip(s, THU).counts.dropped, 1, "and not dropped either; push, dropped with its thread, is both new and dropped");
+  assert.equal(strip(s, THU).counts.new, 4, "the old idea was added and quietly dropped inside the window: a plan edit, not new; push was dropped since: no card, so not new");
+  assert.equal(strip(s, THU).counts.dropped, 1, "and the old idea isn't dropped either; push, dropped with its thread, is under dropped");
 });
 
 test("now waiting means still waiting: a task that waited and moved on doesn't count", () => {
@@ -130,6 +131,56 @@ test("now waiting means still waiting: a task that waited and moved on doesn't c
   const { counts, moved } = countMoves(rows, 8);
   assert.equal(counts.waiting, 1, "t-c only: t-a moved on, t-b went to waiting before T");
   assert.equal(moved["t-b"], undefined);
+});
+
+// The count pills (2026-11-24): a pill the owner clicks shows exactly the cards its figure counted. A board filter on a
+// task's last column would disagree with the figure: a task blocked on Saturday and unblocked on Sunday "became
+// blocked", and one shipped and pulled back "shipped", though neither sits in that column now.
+test("each figure names exactly the tasks it counted, so its pill shows them, even a task that has moved on since", () => {
+  const { s, ids } = weekend();
+  const st = strip(s, FRI18);
+  assert.deepEqual(st.picks.blocked, [ids.billing], "billing became blocked on Saturday");
+  assert.equal(st.moved[ids.billing]!.to, "planned", "and sits in Planned now: a filter on the last column would miss it");
+  assert.deepEqual(st.picks.shipped, [ids.login]);
+  assert.deepEqual(st.picks.new, [ids.search], "push, new and dropped since, has no card: under dropped only");
+  assert.deepEqual(st.picks.waiting, [ids.docs]);
+  for (const k of ["shipped", "new", "waiting", "blocked"] as const) assert.equal(st.picks[k].length, st.counts[k], `${k}: the pill's cards are its number`);
+  assert.deepEqual(st.dropped, [{ id: ids.push, title: "Push", project: "demo" }], "a dropped task has no card: the pill lists it by title");
+  assert.equal(st.dropped.length, st.counts.dropped);
+  assert.doesNotThrow(() => boardSinceSchema.parse(st), "the read's contract carries them");
+  // shipped, then pulled back to review inside the window: still counted, still picked
+  const { counts, moved, ids: picked } = countMoves(
+    [
+      { task: "t-a", project: "p", from_col: "in_review", to_col: "shipped", at: 10, why: null, seq: 1 },
+      { task: "t-a", project: "p", from_col: "shipped", to_col: "in_review", at: 12, why: null, seq: 2 },
+    ],
+    8,
+  );
+  assert.equal(counts.shipped, 1);
+  assert.deepEqual(picked.shipped, ["t-a"]);
+  assert.equal(moved["t-a"]!.to, "in_review");
+});
+
+test("the merged pill shows the tasks holding a merge that counted; merges no task holds are listed, not filtered", () => {
+  const { s, ids } = weekend();
+  const tasked = "https://github.com/acme-co/widgets/pull/1290";
+  linkPr(s.db as never, tasked, ids.login, "bb", "thread:demo:1", SAT);
+  const cache: SinceCache = { at: MON, repos: { "acme-co/widgets": entry(["demo"], [merge("acme-co/widgets", 1290, SAT + 9 * H, "robin-example"), merge("acme-co/widgets", 1302, SAT + 14 * H, "robin-example"), merge("acme-co/widgets", 1311, SUN, "sam-example")]) } };
+  const st = strip(s, FRI18, { cache, attached: new Set([tasked]), whose: whoseMerges("robin-example", null) });
+  assert.equal(st.merged, 2, "the owner's two; a colleague's never counts");
+  assert.deepEqual(st.picks.merged, [ids.login], "login holds 1290");
+  assert.deepEqual(st.noTask.map((m) => m.number), [1302]);
+  const pills = pillsOf(st, "Fri 18:00");
+  assert.deepEqual(pills.map((p) => `${p.key}:${p.n}:${p.does}`), ["shipped:1:filter", "new:1:filter", "waiting:1:filter", "blocked:1:filter", "dropped:1:list", "merged:2:filter", "releases:0:list", "noTask:1:list"], "the owner's order; things with no card open a list");
+  // with no merge on a task the merged pill has nothing to filter: it lists the merges instead
+  const bare = weekend().s;
+  const loose = strip(bare, FRI18, { cache, attached: new Set(), whose: whoseMerges("robin-example", null) });
+  assert.deepEqual(loose.picks.merged, []);
+  assert.equal(pillsOf(loose, "Fri 18:00").find((p) => p.key === "merged")!.does, "list");
+  // a quiet window: zeros (the header dims them) and no "on no task" pill at all
+  const quiet = pillsOf(strip(s, MON + 1), "Mon 09:00");
+  assert.ok(quiet.every((p) => p.n === 0), "every figure is 0");
+  assert.equal(quiet.find((p) => p.key === "noTask"), undefined, "the merges-on-no-task pill goes at zero");
 });
 
 test("each picker option gives its own T, and the saved choice survives junk", () => {
@@ -489,7 +540,7 @@ test("the CoS's tidy rows: a record whose from equals its to isn't a move, and a
   assert.deepEqual(moved["t-e"], { from: "dropped", to: "planned", at: 50, isNew: false }, "a restore is a move, not a new task");
 });
 
-test("a task added and quietly dropped inside the window counts in neither new nor dropped; one dropped with its things counts in both", () => {
+test("a task added and quietly dropped inside the window counts in neither new nor dropped; one dropped with its things counts under dropped only", () => {
   const row = (seq: number, task: string, from_col: string | null, to_col: string, at: number, why: string | null) => ({ task, project: "p", from_col, to_col, at, why, seq });
   const rows = [
     row(1, "t-x", null, "planned", 10, "planned"),
@@ -501,7 +552,7 @@ test("a task added and quietly dropped inside the window counts in neither new n
     row(7, "t-z", "planned", "dropped", 20, "dropped"),
   ];
   const { counts, moved } = countMoves(rows, 5);
-  assert.deepEqual(counts, { shipped: 0, new: 1, waiting: 0, blocked: 0, dropped: 1 }, "y only: x was a plan edit; z, added before T, is a quiet drop");
+  assert.deepEqual(counts, { shipped: 0, new: 0, waiting: 0, blocked: 0, dropped: 1 }, "y under dropped only (it has no card); x was a plan edit; z, added before T, is a quiet drop");
   assert.equal(moved["t-x"]!.isNew, true, "x still shows as a card that moved, for the only-moved view");
   assert.equal(countMoves(rows, 15).counts.new, 0, "a T after x's add sees only its quiet drop");
 });
@@ -513,4 +564,41 @@ test("a typed time counts only once it is a whole time in the last 14 days, so t
   assert.equal(typedSince("2026-11-02T00:00", now), null, "the 2nd on the way to the 22nd: more than 14 days back");
   assert.equal(typedSince("2026-11-25T00:00", now), null, "after now");
   assert.equal(typedSince("", now), null, "a cleared field");
+});
+
+// Codex's review (2026-11-25): "2 new" showed 1 card, the other new task having been dropped since. A pill that filters
+// the board counts only tasks the board shows, so its number and its cards can't disagree at any T.
+test("every task behind a pill that filters the board is a card the board shows at that T; a task dropped since is under dropped only", async () => {
+  const { columnsOf } = await import("../app/work-board-model.ts");
+  const { s, ids } = weekend();
+  // login (shipped Saturday) holds a PR merged on Sunday: at T Sunday the board no longer shows login, shipped before T
+  const tasked = "https://github.com/acme-co/widgets/pull/1290";
+  linkPr(s.db as never, tasked, ids.login, "bb", "thread:demo:1", SAT);
+  const cache: SinceCache = { at: MON, repos: { "acme-co/widgets": entry(["demo"], [merge("acme-co/widgets", 1290, SUN + H, "robin-example")]) } };
+  const check = (t: number) => {
+    const st = strip(s, t, { cache, attached: new Set([tasked]), whose: whoseMerges("robin-example", null) });
+    const board = s.e.workBoard({ since: t });
+    const cards = new Set(board.projects.flatMap((p) => p.tasks.map((x) => x.id)));
+    for (const [k, picked] of Object.entries(st.picks)) {
+      for (const id of picked) assert.ok(cards.has(id), `${k} at ${new Date(t).toISOString()}: ${id} has a card`);
+      const shown = columnsOf(board, null, { since: t, moved: st.moved, onlyMoved: false, pick: { key: k, ids: picked } }).flatMap((c) => c.tasks);
+      assert.equal(shown.length, picked.length, `${k}: the pill shows a card for each of its tasks`);
+    }
+    for (const k of ["shipped", "new", "waiting", "blocked"] as const) assert.equal(st.counts[k], st.picks[k].length, `${k}: its number is its cards`);
+    return st;
+  };
+  for (const t of [THU, FRI18, SAT, SUN, MON]) check(t);
+  assert.deepEqual(check(FRI18).picks.merged, [ids.login], "the merged pill shows login while the board has its card");
+  assert.deepEqual(check(SUN).picks.merged, [], "shipped before T, login has no card: the merge is listed instead");
+  const st = check(FRI18);
+  assert.ok(!st.picks.new.includes(ids.push) && st.dropped.some((d) => d.id === ids.push), "push: dropped with its thread, listed under dropped by title");
+  // an archived project has no board: none of its tasks is in a pill that filters it
+  s.db.prepare(`UPDATE projects SET archived_at = ? WHERE slug = 'demo'`).run(MON);
+  assert.deepEqual(Object.values(check(FRI18).picks).flat(), []);
+  // shipped or blocked, then dropped with its things: under dropped only; restored since: counted again
+  const row = (seq: number, task: string, from_col: string | null, to_col: string, at: number, why: string | null) => ({ task, project: "p", from_col, to_col, at, why, seq });
+  const gone = countMoves([row(1, "t-a", "in_review", "shipped", 10, null), row(2, "t-a", "shipped", "dropped", 12, "dropped with attachments"), row(3, "t-b", "planned", "blocked", 10, null), row(4, "t-b", "blocked", "dropped", 12, "dropped with attachments")], 5);
+  assert.deepEqual(gone.counts, { shipped: 0, new: 0, waiting: 0, blocked: 0, dropped: 2 });
+  const back = countMoves([row(1, "t-a", "in_review", "shipped", 10, null), row(2, "t-a", "shipped", "dropped", 12, "dropped with attachments"), row(3, "t-a", "dropped", "in_review", 14, "cos: restore")], 5);
+  assert.deepEqual(back.counts, { shipped: 1, new: 0, waiting: 0, blocked: 0, dropped: 1 }, "restored: it has a card again, so its ship counts; its drop in the window still does");
 });

@@ -35,7 +35,7 @@ const readTables = (sql: string) => [...sql.replace(/\s+/g, " ").matchAll(/\b(?:
 type Handler = (input: unknown, ctx?: unknown) => unknown;
 
 /** The real server on a fake bb, its database seeded busy (34 agents), every bb SDK call counted. */
-async function host(opts: { batchInbox?: boolean } = {}) {
+async function host(opts: { batchInbox?: boolean; kv?: unknown } = {}) {
   const root = mkdtempSync(join(tmpdir(), "orch-reads-"));
   roots.push(root);
   const projects = join(root, "projects");
@@ -110,7 +110,7 @@ async function host(opts: { batchInbox?: boolean } = {}) {
               return { get: async () => v, onChange: (f: (v: any) => void) => settingsChange.push(f), values: v };
             },
           };
-        if (k === "storage") return { database: () => db, kv: noop };
+        if (k === "storage") return { database: () => db, kv: opts.kv ?? noop };
         if (k === "rpc") return { register: (_c: unknown, h: Record<string, Handler>) => void (handlers = { ...handlers, ...h }), experimental_invalidate: () => {}, experimental_invalidateAll: () => {}, experimental_whileWatched: () => {} };
         if (k === "events") return { on: (n: string, f: (p: any) => unknown) => events.set(n, f) };
         if (k === "http") return { route: (m: string, p: string, f: (c: any) => Promise<any>) => routes.set(`${m} ${p}`, f), experimental_websocket: () => {} };
@@ -191,6 +191,7 @@ const INPUTS: Record<ChangeRead, unknown> = {
   feed: { cursor: null, filter: "all" },
   workBoard: { since: 0, project: null }, // a fixed T: the default (now less 7 days) moves with the clock
   boardSince: { since: 0, project: null },
+  viewPrefs: null,
 };
 
 /** A read's input: the one card read whole is the seed's deliverable with a PR and a next move (its PR's state shows). */
@@ -596,4 +597,74 @@ test("which change refetches which read", () => {
   assert.deepEqual(touched({ tables: ["task_moves"] }), reads("boardSince"));
   // an agent archived or back: besides the status flip's reads, the feed's reply line and Delivered's lead persona
   assert.deepEqual(touched({ tables: [STATUS, LIVE] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "deliverable", "projectHistory", "feed", "workBoard"));
+});
+
+// The viewer's view choices (2026-11-24, the owner: "The Projects view should remember whether you last picked Board or
+// List", and the board's folds kept per viewer): kept in the plugin's kv, so a reload, a new window or the plugin starting
+// again opens on them
+test("the viewer's pick of Board and a board's folds are kept by the plugin and read back after a restart", async () => {
+  const kept = new Map<string, unknown>();
+  const kv = { get: async (k: string) => kept.get(k) ?? null, set: async (k: string, v: unknown) => void kept.set(k, structuredClone(v)), delete: async (k: string) => void kept.delete(k) };
+  const first = await host({ kv });
+  try {
+    assert.deepEqual(await first.read("viewPrefs"), { projectsView: null, boardFolds: {} }, "a fresh install holds nothing: List, and Shipped folded");
+    await first.post(WRITES.viewPref, { projectsView: "board" });
+    await first.post(WRITES.viewPref, { board: "-", folded: [] });
+    await first.post(WRITES.viewPref, { board: "kite-app", folded: ["planned", "shipped"] });
+    assert.deepEqual(await first.read("viewPrefs"), { projectsView: "board", boardFolds: { "-": [], "kite-app": ["planned", "shipped"] } });
+  } finally {
+    first.stop.abort();
+  }
+  const again = await host({ kv });
+  try {
+    assert.deepEqual(await again.read("viewPrefs"), { projectsView: "board", boardFolds: { "-": [], "kite-app": ["planned", "shipped"] } }, "the plugin started again (a reload, a new window): Board, Shipped open on all projects, kite-app's folds");
+    await again.post(WRITES.viewPref, { projectsView: "list" });
+    assert.deepEqual(await again.read("viewPrefs"), { projectsView: "list", boardFolds: { "-": [], "kite-app": ["planned", "shipped"] } }, "a new pick changes the pick alone");
+    kept.set("viewPrefs", { projectsView: "grid", boardFolds: { "-": ["blocked"] } });
+    assert.deepEqual(await again.read("viewPrefs"), { projectsView: null, boardFolds: { "-": ["blocked"] } }, "an unreadable field is no choice, the rest stands");
+    kept.set("viewPrefs", "junk");
+    assert.deepEqual(await again.read("viewPrefs"), { projectsView: null, boardFolds: {} }, "something unreadable is no choice, never an error");
+  } finally {
+    again.stop.abort();
+  }
+});
+
+// Codex's review (2026-11-25): Board picked while a fold saves lost the Board. Each save reads the kept choices and
+// writes them back whole, so two at once each wrote back the other's old value. The kv's read yields on a timer here, as
+// a real store's does, so the saves would overlap.
+test("saves of different choices at once all survive: the pick, and two boards' folds", async () => {
+  const kept = new Map<string, unknown>();
+  let failNext = false; // the next kv write throws
+  const kv = {
+    get: async (k: string) => {
+      const v = structuredClone(kept.get(k) ?? null);
+      await settle(20);
+      return v;
+    },
+    set: async (k: string, v: unknown) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error("disk full");
+      }
+      kept.set(k, structuredClone(v));
+    },
+    delete: async (k: string) => void kept.delete(k),
+  };
+  const h = await host({ kv });
+  try {
+    await Promise.all([
+      h.post(WRITES.viewPref, { projectsView: "board" }),
+      h.post(WRITES.viewPref, { board: "-", folded: ["planned", "shipped"] }),
+      h.post(WRITES.viewPref, { board: "kite-app", folded: ["blocked"] }),
+    ]);
+    assert.deepEqual(await h.read("viewPrefs"), { projectsView: "board", boardFolds: { "-": ["planned", "shipped"], "kite-app": ["blocked"] } });
+    // a save that fails fails alone: the one after it still runs and keeps the rest
+    failNext = true;
+    const [failed, next] = await Promise.allSettled([h.post(WRITES.viewPref, { projectsView: "list" }), h.post(WRITES.viewPref, { board: "-", folded: [] })]);
+    assert.equal(failed.status, "rejected", "the save that failed says so");
+    assert.equal(next.status, "fulfilled", "the save after it still runs");
+    assert.deepEqual(await h.read("viewPrefs"), { projectsView: "board", boardFolds: { "-": [], "kite-app": ["blocked"] } });
+  } finally {
+    h.stop.abort();
+  }
 });
