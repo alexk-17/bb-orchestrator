@@ -146,7 +146,7 @@ export function FeedView({ q, filter, item, onItem, body, onItemOpen, width, age
   // bb's touch phone, never a pane's width: what only a phone draws (the new bar) keeps a narrow desktop pane as it was
   const touch = useTouchPhone();
   const filtered = experimental_useRpcQuery({ contract: rpcContract, method: "feed", input: { cursor: null, filter }, enabled: filter !== "all" && !body });
-  useFreshRead("feed", filtered.refetch, { on: filter !== "all" && !body, data: filtered.data });
+  useFreshRead("feed", filtered, { on: filter !== "all" && !body });
   const live = filter === "all" ? q.data : filtered.data;
   // no reflow under a pressed pointer or while a write holds the page: draw what was drawn last
   const frozen = gate.pointerDown || gate.lock !== null;
@@ -366,7 +366,7 @@ export function FeedView({ q, filter, item, onItem, body, onItemOpen, width, age
 function LeftOut({ since }: { since: number }) {
   const navigate = useBbNavigate();
   const q = experimental_useRpcQuery({ contract: rpcContract, method: "feedLeftOut", input: { since } });
-  useFreshRead("feedLeftOut", q.refetch, { data: q.data });
+  useFreshRead("feedLeftOut", q, { key: String(since) });
   // a new window reads afresh: the last count stands until it answers
   const last = useRef<number | null>(null);
   if (q.data !== undefined) last.current = q.data;
@@ -681,7 +681,7 @@ function MsgRow({ m, now, faces, cosTitle, after }: { m: FeedMsg; now: number; f
 function Earlier({ about, before, n, now, faces, cosTitle, after }: { about: string; before: number; n: number; now: number; faces: ReadonlyMap<string, Face>; cosTitle: string; after: () => void }) {
   const [open, setOpen] = useState(false);
   const t = experimental_useRpcQuery({ contract: rpcContract, method: "feedThread", input: { about, before }, enabled: open });
-  useFreshRead("feedThread", t.refetch, { on: open, data: t.data, key: String(before) });
+  useFreshRead("feedThread", t, { on: open, key: String(before) });
   if (!open)
     return (
       <Button type="button" variant="link" className="h-auto p-0 font-normal whitespace-normal self-start text-sm" data-earlier-replies={String(n)} onClick={() => setOpen(true)}>
@@ -695,7 +695,7 @@ function Earlier({ about, before, n, now, faces, cosTitle, after }: { about: str
 function MorePages({ cursor, filter, now, faces, cosTitle, after, onOpen, onOpenProject }: { cursor: string; filter: FeedFilter; now: number; faces: ReadonlyMap<string, Face>; cosTitle: string; after: () => void; onOpen: (key: string) => void; onOpenProject: (slug: string) => void }) {
   const [shown, setShown] = useState(false);
   const page = experimental_useRpcQuery({ contract: rpcContract, method: "feed", input: { cursor, filter }, enabled: shown });
-  useFreshRead("feed", page.refetch, { on: shown, data: page.data, key: `${filter} ${cursor}` });
+  useFreshRead("feed", page, { on: shown, key: `${filter} ${cursor}` });
   if (!shown)
     return (
       <Button type="button" variant="ghost" className="block h-auto w-full rounded-none border-b px-4 py-3 text-left text-sm font-normal text-muted-foreground" data-feed-more="" onClick={() => setShown(true)}>
@@ -847,7 +847,7 @@ function ItemPane({ p, now, faces, cosTitle, needs, deliverables, after, onClose
   const arming = useArming(root);
   const conversation = !!p.line || p.replies > 0;
   const thread = experimental_useRpcQuery({ contract: rpcContract, method: "feedThread", input: { about: p.key, before: null }, enabled: conversation });
-  useFreshRead("feedThread", thread.refetch, { on: conversation, data: thread.data });
+  useFreshRead("feedThread", thread, { on: conversation });
   const card = p.card ? (needs?.cards.find((c) => c.id === p.card!.id) ?? null) : null;
   const d = p.deliverable ? (deliverables?.find((x) => x.id === p.deliverable!.id) ?? null) : null;
   const send = (c: Card, kind: "answer" | "defer", path: string, body: unknown) => {

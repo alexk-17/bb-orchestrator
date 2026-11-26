@@ -148,6 +148,61 @@ test("a view whose query changes forgets the read still pending for the old one,
   assert.deepEqual(sent, ["old", "new", "new"], "bb leaves the old query's read pending: the new one reads at once and after its notice");
 });
 
+test("a late answer for the old query starts nothing while the new query's read is in flight", async (t) => {
+  const c = clock(t);
+  let target = "old";
+  let answerOld!: () => void;
+  const sent: string[] = [];
+  const s = freshRead(() => (sent.push(target), target === "old" ? new Promise<void>((r) => (answerOld = r)) : new Promise<void>((r) => setTimeout(r, 1000))), () => false);
+  s.opened(true);
+  target = "new";
+  s.stop();
+  s.opened(true);
+  s.notice();
+  await c.tick(900);
+  answerOld();
+  await c.tick(50);
+  assert.deepEqual(sent, ["old", "new"], "a read started now would cancel the new one in flight");
+  await c.tick(1100);
+  assert.deepEqual(sent, ["old", "new", "new"], "the notice's read runs once the new read lands");
+});
+
+// react-query: with nothing cached yet, a refetch joins the fetch in flight instead of starting one
+test("a read that joins the first fetch in flight reads once more when it lands, so a change made meanwhile shows", async (t) => {
+  const c = clock(t);
+  let server = 0;
+  let data: number | undefined;
+  let inFlight: Promise<void> | undefined;
+  let latest = 0;
+  const fetch = () => {
+    const id = ++latest;
+    const v = server;
+    return (inFlight = new Promise<void>((done) =>
+      setTimeout(() => {
+        if (id === latest) [data, inFlight] = [v, undefined];
+        done();
+      }, 1000),
+    ));
+  };
+  const refetch = () => (inFlight && data === undefined ? inFlight : fetch());
+  // the hook sees the query as of its last render, which comes a tick after the fetch lands
+  let seen = { data, fetching: false };
+  const render = () => {
+    const next = { data, fetching: inFlight !== undefined };
+    setTimeout(() => ((seen = next), render()), 10);
+  };
+  render();
+  const s = freshRead(refetch, () => false, () => seen.data === undefined && seen.fetching);
+  void fetch();
+  s.opened(false);
+  await c.tick(100);
+  server = 1;
+  s.notice();
+  await c.tick(3000);
+  assert.equal(data, 1, "the notice's read joined a fetch sent before the change");
+  assert.equal(latest, 2, "one more fetch, not one per read that saw the old render");
+});
+
 test("a read due while the page is hidden runs once when it is shown", async (t) => {
   const c = clock(t);
   let n = 0;

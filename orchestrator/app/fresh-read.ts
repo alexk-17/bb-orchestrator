@@ -20,7 +20,7 @@ const hidden = () => typeof document !== "undefined" && document.visibilityState
 const timedOf = (d: unknown): Timed | undefined => (typeof d === "object" && d !== null && "turnsAt" in d ? (d as Timed) : undefined);
 
 /** A notice queues a read FRESH_DEBOUNCE_MS later that later notices join; a deadline or a cached opening reads at once. */
-export function freshRead(read: () => Promise<unknown>, isHidden: () => boolean = hidden) {
+export function freshRead(read: () => Promise<unknown>, isHidden: () => boolean = hidden, joins: () => boolean = () => false) {
   let queued: Timer | undefined;
   let deadline: Timer | undefined;
   let due = false;
@@ -28,7 +28,7 @@ export function freshRead(read: () => Promise<unknown>, isHidden: () => boolean 
   let again = false;
   let current = 0;
   // bb's refetch cancels the read in flight: one runs at a time, and a call meanwhile reads once more when it settles
-  const now = (): void => {
+  const run = (joinable: boolean): void => {
     if (isHidden()) {
       due = true;
       return;
@@ -40,12 +40,14 @@ export function freshRead(read: () => Promise<unknown>, isHidden: () => boolean 
     }
     busy = true;
     const mine = ++current;
+    // nothing cached: bb's refetch joins the fetch in flight, whose answer can predate this call (a reread after a settle can't)
+    if (joinable && joins()) again = true;
     const settle = () => {
       if (mine !== current) return;
       busy = false;
       if (!again) return;
       again = false;
-      now();
+      run(false);
     };
     let p: Promise<unknown>;
     try {
@@ -55,6 +57,7 @@ export function freshRead(read: () => Promise<unknown>, isHidden: () => boolean 
     }
     p.then(settle, settle);
   };
+  const now = () => run(true);
   return {
     notice() {
       queued ??= setTimeout(() => {
@@ -107,17 +110,15 @@ export function spaced(run: () => void, gapMs: number) {
 }
 
 /** A shown read reads again on each opening, after each notice that touches it, and when its answer turns by the clock. */
-export function useFreshRead(read: ChangeRead, refetch: () => unknown, opts: { on?: boolean; data?: unknown; key?: string } = {}): void {
+export function useFreshRead(read: ChangeRead, q: { refetch: () => unknown; data: unknown; isFetching: boolean }, opts: { on?: boolean; key?: string } = {}): void {
   const on = opts.on ?? true;
   const key = opts.key;
-  const latest = useRef(refetch);
-  latest.current = refetch;
-  const [schedule] = useState(() => freshRead(async () => latest.current()));
-  const cached = useRef(false);
-  cached.current = opts.data !== undefined;
+  const latest = useRef(q);
+  latest.current = q;
+  const [schedule] = useState(() => freshRead(async () => latest.current.refetch(), undefined, () => latest.current.data === undefined && latest.current.isFetching));
   useEffect(() => {
     if (!on) return;
-    schedule.opened(cached.current);
+    schedule.opened(latest.current.data !== undefined);
     const back = () => schedule.shown();
     document.addEventListener("visibilitychange", back);
     return () => {
@@ -126,8 +127,8 @@ export function useFreshRead(read: ChangeRead, refetch: () => unknown, opts: { o
     };
   }, [on, key, schedule]);
   useChangeNotice(useCallback((n: unknown) => void (on && touches(n, read) && schedule.notice()), [on, read, schedule]));
-  const wait = on ? turnDelay(timedOf(opts.data)) : null;
+  const wait = on ? turnDelay(timedOf(q.data)) : null;
   useEffect(() => {
     schedule.turnsIn(wait);
-  }, [opts.data, wait, schedule]);
+  }, [q.data, wait, schedule]);
 }

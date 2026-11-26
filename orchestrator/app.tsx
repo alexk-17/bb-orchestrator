@@ -360,9 +360,9 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   };
   // the feed's first page: its own debounced refetch, paused while the page is in the background
   const feed = experimental_useRpcQuery({ contract: rpcContract, method: "feed", input: { cursor: null, filter: "all" } });
-  const feedRefetch = useRef(feed.refetch);
-  feedRefetch.current = feed.refetch;
-  const [feedReads] = useState(() => freshRead(() => feedRefetch.current()));
+  const feedNow = useRef(feed);
+  feedNow.current = feed;
+  const [feedReads] = useState(() => freshRead(() => feedNow.current.refetch(), undefined, () => feedNow.current.data === undefined && feedNow.current.isFetching));
   useRealtime(
     CHANGED_CHANNEL,
     useCallback((n: unknown) => void (touches(n, "feed") && feedReads.notice()), [feedReads]),
