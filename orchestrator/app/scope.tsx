@@ -16,13 +16,15 @@
 // 2026-11-17: while nothing in the entry waits on the owner, one status card stands where the cards would (who is
 // scoping, what they are on now, what is done so far, what comes next), in a slim column beside the chat when the pane
 // is wide, so no column stands blank. With anything waiting the entry is as before.
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { select } from "d3-selection";
 import { zoom, zoomIdentity, type ZoomBehavior } from "d3-zoom";
 import type { z } from "zod";
 import { experimental_useRpcQuery, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { Check, ChevronRight, Hourglass, Minus, Plus, UserRound } from "lucide-react";
 import { WRITES, rpcContract, type Card, type Deliverables, type Projects, type Scope, type Pathways, type PathwaysErrorKind, type answerBody, type secretBody } from "../contract.ts";
+import type { PathwaysAheadRow, PathwaysDecisionDraft } from "../core/pathways.ts";
+import { askPathwaysDecisions, type PathwaysAskResult } from "../core/pathways-ask.ts";
 import { layout } from "./diagram-layout.ts";
 import { blockedFact } from "./pathways-facts.ts";
 import { openInBb } from "./open-proof.ts";
@@ -922,6 +924,75 @@ function PathwaysPrBadge({ ticket }: { ticket: PathwaysTicketView }) {
   return active.length ? <div>{active.map((entry) => <PathwaysPrItem key={entry.pr.url} ticket={ticket} entry={entry} />)}</div> : <span className="mt-1 block text-xs text-muted-foreground">No open linked PRs</span>;
 }
 
+const aheadKindLabel = { "owner-action": "Owner action", decision: "Decision", access: "Access" } as const;
+
+function aheadDetail(row: PathwaysAheadRow) {
+  return `${aheadKindLabel[row.kind]} · ${row.label} · unblocks ${row.unblocks.length}${row.neededBefore === null ? "" : ` · before step ${row.neededBefore}`}`;
+}
+
+function fileDecision(slug: string, draft: PathwaysDecisionDraft, after: () => void) {
+  return write(
+    WRITES.pathwaysDecision,
+    { slug, ticketId: draft.ticketId, question: draft.question, options: draft.options },
+    { kind: "other", where: draft.ticketId, after },
+  );
+}
+
+type PathwaysAskState = { running: boolean; report: PathwaysAskResult | null };
+
+function PathwaysAskAll({
+  slug,
+  drafts,
+  state,
+  setState,
+  starting,
+  onAsked,
+}: {
+  slug: string;
+  drafts: PathwaysDecisionDraft[];
+  state: PathwaysAskState;
+  setState: (next: PathwaysAskState) => void;
+  starting: { current: boolean };
+  onAsked: () => void;
+}) {
+  const { running, report } = state;
+  const askAll = async () => {
+    if (starting.current) return;
+    starting.current = true;
+    setState({ running: true, report: null });
+    const result = await askPathwaysDecisions(drafts, async (draft) => {
+      const waitUntil = Date.now() + 10_000;
+      while (gate.lock) {
+        if (Date.now() > waitUntil) throw new Error("the page stayed busy with another write");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      const out = await fileDecision(slug, draft, () => {});
+      if (!out) throw new Error("another write held the page");
+      if (!out.ok) throw new Error(out.message);
+      return typeof out.result === "string" ? out.result : null;
+    });
+    starting.current = false;
+    setState({ running: false, report: result });
+    onAsked();
+  };
+  return (
+    <div className="mt-2 grid gap-1 text-xs">
+      {drafts.length > 0 && (
+        <Button type="button" variant="secondary" size="sm" className="justify-self-start border" disabled={running} onClick={() => void askAll()}>
+          Ask all missing decisions ({drafts.length})
+        </Button>
+      )}
+      {running && <span className="text-muted-foreground">Asking…</span>}
+      {report && (
+        <p className="m-0">
+          {report.asked} asked, {report.failed.length} failed
+          {report.failed.length ? `: ${report.failed.map((item) => `${item.ticketId} ${item.reason}`).join("; ")}` : ""}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function PathwaysDecisionDraftView({
   ticket,
   slug,
@@ -960,11 +1031,7 @@ function PathwaysDecisionDraftView({
     );
   if (!draft) return null;
   const submit = async () => {
-    const result = await write(
-      WRITES.pathwaysDecision,
-      { slug, ticketId: draft.ticketId, question: draft.question, options },
-      { kind: "other", where: ticket.identifier, after: onSubmitted },
-    );
+    const result = await fileDecision(slug, { ...draft, options }, onSubmitted);
     if (result?.ok && typeof result.result === "string")
       setSubmitted(result.result);
   };
@@ -1085,6 +1152,8 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
   const zoomTransformRef = useRef(zoomIdentity);
   const [zoomBounds, setZoomBounds] = useState({ k: 1, min: 0.1, max: 2 });
   const [refresh, setRefresh] = useState(false);
+  const [askState, setAskState] = useState<PathwaysAskState>({ running: false, report: null });
+  const askStarting = useRef(false);
   const refreshSeen = useRef(false);
   const [retroOpen, setRetroOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -1314,6 +1383,10 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
     ids
       .map((id) => tickets.get(id))
       .filter((ticket): ticket is NonNullable<typeof ticket> => !!ticket);
+  const aheadRows = (map?.ahead ?? []).flatMap((row) => {
+    const ticket = tickets.get(row.ticketId);
+    return ticket ? [{ row, ticket }] : [];
+  });
   const pathIds = new Set(map?.firstPath ?? []);
   const pathHead = tickets.get(map?.firstPath[0] ?? "");
   const needsYouNow = visible.find(
@@ -2096,7 +2169,32 @@ export function PathwaysSection({ slug, narrow }: { slug: string; narrow?: boole
                   </div>
                 </div>
               )}
-              {!!map.ownerActions.length && (
+              {!!aheadRows.length && (
+                <div className="rounded-lg p-3">
+                  <h5 className="m-0 text-sm font-semibold">
+                    Needs you · {aheadRows.length}
+                  </h5>
+                  <div className="mt-2 grid gap-1">
+                    {aheadRows.map(({ row, ticket }) => (
+                      <Fragment key={`${row.kind}:${row.ticketId}`}>
+                        {ticketRow(ticket, aheadDetail(row))}
+                      </Fragment>
+                    ))}
+                  </div>
+                  <PathwaysAskAll
+                    slug={slug}
+                    drafts={aheadRows.flatMap(({ row }) => (row.draft ? [row.draft] : []))}
+                    state={askState}
+                    setState={setAskState}
+                    starting={askStarting}
+                    onAsked={() => {
+                      setRefresh(true);
+                      void q.refetch();
+                    }}
+                  />
+                </div>
+              )}
+              {!!map.ownerActions.length && !map.ahead && (
                 <div className="rounded-lg p-3">
                   <h5 className="m-0 text-sm font-semibold">
                     Needs you · {map.ownerActions.length}

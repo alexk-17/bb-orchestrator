@@ -1,4 +1,4 @@
-import { pathwaysGraph, type PathwaysEdge, type PathwaysMap, type PathwaysState, type PathwaysTicket } from "./pathways.ts";
+import { pathwaysAhead, pathwaysGraph, type PathwaysEdge, type PathwaysMap, type PathwaysState, type PathwaysTicket } from "./pathways.ts";
 import { canonicalPrUrl, collectPathwaysProofRecords, reducePathwaysProof, reducePathwaysWaitLane, type PathwaysPr } from "./pathways-pr.ts";
 import type { LeadStatus } from "./status.ts";
 
@@ -339,7 +339,7 @@ export function localPathwaysMap(input: LocalPathwaysInput): PathwaysMap {
   }
 
   const openTickets = tickets.filter((ticket) => !isClosed(ticket.state.type));
-  return {
+  const map: PathwaysMap = {
     identifier: input.slug,
     title: input.status?.goal?.trim() || input.slug,
     url: "",
@@ -354,4 +354,6 @@ export function localPathwaysMap(input: LocalPathwaysInput): PathwaysMap {
     blocked: openTickets.filter((ticket) => ticket.displayState === "blocked").map((ticket) => ticket.identifier),
     ownerActions,
   };
+  map.ahead = pathwaysAhead(map);
+  return map;
 }

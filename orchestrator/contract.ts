@@ -419,6 +419,7 @@ export const pathwaysSchema = z.object({
     fog: z.array(z.string()), frontier: z.array(z.string()), claimed: z.array(z.string()), blocked: z.array(z.string()), firstPath: z.array(z.string()),
     ownerActions: z.array(z.object({ identifier: z.string(), url: z.string(), action: z.string(), kind: z.enum(["sign-in", "permission", "approval", "other"]), affected: z.array(z.string()), next: z.string().nullable(), neededBefore: z.number().nullable(), onlyOpenBlocker: z.boolean() })),
     cycles: z.array(z.array(z.string())).optional(),
+    ahead: z.array(z.object({ kind: z.enum(["owner-action", "decision", "access"]), ticketId: z.string(), label: z.string(), unblocks: z.array(z.string()), neededBefore: z.number().nullable(), draft: z.object({ ticketId: z.string(), ticketUrl: z.string(), title: z.string(), question: z.string(), context: z.string(), options: z.array(z.object({ label: z.string(), detail: z.string() })), affected: z.array(z.string()) }).optional() })).optional(),
   }).nullable(),
   retro: z.object({ finished: z.array(z.object({ label: z.string(), url: z.string(), prUrl: z.string().nullable() })), mergedPrs: z.array(z.object({ ticket: z.string(), url: z.string() })), decisions: z.array(z.object({ id: z.string(), title: z.string() })), stalled: z.array(z.object({ label: z.string(), url: z.string(), kind: z.string(), durationMs: z.number() })), doc: z.string().nullable(), hostId: z.string().nullable() }).nullable(),
 });

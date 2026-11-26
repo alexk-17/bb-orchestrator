@@ -7,7 +7,7 @@ import { cliRun, setupSidebar } from "./core/sidebar.ts";
 import { chmodSync, closeSync, cpSync, createReadStream, openSync, readdirSync, readSync, rmSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
 import { approveBody, type DeliverableFolders, type DeliverableRows, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody, type Pathways, type PathwaysErrorKind } from "./contract.ts";
-import { projectIssues, pathwaysMap, linkPathwaysDecisions, attachPathwaysPreflight, draftPathwaysDecision, summarizePathwaysRetro, pathwaysDecisionKey, submitPathwaysDecision, mapPathwaysLimited, selectPathwaysMap, type PathwaysIssue } from "./core/pathways.ts";
+import { projectIssues, pathwaysAhead, pathwaysMap, linkPathwaysDecisions, attachPathwaysPreflight, draftPathwaysDecision, summarizePathwaysRetro, pathwaysDecisionKey, submitPathwaysDecision, mapPathwaysLimited, selectPathwaysMap, type PathwaysIssue } from "./core/pathways.ts";
 import { collectPathwaysProofRecords, reducePathwaysPr, reducePathwaysProof, reducePathwaysWaitLane } from "./core/pathways-pr.ts";
 import { createPathwaysSnapshots, type PathwaysSnapshot, type PathwaysView } from "./core/pathways-snapshot.ts";
 import { localPathwaysMap } from "./core/pathways-local.ts";
@@ -2392,6 +2392,7 @@ export default async function plugin(bb: BbPluginApi) {
           ticket.waitLane = primary?.waitLane ?? null;
         }
         attachPathwaysPreflight(map, issues.slice(1) as PathwaysIssue[]);
+        map.ahead = pathwaysAhead(map);
         const retroLibrary = join(projectsDir(), slug, "library");
         let retroDoc: string | null = null;
         if (existsSync(retroLibrary)) retroDoc = readdirSync(retroLibrary).filter((name) => /retro/i.test(name) && /\.md$/i.test(name)).sort()[0] ?? null;

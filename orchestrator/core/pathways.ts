@@ -45,7 +45,7 @@ export type PathwaysTicket = Pick<PathwaysIssue, "identifier" | "title" | "url" 
   decision: PathwaysDecision;
   preflight: PathwaysPreflight;
 };
-export type PathwaysMap = { identifier: string; title: string; url: string; source?: "linear" | "orchestrator"; tickets: PathwaysTicket[]; external: PathwaysRelationIssue[]; edges: PathwaysEdge[]; fog: string[]; frontier: string[]; claimed: string[]; blocked: string[]; firstPath: string[]; ownerActions: PathwaysOwnerAction[]; cycles?: string[][] };
+export type PathwaysMap = { identifier: string; title: string; url: string; source?: "linear" | "orchestrator"; tickets: PathwaysTicket[]; external: PathwaysRelationIssue[]; edges: PathwaysEdge[]; fog: string[]; frontier: string[]; claimed: string[]; blocked: string[]; firstPath: string[]; ownerActions: PathwaysOwnerAction[]; cycles?: string[][]; ahead?: PathwaysAheadRow[] };
 
 export function summarizePathwaysRetro(map: PathwaysMap, decisions: { id: string; title: string; state: string }[], now: number) {
   const finished = map.tickets.filter((ticket) => ticket.state.type === "completed").map((ticket) => ({ label: ticket.identifier, url: ticket.url, prUrl: ticket.prs.find((entry) => entry.pr.state === "merged")?.pr.url ?? (ticket.pr?.state === "merged" ? ticket.pr.url : null) }));
@@ -301,4 +301,45 @@ export function submitPathwaysDecision(draft: PathwaysDecisionDraft, deps: { exi
   if (!draft.question.trim() || draft.options.length < 2 || draft.options.length > 4 || draft.options.some((option) => !option.label.trim())) throw new Error("A question and 2 to 4 named options are required");
   const key = pathwaysDecisionKey(draft.ticketId, draft.question);
   return deps.existing(key) ?? deps.create(key, draft);
+}
+
+export type PathwaysAheadRow = { kind: "owner-action" | "decision" | "access"; ticketId: string; label: string; unblocks: string[]; neededBefore: number | null; draft?: PathwaysDecisionDraft };
+
+export function pathwaysAhead(map: PathwaysMap, depth = 3): PathwaysAheadRow[] {
+  const steps: string[] = [];
+  for (const id of map.firstPath) {
+    if (steps.length === depth || steps.includes(id)) break;
+    steps.push(id);
+  }
+  const graph = pathwaysGraph(map.tickets, map.edges);
+  const downstream = (id: string) => {
+    const found: string[] = [];
+    graph.visit(id, new Set([id]), (ticket) => { found.push(ticket.identifier); });
+    return found;
+  };
+  const position = new Map(steps.map((id, index) => [id, index + 1]));
+  const rows = new Map<string, PathwaysAheadRow>();
+  const add = (row: PathwaysAheadRow) => {
+    const key = `${row.kind}:${row.ticketId}`;
+    if (!rows.has(key)) rows.set(key, row);
+  };
+  for (const action of map.ownerActions) {
+    const before = action.affected.flatMap((id) => position.get(id) ?? []);
+    const neededBefore = before.length ? Math.min(...before) : position.get(action.identifier) ?? null;
+    add({ kind: "owner-action", ticketId: action.identifier, label: action.action, unblocks: action.affected, neededBefore });
+  }
+  for (const [index, id] of steps.entries()) {
+    const ticket = graph.byId.get(id);
+    if (!ticket) continue;
+    const neededBefore = index + 1;
+    if (map.source !== "orchestrator" && ticket.decision.state === "missing" && ticket.readiness.state === "needs decision") {
+      const draft = ticket.decisionDraft ?? draftPathwaysDecision(ticket);
+      add({ kind: "decision", ticketId: id, label: draft.title, unblocks: downstream(id), neededBefore, draft });
+    }
+    if (ticket.preflight.state === "needs access") {
+      add({ kind: "access", ticketId: id, label: ticket.preflight.environment ? `Access to ${ticket.preflight.environment} not recorded` : "Access not recorded", unblocks: downstream(id), neededBefore });
+    }
+  }
+  const rankOf = (row: PathwaysAheadRow) => row.neededBefore ?? Number.MAX_SAFE_INTEGER;
+  return [...rows.values()].sort((a, b) => b.unblocks.length - a.unblocks.length || rankOf(a) - rankOf(b) || a.ticketId.localeCompare(b.ticketId));
 }
