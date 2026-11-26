@@ -22,6 +22,7 @@ import { VoiceMic } from "../voice/app/voice-mic.tsx";
 import { StartHere } from "./start-here.tsx";
 import { ImagePopout } from "./image-popout.tsx";
 import { openInBb } from "./open-proof.ts";
+import { useFreshRead } from "./fresh-read.ts";
 
 export type FeedFilter = "all" | "needs" | "delivered" | "alerts";
 const FILTERS: { id: FeedFilter; label: string }[] = [
@@ -68,9 +69,8 @@ const css = /* css */ `
 [data-orch] [data-feed] .k-post[data-opened] { background: var(--accent); }
 [data-orch] [data-feed] .k-post__dot { position: absolute; left: 8px; top: 26px; width: 6px; height: 6px; border-radius: 9999px; background: var(--primary); }
 [data-orch] [data-feed] .k-post[data-read] { opacity: 0.88; }
-/* a phone: the face on the pane's 16 px gutter, the new dot in it. Denser since 2026-11-21 (the owner: "too much wasted
-   space and it's very cluttered"; the feed is "just a quick scroll to see status updates"): a 24 px face, one meta
-   line, the title and its text clamped, the shot a small square beside the title, and the post opens on a tap */
+/* a phone: the face on the pane's 16 px gutter, the new dot in it; a 24 px face, one meta line, the title and its text
+   clamped, the shot a small square beside the title, and the post opens on a tap */
 [data-orch][data-phone] [data-feed] .k-post { grid-template-columns: 24px minmax(0, 1fr); column-gap: 10px; padding: 8px 16px; }
 [data-orch][data-phone] [data-feed] .k-post__dot { left: 5px; top: 18px; }
 [data-orch][data-phone] [data-feed] .k-thumb { width: 56px; height: 56px; margin-top: 4px; overflow: hidden; border: 1px solid var(--border); border-radius: calc(var(--radius, 8px)); }
@@ -146,6 +146,7 @@ export function FeedView({ q, filter, item, onItem, body, onItemOpen, width, age
   // bb's touch phone, never a pane's width: what only a phone draws (the new bar) keeps a narrow desktop pane as it was
   const touch = useTouchPhone();
   const filtered = experimental_useRpcQuery({ contract: rpcContract, method: "feed", input: { cursor: null, filter }, enabled: filter !== "all" && !body });
+  useFreshRead("feed", filtered.refetch, { on: filter !== "all" && !body, data: filtered.data });
   const live = filter === "all" ? q.data : filtered.data;
   // no reflow under a pressed pointer or while a write holds the page: draw what was drawn last
   const frozen = gate.pointerDown || gate.lock !== null;
@@ -201,7 +202,7 @@ export function FeedView({ q, filter, item, onItem, body, onItemOpen, width, age
   // an empty Home is Start here alone: no filters or Mark all read (start-here mockups); the web keeps its title
   const alone = !body && filter === "all" && !!view && posts.length === 0;
   // the page header row: where you are and its count, then the mic and Mark all read. Home's filters live in the nav on
-  // both (2026-11-21): the Sidebar on the web, the bar and its More on a phone, so a phone has no filter row repeating them
+  // both: the Sidebar on the web, the bar and its More on a phone, so a phone has no filter row repeating them
   const header = alone ? (
     <div className="flex min-h-12 shrink-0 items-center gap-2 border-b px-4 py-2" data-home-header="">
       <h1 className="m-0 text-base font-semibold">Home</h1>
@@ -296,7 +297,7 @@ export function FeedView({ q, filter, item, onItem, body, onItemOpen, width, age
           ))}
           {view.cursor ? <MorePages cursor={view.cursor} filter={filter} now={view.now} faces={faces} cosTitle={cosTitle} after={after} onOpen={openPost} onOpenProject={onOpenProject} /> : null}
           <div className="flex items-center justify-between px-4 py-3 text-xs text-muted-foreground">
-            <LeftOut n={view.leftOut} />
+            <LeftOut since={view.leftOutSince} />
           </div>
         </div>
       )}
@@ -347,7 +348,7 @@ export function FeedView({ q, filter, item, onItem, body, onItemOpen, width, age
         </Button>
       ) : null}
       <div className="flex min-h-0 flex-1">
-        {/* never sideways (2026-11-21): wide content scrolls in its own box (diagrams, code); the page itself only up and down */}
+        {/* never sideways: wide content scrolls in its own box (diagrams, code); the page itself only up and down */}
         <div ref={scroller} className={cx("min-h-0 overflow-x-hidden overflow-y-auto", !phone && pane ? "w-[456px] shrink-0 border-r" : "min-w-0 flex-1")} data-feed-scroll="">
           <div className={!phone && !pane && !body ? "max-w-3xl" : undefined}>{body ? <div className="px-4 pt-4" data-home-body={filter}>{body}</div> : list}</div>
         </div>
@@ -362,8 +363,15 @@ export function FeedView({ q, filter, item, onItem, body, onItemOpen, width, age
   );
 }
 
-function LeftOut({ n }: { n: number }) {
+function LeftOut({ since }: { since: number }) {
   const navigate = useBbNavigate();
+  const q = experimental_useRpcQuery({ contract: rpcContract, method: "feedLeftOut", input: { since } });
+  useFreshRead("feedLeftOut", q.refetch, { data: q.data });
+  // a new window reads afresh: the last count stands until it answers
+  const last = useRef<number | null>(null);
+  if (q.data !== undefined) last.current = q.data;
+  const n = last.current;
+  if (n === null) return null;
   return (
     <span data-feed-left-out={String(n)}>
       Not shown: {n} inbox messages and acks ·{" "}
@@ -601,8 +609,7 @@ function PostView({ p, now, faces, cosTitle, opened, armed, check, after, onOpen
               replying ? (
                 <ReplyBox p={p} cosTitle={cosTitle} after={after} onDone={() => setReplying(false)} focus />
               ) : (
-                // closed, the reply bar looks like the bar's own field (2026-11-21, the owner: every text bar like the box
-                // to a lead): bordered, rounded like the field, no avatar; a 44 px tap target on a phone
+                // closed, the reply bar looks like the bar's own field: bordered, rounded like the field, no avatar; a 44 px tap target on a phone
                 <Button type="button" variant="outline" className="flex h-auto min-h-11 w-full min-w-0 items-center justify-start rounded-md px-3 text-left text-base font-normal text-muted-foreground md:min-h-9 md:text-[15px]" data-reply-open={p.key} onClick={() => setReplying(true)}>
                   <span className="truncate">{replyTo(p.line, cosTitle)}</span>
                 </Button>
@@ -674,6 +681,7 @@ function MsgRow({ m, now, faces, cosTitle, after }: { m: FeedMsg; now: number; f
 function Earlier({ about, before, n, now, faces, cosTitle, after }: { about: string; before: number; n: number; now: number; faces: ReadonlyMap<string, Face>; cosTitle: string; after: () => void }) {
   const [open, setOpen] = useState(false);
   const t = experimental_useRpcQuery({ contract: rpcContract, method: "feedThread", input: { about, before }, enabled: open });
+  useFreshRead("feedThread", t.refetch, { on: open, data: t.data, key: String(before) });
   if (!open)
     return (
       <Button type="button" variant="link" className="h-auto p-0 font-normal whitespace-normal self-start text-sm" data-earlier-replies={String(n)} onClick={() => setOpen(true)}>
@@ -687,6 +695,7 @@ function Earlier({ about, before, n, now, faces, cosTitle, after }: { about: str
 function MorePages({ cursor, filter, now, faces, cosTitle, after, onOpen, onOpenProject }: { cursor: string; filter: FeedFilter; now: number; faces: ReadonlyMap<string, Face>; cosTitle: string; after: () => void; onOpen: (key: string) => void; onOpenProject: (slug: string) => void }) {
   const [shown, setShown] = useState(false);
   const page = experimental_useRpcQuery({ contract: rpcContract, method: "feed", input: { cursor, filter }, enabled: shown });
+  useFreshRead("feed", page.refetch, { on: shown, data: page.data, key: `${filter} ${cursor}` });
   if (!shown)
     return (
       <Button type="button" variant="ghost" className="block h-auto w-full rounded-none border-b px-4 py-3 text-left text-sm font-normal text-muted-foreground" data-feed-more="" onClick={() => setShown(true)}>
@@ -716,8 +725,7 @@ const CHIEF_REPLY_RULES = "Tracked: the CoS answers it here, in this conversatio
 
 /**
  * The reply box under a post (D6): a direct message to its lead (the CoS copied), or a tracked one to the CoS.
- * 2026-11-21 (the owner: every text bar "back to the same one that's there for the talk directly to lead"): the compact
- * bar, a bordered field with attach and Reply beside it; under it, one muted line, always mounted: what it is about,
+ * The compact bar, a bordered field with attach and Reply beside it; under it, one muted line, always mounted: what it is about,
  * the one hint, and Cancel.
  */
 function ReplyBox({ p, cosTitle, after, onDone, focus = false }: { p: FeedPost; cosTitle: string; after: () => void; onDone?: () => void; focus?: boolean }) {
@@ -837,7 +845,9 @@ function ItemPane({ p, now, faces, cosTitle, needs, deliverables, after, onClose
   const root = useRef<HTMLDivElement>(null);
   const touch = useTouchPhone();
   const arming = useArming(root);
-  const thread = experimental_useRpcQuery({ contract: rpcContract, method: "feedThread", input: { about: p.key, before: null }, enabled: !!p.line || p.replies > 0 });
+  const conversation = !!p.line || p.replies > 0;
+  const thread = experimental_useRpcQuery({ contract: rpcContract, method: "feedThread", input: { about: p.key, before: null }, enabled: conversation });
+  useFreshRead("feedThread", thread.refetch, { on: conversation, data: thread.data });
   const card = p.card ? (needs?.cards.find((c) => c.id === p.card!.id) ?? null) : null;
   const d = p.deliverable ? (deliverables?.find((x) => x.id === p.deliverable!.id) ?? null) : null;
   const send = (c: Card, kind: "answer" | "defer", path: string, body: unknown) => {

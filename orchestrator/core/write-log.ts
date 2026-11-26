@@ -1,8 +1,7 @@
-// Which tables a change wrote, for the page's change notice (lag fix, 2026-11-23): every change notice made every mounted
-// screen refetch everything. The notice now names the tables written since the last one, and the page refetches only the
-// reads that read them (change-notice.ts READS). It fails open: a change it can't name refetches everything.
+// Which tables a change wrote, for the page's change notice: the notice names the tables written since the last one, and
+// the page refetches only the reads that read them (change-notice.ts READS). A change it can't name refetches everything.
 import type { Db, Stmt } from "./db.ts";
-import { STATUS } from "../change-notice.ts";
+import { DERIVED, type DerivedTable, STATUS } from "../change-notice.ts";
 
 // an upsert's "ON CONFLICT ... DO UPDATE SET" names no table: SET is not one
 const WRITE = /\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+(?!SET\b)["`]?([A-Za-z_][A-Za-z0-9_]*)/gi;
@@ -42,6 +41,8 @@ export function writtenTables(sql: string): string[] {
  * called on the real object (better-sqlite3 refuses a proxied `this`).
  */
 export function recordWrites<T extends Db>(db: T, onWrite: (tables: readonly string[]) => void): T {
+  let total: Stmt | null = null;
+  const changes = () => Number(((total ??= db.prepare("SELECT total_changes() AS n")).get() as { n: number | bigint }).n);
   const wrapStmt = (st: Stmt, tables: readonly string[], kindAt: number): Stmt =>
     new Proxy(st, {
       get(target, k) {
@@ -49,8 +50,10 @@ export function recordWrites<T extends Db>(db: T, onWrite: (tables: readonly str
         if (typeof v !== "function") return v;
         if (k === "run" || k === "get" || k === "all" || k === "iterate")
           return (...args: unknown[]) => {
+            // an iterator writes as it is read, after this returns
+            const before = k === "iterate" ? null : changes();
             const r = (v as (...a: unknown[]) => unknown).apply(target, args);
-            onWrite(kindAt >= 0 && args[kindAt] === "status" ? [STATUS] : tables); // after it ran: a refused write changed nothing
+            if (before === null || changes() !== before) onWrite(kindAt >= 0 && args[kindAt] === "status" ? [STATUS] : tables);
             return r;
           };
         return (v as (...a: unknown[]) => unknown).bind(target);
@@ -67,9 +70,11 @@ export function recordWrites<T extends Db>(db: T, onWrite: (tables: readonly str
         };
       if (k === "exec")
         return (sql: string) => {
-          const r = (v as (s: string) => unknown).call(target, sql);
           const tables = writtenTables(sql);
-          if (tables.length) onWrite(tables);
+          // total_changes() counts no schema change
+          const before = tables.length && !tables.includes("*") ? changes() : null;
+          const r = (v as (s: string) => unknown).call(target, sql);
+          if (tables.length && (before === null || changes() !== before)) onWrite(tables);
           return r;
         };
       return typeof v === "function" ? (v as (...a: unknown[]) => unknown).bind(target) : v;
@@ -112,5 +117,36 @@ export class ChangeTables {
   #add(t: string): void {
     if (this.#known.has(t)) this.#tables.add(t);
     else this.#all = true;
+  }
+}
+
+/**
+ * A notice's derived tables (change-notice.ts DERIVED): each named when its print moved since the last notice that
+ * wrote one of its tables. A print that fails, or the first, names it.
+ */
+export class DerivedTables {
+  #last = new Map<DerivedTable, string>();
+  readonly #prints: Readonly<Record<DerivedTable, () => string>>;
+  readonly #failed: (name: DerivedTable, e: unknown) => void;
+  constructor(prints: Readonly<Record<DerivedTable, () => string>>, failed: (name: DerivedTable, e: unknown) => void = () => {}) {
+    this.#prints = prints;
+    this.#failed = failed;
+  }
+
+  add(tables: string[] | null): string[] | null {
+    for (const name of Object.keys(DERIVED) as DerivedTable[]) {
+      if (tables && !Object.keys(DERIVED[name]).some((t) => tables.includes(t))) continue;
+      let now: string | null = null;
+      try {
+        now = this.#prints[name]();
+      } catch (e) {
+        this.#failed(name, e);
+      }
+      const moved = now === null || this.#last.get(name) !== now;
+      if (now === null) this.#last.delete(name);
+      else this.#last.set(name, now);
+      if (tables && moved) tables.push(name);
+    }
+    return tables && [...tables].sort();
   }
 }

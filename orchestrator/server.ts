@@ -21,7 +21,7 @@ import { checkAnswers, toQuestions } from "./interactions.ts";
 import { BB, type ChangeNotice, KNOWN_TABLES } from "./change-notice.ts";
 import { ReadCache, shareReads } from "./core/read-cache.ts";
 import { loopDelay, timeReads } from "./core/slow-reads.ts";
-import { ChangeTables, recordWrites } from "./core/write-log.ts";
+import { ChangeTables, DerivedTables, recordWrites } from "./core/write-log.ts";
 
 type RawInteraction = { id: string; createdAt?: number; kind?: string; status?: string; payload?: { kind?: string } };
 import { type Deliverable, oneLine, PROJECT_MODES, PROOF_KINDS, type ProjectMode } from "./core/model.ts";
@@ -268,13 +268,15 @@ export default async function plugin(bb: BbPluginApi) {
   // Services start only after a successful activation, so a throwing activation leaves no timer running.
   let announcing = false;
   let changeTimer: ReturnType<typeof setTimeout> | null = null;
+  let derived: DerivedTables | null = null;
   const EVERYTHING = ["*"];
   const changed = (tables?: readonly string[]) => {
     notices.call(tables);
     if (!announcing || changeTimer) return;
     changeTimer = setTimeout(() => {
       changeTimer = null;
-      bb.realtime.publish(CHANGED_CHANNEL, { tables: notices.take() } satisfies ChangeNotice);
+      const tables = notices.take();
+      bb.realtime.publish(CHANGED_CHANNEL, { tables: derived ? derived.add(tables) : tables } satisfies ChangeNotice);
     }, 150);
   };
 
@@ -409,6 +411,7 @@ export default async function plugin(bb: BbPluginApi) {
   // A service, never setInterval: bb runs no dispose hook, so an interval outlives a failed reload.
   bb.background.service("memory", {
     async start(signal) {
+      derived = new DerivedTables(engine.changePrints(), (name, e) => bb.log.warn(`change print ${name}: ${String(e)}`));
       announcing = true;
       loop.start();
       changed(EVERYTHING);
@@ -2422,6 +2425,9 @@ export default async function plugin(bb: BbPluginApi) {
     },
     feed({ cursor, filter }) {
       return engine.feed({ cursor, filter }, feedPrompts);
+    },
+    feedLeftOut({ since }) {
+      return engine.feedLeftOut(since);
     },
     feedThread({ about, before }) {
       return engine.feedThread(about, before);

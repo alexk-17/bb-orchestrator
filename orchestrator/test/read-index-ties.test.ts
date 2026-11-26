@@ -1,9 +1,9 @@
-// Rows at the same time keep the order they had before the read indexes (2026-11-24, Codex review of lag 2, four P2s).
+// Rows at the same time keep the order they had before the read indexes.
 // Without an index, SQLite sorted a table scan, so rows tied on time came first-written first; an index hands them back
 // in its own order instead (by title, PR number or rowid descending). Then the owner's feed, Board and Projects rows
 // change with no change in the data: another alarm on the first page, another deliverable under the 500 the feed reads,
 // another "latest" report or merge, cards listed the other way round. Each expected value below is what the pre-index
-// main (ae52f60) returned for the same fixture (Codex's repros, re-run there).
+// main (ae52f60) returned for the same fixture.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
@@ -13,7 +13,7 @@ import { feedPage, type FeedSource } from "../core/feed.ts";
 
 const ports = (now: number) => ({ now: () => now, deliver: async () => ({ delivery: "sent" as const }), mirror: () => {}, changed: () => {}, log: () => {} });
 const source = (db: DatabaseSync, now: number, held = new Set<string>()) =>
-  ({ db, now, seen: 0, resendMs: 60_000, batched: false, batchReadAt: () => null, openCards: [], scopeCards: [], live: () => false, heldProjects: held, prompts: [] }) as unknown as FeedSource;
+  ({ db, now, seen: 0, resendMs: 60_000, batched: false, openCards: [], scopeCards: [], live: () => false, heldProjects: held, prompts: [] }) as unknown as FeedSource;
 
 test("alarms at one time: the feed's first page and the Board read list them as before the index", () => {
   const db = new DatabaseSync(":memory:");

@@ -1,5 +1,4 @@
-// The Deliverables read's rows (2026-11-23, lag: moved out of server.ts). One read looks each lead and each PR up once:
-// before, every deliverable asked for its lead twice and for each PR it named, 400 agent and ~90 PR lookups a read.
+// The Deliverables read's rows. One read looks each lead and each PR up once, not once per deliverable.
 import type { DeliverableIndex, DeliverableRows, Deliverables } from "../contract.ts";
 import type { Engine } from "./engine.ts";
 import type { Agent, Deliverable } from "./model.ts";
@@ -21,7 +20,7 @@ export function lookups(engine: Engine) {
     if (!prs.has(url)) prs.set(url, engine.prByUrl(url));
     return prs.get(url)!;
   };
-  return { agent, pr, persona: (a: Agent) => engine.personaOf(a, assigned) };
+  return { agent, pr, persona: (a: Agent) => engine.leadPersonaOf(a, assigned) };
 }
 
 /** One deliverable whole, as a card draws it: every revision with its proof and the PRs' live state. */
@@ -32,7 +31,7 @@ export function deliverableRow(engine: Engine, d: Deliverable, look: ReturnType<
     project: d.project,
     lead: d.lead,
     leadMon: lead?.mon ?? null,
-    leadPersona: lead ? look.persona(lead) : null, // 2026-11-18: the lead's person
+    leadPersona: lead ? look.persona(lead) : null,
     title: d.title,
     summary: d.summary,
     state: d.state,

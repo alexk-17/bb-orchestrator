@@ -2,6 +2,8 @@
 import { type Db, prepareHinted } from "./db.ts";
 import type { Decision, Deliverable } from "./model.ts";
 import type { LeadStatus } from "./status.ts";
+import { DROPPED } from "./batch-inbox.ts";
+import { DERIVED, OWNER_MAIL } from "../change-notice.ts";
 
 export const FEED_PAGE = 50;
 /** Newest exchanges a post carries; "Show N earlier replies" reads the rest (feedThread). */
@@ -57,9 +59,10 @@ export interface FeedPage {
   seen: number;
   newCount: number;
   counts: { needsYou: number; delivered: number; alerts: number };
-  leftOut: number;
+  leftOutSince: number;
   now: number;
   last: (FeedMsg & { to: string; about: string }) | null; // the owner's latest message on either line, for the dock's state line
+  turnsAt: number | null;
 }
 
 /** A pending bb prompt from the CoS, the Steward or a lead (worker threads' stay on Needs you, D2). */
@@ -78,12 +81,13 @@ export interface FeedSource {
   seen: number;
   resendMs: number;
   batched: boolean;
-  batchReadAt: (itemId: string) => number | null;
   openCards: Decision[];
   scopeCards: Decision[];
   live: (address: string) => boolean;
   heldProjects: ReadonlySet<string>;
   prompts: FeedPrompt[];
+  /** A message's state turns at this time by the clock alone, with no write to tell the page. */
+  turnsAt?: (at: number) => void;
 }
 
 const ms = (iso: string | null | undefined) => (iso ? Date.parse(iso) : 0);
@@ -129,13 +133,17 @@ function conversations(db: Db): Map<string, { n: number; answered: number | null
 function stateOf(row: ItemRow, src: FeedSource, answered: boolean): { state: string; tone: "ok" | "warn" | null; resend: boolean } {
   // batched, a message stays pending until its recipient's digest is acked: it went out with the wake
   const r = src.batched && row.state === "pending" ? { ...row, state: "delivered", delivered_at: row.delivered_at ?? row.created_at } : row;
-  const late = (since: number | null) => src.now - (since ?? r.created_at) >= src.resendMs;
+  const late = (since: number | null) => {
+    const at = (since ?? r.created_at) + src.resendMs;
+    if (src.now < at) src.turnsAt?.(at);
+    return src.now >= at;
+  };
   if (r.kind === "owner.cos") {
     if (answered) return { state: "answered", tone: "ok", resend: false };
     if (r.state === "dead") return { state: "no reply yet", tone: "warn", resend: true };
     if (r.state === "pending") return { state: "sent", tone: null, resend: false };
     if (r.state === "queued") return { state: "queued", tone: null, resend: false };
-    const read = r.state === "closed" || src.batchReadAt(r.id) !== null;
+    const read = r.state === "closed" || readAt(src.db, r.id) !== null;
     if (late(r.delivered_at ?? r.closed_at)) return { state: read ? "read · no reply yet" : "no reply yet", tone: "warn", resend: true };
     return { state: read ? "read" : "delivered", tone: null, resend: false };
   }
@@ -146,6 +154,18 @@ function stateOf(row: ItemRow, src: FeedSource, answered: boolean): { state: str
   if (r.state === "pending" || r.state === "queued") return { state: "sent", tone: null, resend: false };
   if (late(r.delivered_at)) return { state: "no reply yet", tone: "warn", resend: true };
   return { state: "delivered", tone: null, resend: false };
+}
+
+/** A batched message's receipt: when its recipient acked the digest it went out in. */
+function readAt(db: Db, id: string): number | null {
+  const e = db.prepare(`SELECT e.acked_at FROM inbox_entries e JOIN items ON items.id = e.item_id WHERE e.item_id = ? AND items.kind IN ('owner.message','owner.cos')`).get(id) as { acked_at: number | null } | undefined;
+  return !e || e.acked_at === DROPPED ? null : e.acked_at;
+}
+
+/** The owner's mail and its receipts, as the feed reads them, printed for the change notice (change-notice.ts OWNER_MAIL). */
+export function ownerMailPrint(db: Db): string {
+  const kinds = DERIVED[OWNER_MAIL].items.map((k) => `'${k}'`).join(",");
+  return JSON.stringify(db.prepare(`SELECT ${ITEM_COLS}, (SELECT acked_at FROM inbox_entries WHERE item_id = items.id) AS read_at FROM items WHERE kind IN (${kinds}) ORDER BY id`).all());
 }
 
 /** A deliverable's revision at a time: the newest delivered by then. */
@@ -266,8 +286,15 @@ function deliverableCand(d: Deliverable): Cand {
   };
 }
 
+/** The source, and the earliest time a state drawn from it turns by the clock alone. */
+function timed(source: FeedSource): { src: FeedSource; turnsAt: () => number | null } {
+  let turnsAt: number | null = null;
+  return { src: { ...source, turnsAt: (at) => void (turnsAt = Math.min(turnsAt ?? at, at)) }, turnsAt: () => turnsAt };
+}
+
 /** One page, newest activity first: each source's newest posts plus each post a later answer lifted. */
-export function feedPage(src: FeedSource, opts: { cursor: string | null; filter: FeedFilter; limit?: number }): FeedPage {
+export function feedPage(source: FeedSource, opts: { cursor: string | null; filter: FeedFilter; limit?: number }): FeedPage {
+  const { src, turnsAt } = timed(source);
   const { db } = src;
   const limit = Math.max(1, Math.min(FEED_PAGE, opts.limit ?? FEED_PAGE));
   const [curAt, curKey] = opts.cursor ? [Number(opts.cursor.slice(0, opts.cursor.indexOf("|"))), opts.cursor.slice(opts.cursor.indexOf("|") + 1)] : [Number.POSITIVE_INFINITY, ""];
@@ -346,7 +373,7 @@ export function feedPage(src: FeedSource, opts: { cursor: string | null; filter:
   }
   if (f === "all") {
     // the owner's own posts: a message written with no post (the Projects tab, the docked bar, the Chat tab)
-    const rows = db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE about >= 'msg:' AND about < 'msg;' AND about = 'msg:' || id AND created_at < ? ORDER BY created_at DESC LIMIT ?`).all(top, limit + 1) as ItemRow[];
+    const rows = db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE about >= 'msg:' AND about < 'msg;' AND about = 'msg:' || id AND kind IN ('owner.message','owner.cos') AND created_at < ? ORDER BY created_at DESC LIMIT ?`).all(top, limit + 1) as ItemRow[];
     for (const r of rows) add(ownCand(r));
   }
 
@@ -376,7 +403,7 @@ export function feedPage(src: FeedSource, opts: { cursor: string | null; filter:
     const conversation = conv.get(c.key);
     const rootId = p.kind === "message" ? p.key.slice(4) : null;
     const rows = thread.get(c.key) ?? [];
-    const rootRow = rootId ? (rows.find((r) => r.id === rootId) ?? (db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE id = ?`).get(rootId) as ItemRow | undefined)) : undefined;
+    const rootRow = rootId ? (rows.find((r) => r.id === rootId) ?? (db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE id = ? AND kind IN ('owner.message','owner.cos')`).get(rootId) as ItemRow | undefined)) : undefined;
     const all = entries(rootRow && !rows.includes(rootRow) ? [rootRow, ...rows] : rows, src, revs, imgs);
     const self = rootId ? (all.find((m) => m.id === rootId) ?? null) : null;
     const rest = all.filter((m) => m !== self);
@@ -385,13 +412,9 @@ export function feedPage(src: FeedSource, opts: { cursor: string | null; filter:
     return { ...p, activity, isNew: p.needsOwner || activity > src.seen, held: held(p.project), lineLive: !!p.line && src.live(p.line), replies: n, thread: shown, earlier: Math.max(0, n - shown.length), self };
   });
   const lastRow = db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE sender = 'person' AND kind IN ('owner.message','owner.cos') ORDER BY created_at DESC, rowid DESC LIMIT 1`).get() as ItemRow | undefined;
-  const lastMsg = lastRow ? entries([lastRow, ...(db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE kind = 'cos.reply' AND ref = ?`).all(lastRow.id) as ItemRow[])], src, new Map(), new Map())[0]! : null;
+  const lastMsg = lastRow ? entries([lastRow, ...(db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE kind = 'cos.reply' AND ref = ?`).all(lastRow.id) as ItemRow[])], source, new Map(), new Map())[0]! : null;
 
   const last = page.at(-1);
-  const oldest = last ? last.activity : src.now;
-  const leftOut =
-    (db.prepare(`SELECT COUNT(*) AS n FROM items WHERE created_at >= ? AND kind NOT IN ('owner.message','owner.cos','cos.reply')`).get(oldest) as { n: number }).n +
-    (db.prepare(`SELECT COUNT(*) AS n FROM board WHERE at >= ? AND kind NOT IN ('alarm','dead')`).get(oldest) as { n: number }).n;
   const reviewCount = (db.prepare(`SELECT COUNT(*) AS n FROM deliverables WHERE state = 'review' AND json_extract(json, '$.board') IS NULL`).get() as { n: number }).n;
   return {
     posts,
@@ -403,10 +426,19 @@ export function feedPage(src: FeedSource, opts: { cursor: string | null; filter:
       delivered: reviewCount,
       alerts: (db.prepare(`SELECT COUNT(*) AS n FROM board WHERE kind IN ('alarm','dead') AND at > ?`).get(src.seen) as { n: number }).n,
     },
-    leftOut,
+    leftOutSince: last ? last.activity : src.now,
     now: src.now,
     last: lastRow && lastMsg ? { ...lastMsg, to: lastRow.recipient, about: lastRow.about } : null,
+    turnsAt: turnsAt(),
   };
+}
+
+/** The footer's count: the mail and board rows since the first page's oldest post, which the feed leaves out. */
+export function leftOutCount(db: Db, since: number): number {
+  return (
+    (db.prepare(`SELECT COUNT(*) AS n FROM items WHERE created_at >= ? AND kind NOT IN ('owner.message','owner.cos','cos.reply')`).get(since) as { n: number }).n +
+    (db.prepare(`SELECT COUNT(*) AS n FROM board WHERE at >= ? AND kind NOT IN ('alarm','dead')`).get(since) as { n: number }).n
+  );
 }
 
 function revsOf(db: Db, id: string): { rev: number; at: number }[] {
@@ -439,7 +471,7 @@ function candFor(db: Db, src: FeedSource, key: string): Cand | null {
     return r ? deliverableCand(JSON.parse(r.json) as Deliverable) : null;
   }
   if (key.startsWith("msg:")) {
-    const r = db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE id = ?`).get(id) as ItemRow | undefined;
+    const r = db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE id = ? AND kind IN ('owner.message','owner.cos')`).get(id) as ItemRow | undefined;
     return r && r.about === key ? ownCand(r) : null;
   }
   if (key.startsWith("board:")) {
@@ -460,13 +492,21 @@ function candFor(db: Db, src: FeedSource, key: string): Cand | null {
   return null;
 }
 
+export interface FeedThread {
+  messages: FeedMsg[];
+  more: boolean;
+  now: number;
+  turnsAt: number | null;
+}
+
 /** A post's conversation before `before` (null: all of it), oldest first, at most the newest `limit` entries. */
-export function feedThread(src: FeedSource, about: string, before: number | null, limit = 100): { messages: FeedMsg[]; more: boolean } {
+export function feedThread(source: FeedSource, about: string, before: number | null, limit = 100): FeedThread {
+  const { src, turnsAt } = timed(source);
   const rows = src.db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE about = ? AND kind IN ('owner.message','owner.cos','cos.reply') ORDER BY created_at, rowid`).all(about) as ItemRow[];
   const revs = new Map<string, { rev: number; at: number }[]>();
   if (about.startsWith("deliverable:")) revs.set(about, revsOf(src.db, about.slice("deliverable:".length)));
   const all = entries(rows, src, revs, imagesOf(src.db, rows.map((r) => r.id))).filter((m) => before === null || m.at < before);
-  return { messages: all.slice(-limit), more: all.length > limit };
+  return { messages: all.slice(-limit), more: all.length > limit, now: src.now, turnsAt: turnsAt() };
 }
 
 export interface CosLineEntry {

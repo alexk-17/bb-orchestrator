@@ -40,7 +40,7 @@ const token = () => randomBytes(16).toString("hex");
 export const WAKE_DIGEST_CAP = 16_000;
 
 /** acked_at of a dead letter's entry: out of the unread, but never read. */
-const DROPPED = -1;
+export const DROPPED = -1;
 /** A wake's note when the owner's Resend or the CoS's retry_wake restarted it: it goes now, gap or not. */
 const RESTARTED = "restarted";
 /** Who the wake gap holds: leads only. */

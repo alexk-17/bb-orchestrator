@@ -479,9 +479,10 @@ export const feedSchema = z.object({
   seen: z.number(),
   newCount: z.number(),
   counts: z.object({ needsYou: z.number(), delivered: z.number(), alerts: z.number() }),
-  leftOut: z.number(),
+  leftOutSince: z.number(),
   now: z.number(),
   last: feedMsgSchema.extend({ to: z.string(), about: z.string() }).nullable(),
+  turnsAt: z.number().nullable(),
 });
 export type Feed = z.infer<typeof feedSchema>;
 
@@ -589,7 +590,8 @@ export const rpcContract = defineRpcContract({
   workBoard: { input: z.object({ since: z.number().nullable().optional(), project: z.string().min(1).max(40).nullable().optional() }).strict(), output: workBoardSchema },
   boardSince: { input: z.object({ since: z.number().nullable(), project: z.string().min(1).max(40).nullable().optional() }).strict(), output: boardSinceSchema },
   viewPrefs: { input: z.null(), output: viewPrefsSchema },
-  feedThread: { input: z.object({ about: z.string().min(1).max(400), before: z.number().nullable() }).strict(), output: z.object({ messages: z.array(feedMsgSchema), more: z.boolean() }) },
+  feedLeftOut: { input: z.object({ since: z.number() }).strict(), output: z.number() },
+  feedThread: { input: z.object({ about: z.string().min(1).max(400), before: z.number().nullable() }).strict(), output: z.object({ messages: z.array(feedMsgSchema), more: z.boolean(), now: z.number(), turnsAt: z.number().nullable() }) },
 });
 
 export const secretBody = z.object({ id: z.string(), rev: z.number().int(), value: z.string().min(1).max(4000), via: z.enum(["desktop", "phone"]) }).strict();

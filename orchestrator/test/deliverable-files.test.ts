@@ -1,14 +1,14 @@
-// A deliverable keeps its own files (2026-11-17). The owner wanted each deliverable browsable as one folder, its files sorted
-// into images, videos and artifacts, with a README to open first; and 12% of proof had gone because it lived in thread
-// worktrees bb removes after archiving. So filing copies the proof into that folder and shows the copy: the proof then
-// outlives its worktree, a revision adds only what is new, big files stay references, and a backfill files the
-// deliverables from before, once.
+// A deliverable keeps its own files: one folder, its files sorted into images, videos and artifacts, with a README to
+// open first. Filing copies the proof into that folder and shows the copy, so the proof outlives the thread worktree bb
+// removes after archiving; a revision adds only what is new, big files stay references, and a backfill files older
+// deliverables once.
 import assert from "node:assert/strict";
 import { after, test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, sep } from "node:path";
 import { Engine, type DeliverResult, type ProofInput } from "../core/engine.ts";
+import { FOLDER_FILES, touches } from "../change-notice.ts";
 import { fileKind, folderFor, keepFile, readmeText, slugOf } from "../core/deliverable-files.ts";
 import type { Deliverable } from "../core/model.ts";
 
@@ -35,12 +35,13 @@ function setup(opts: { files?: boolean; maxBytes?: number; env?: string } = {}) 
   let clock = Date.parse("2026-11-17T18:00:00Z");
   const state = join(scratch, `state-${++n}`);
   let filesOn = opts.files ?? true;
+  const changes: (readonly string[] | null)[] = [];
   const db = new DatabaseSync(":memory:");
   const e = new Engine(db as never, {
     now: () => clock,
     deliver: async (): Promise<DeliverResult> => ({ delivery: "sent" }),
     mirror: () => {},
-    changed: () => {},
+    changed: (t?: readonly string[]) => void changes.push(t ?? null),
     log: () => {},
     files: () => (filesOn ? { dir: join(state, "deliverables"), kept: join(state, "threads"), ...(opts.maxBytes ? { maxBytes: opts.maxBytes } : {}) } : null),
   });
@@ -50,7 +51,7 @@ function setup(opts: { files?: boolean; maxBytes?: number; env?: string } = {}) 
   const place = { roots: [{ path: w.env, hostId: "host-1" }] };
   const deliver = (proof: ProofInput[], extra: { revises?: string; title?: string; points?: { kind: "decision" | "finding"; headline: string; why: string }[] } = {}) =>
     e.deliver(lead, { title: extra.title ?? "Checkout redesign", summary: "Shipped the new flow.", proof, revises: extra.revises ?? null, ...(extra.points ? { points: extra.points } : {}) }, place);
-  return { e, db, lead, thread, w, place, state, deliver, filesOn: (v: boolean) => (filesOn = v), advance: (ms: number) => (clock += ms) };
+  return { e, db, lead, thread, w, place, state, deliver, changes, filesOn: (v: boolean) => (filesOn = v), advance: (ms: number) => (clock += ms) };
 }
 
 const under = (folder: string, kind: string) => (existsSync(join(folder, kind)) ? readdirSync(join(folder, kind)).sort() : []);
@@ -240,6 +241,17 @@ test("a resolving thread's notes go to the newest deliverable that shows its wor
   assert.equal(k.stored === "copied" && k.path, join(shows.folder!, "artifacts", "report.md"));
   assert.match(readFileSync(join(shows.folder!, "README.md"), "utf8"), /\[report\.md\]\(<artifacts\/report\.md>\)/, "the README lists it");
   assert.equal(own.folder !== shows.folder, true);
+});
+
+test("a thread's file kept in a deliverable's folder is named in the change notice, so an open Delivered lists it", () => {
+  const s = setup();
+  const theirs = worktree();
+  const d = s.e.deliver(s.lead, { title: "Thread's work", summary: "s", proof: [{ kind: "text", caption: "c", path: theirs.file("out/t.txt") }] }, { roots: [...s.place.roots, { path: theirs.env, hostId: "host-1" }] });
+  s.changes.length = 0;
+  s.e.keepInDeliverable(d.id, theirs.file("handoff.md", "# handoff"));
+  assert.deepEqual(s.changes, [[FOLDER_FILES]], "no table names a file on disk");
+  assert.ok(touches({ tables: [FOLDER_FILES] }, "deliverableFolders"));
+  assert.ok(!touches({ tables: [FOLDER_FILES] }, "deliverables"), "only the file list reads it again");
 });
 
 test("keepFile never throws: a missing source is reported, not copied", () => {

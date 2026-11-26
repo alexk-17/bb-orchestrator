@@ -169,7 +169,7 @@ test("the feed holds the owner's items and leaves the chatter out (D2, D4)", asy
   assert.ok(!keys.includes(`decision:${deferred.id}`), "a deferred card waits until it comes back");
   assert.ok(!keys.includes(`decision:${triaging.id}`), "a card still with the CoS isn't the owner's yet");
   assert.equal(keys.length, 5, "no mail, notice, direct row or thread status: those stay on Activity");
-  assert.ok(s.feed().leftOut >= 2, "the footer counts what it leaves out");
+  assert.ok(s.e.feedLeftOut(s.feed().leftOutSince) >= 2, "the footer counts what it leaves out");
   s.e.setHold("kite", true);
   assert.ok(!s.feed().posts.some((p) => p.key === `decision:${open.id}`), "a held project's cards aren't shown");
   s.e.setHold("kite", false);
@@ -237,6 +237,34 @@ test("reply counts come from one grouped read and the newest three exchanges rid
   assert.deepEqual(back.messages.map((m) => m.text), ["One?", "Re One?"]);
 });
 
+for (const batchInbox of [false, true]) {
+  test(`batchInbox ${batchInbox ? "on" : "off"}: an open conversation is told when its unanswered message turns "no reply yet", and shows it then`, async () => {
+    const s = setup(batchInbox);
+    const key = `deliverable:${s.deliverable().id}`;
+    const m = s.e.ownerMessage("kite", "Is this the final cut?", null, [], key);
+    await s.step();
+    const mine = () => s.e.feedThread(key, null).messages.find((x) => x.id === m.id)!;
+    assert.equal(mine().resend, false, "not before the resend time");
+    const { now, turnsAt } = s.e.feedThread(key, null);
+    assert.ok(turnsAt !== null && turnsAt > now && turnsAt <= now + 10 * M, "no write marks the resend time: the open conversation is told when to read again");
+    s.advance(turnsAt - now);
+    assert.match(mine().state!, /no reply yet/);
+    assert.equal(mine().resend, true);
+  });
+}
+
+test("a page that doesn't show an unanswered message isn't told when it turns, so its deadline rereads only the pages showing it", async () => {
+  const s = setup(true);
+  const m = s.e.ownerMessage("kite", "Is the preview up?");
+  await s.step();
+  const all = s.feed();
+  assert.equal(all.last?.id, m.id, "every page names the newest message to a lead");
+  assert.ok(all.posts.some((p) => p.key === `msg:${m.id}`) && all.turnsAt !== null, "the page showing it is told");
+  const alerts = s.e.feed({ cursor: null, filter: "alerts" });
+  assert.ok(!alerts.posts.some((p) => p.key === `msg:${m.id}`));
+  assert.equal(alerts.turnsAt, null);
+});
+
 test("the feed pages by activity, so every post shows once", () => {
   const s = setup();
   for (let i = 0; i < 7; i++) {
@@ -282,6 +310,10 @@ for (const batchInbox of [false, true]) {
     }
     const state = (key: string) => s.post(key)!.self!;
     assert.equal(state(`msg:${lead.id}`).resend, false, "not before the resend time");
+    const turnsAt = s.feed().turnsAt;
+    assert.ok(turnsAt !== null && turnsAt > s.feed().now && turnsAt <= s.feed().now + 10 * M, "no write marks the resend time: the page is told when to read again");
+    s.advance(turnsAt - s.feed().now);
+    for (const key of [`msg:${lead.id}`, `msg:${cos.id}`]) assert.equal(state(key).resend, true, `${key}: due at that time, with nothing written`);
     s.advance(11 * M);
     await s.step();
     for (const key of [`msg:${lead.id}`, `msg:${cos.id}`]) {

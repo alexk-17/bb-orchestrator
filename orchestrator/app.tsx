@@ -54,25 +54,24 @@ import { Button } from "./app/ui/button.tsx";
 import { useTouchPhone } from "./app/phone.ts";
 import { Settings } from "lucide-react";
 import { useChangeNotice } from "./app/change-listener.ts";
+import { freshRead, turnDelay } from "./app/fresh-read.ts";
 import { DeliverableIndexProvider, DeliverablePrefetch } from "./app/deliverable-prefetch.tsx";
 
 // Deliverables first (what the owner reviews); the Board is "Activity", last (process, for when they want to look). Its id
 // and sub-path stay "board", so links keep working.
 const VIEWS = [
-  // Home first (2026-11-20): the Feed is Home, at the bare page on web and phone; "feed" links redirect (RENAMED_VIEWS)
+  // the Feed is Home, at the bare page on web and phone; "feed" links redirect (RENAMED_VIEWS)
   { id: "home", subPath: "", label: "Home" },
   { id: "chat", subPath: "chat", label: "Chat" },
-  // Scope (its Scoping group) and Pathways (a section of a project's page) are in Projects since 2026-11-20 (RENAMED_VIEWS)
+  // Scope (its Scoping group) and Pathways (a section of a project's page) are in Projects (RENAMED_VIEWS)
   { id: "projects", subPath: "projects", label: "Projects" },
-  // Requested 2026-11-16: the owner's open PRs, which need review, and the review ask to paste in Slack
+  // the owner's open PRs, which need review, and the review ask to paste in Slack
   { id: "open-prs", subPath: "open-prs", label: "Open PRs" },
-  // 2026-11-20 (the owner's card): Multiplayer, CodeRabbit, Cloud and Game Boy are hidden until used (app/hidden-tabs.ts)
+  // Multiplayer, CodeRabbit, Cloud and Game Boy are hidden until used (app/hidden-tabs.ts)
   { id: "multiplayer", subPath: "multiplayer", label: "Multiplayer" },
-  // 2026-11-18 (the owner's choice): the CodeRabbit review queue, from a contributor's public PR, as a tab of its own
   { id: "coderabbit", subPath: "coderabbit", label: "CodeRabbit" },
-  // Requested 2026-11-13: Cloud Switch moved in as a tab; without a cloud config it says what to set up
+  // without a cloud config it says what to set up
   { id: "cloud", subPath: "cloud", label: "Cloud" },
-  // Requested 2026-11-13: the emulator moved in too
   { id: "gameboy", subPath: "gameboy", label: "Game Boy" },
   { id: "rules", subPath: "rules", label: "Rules" },
   { id: "board", subPath: "board", label: "Activity" },
@@ -81,8 +80,6 @@ const VIEWS = [
 /** The four places (app/nav.ts): hiddenTabs never hides them */
 const PLACES = new Set(MAIN.map((m) => m.id));
 type ViewId = (typeof VIEWS)[number]["id"];
-/** The feed's refetch waits this long after a change notice, so a burst of notices is one read. */
-const FEED_DEBOUNCE_MS = 800;
 
 function viewOf(subPath: string): ViewId {
   return fromPath(subPath, VIEWS).view as ViewId;
@@ -100,9 +97,8 @@ function useScope() {
   return experimental_useRpcQuery({ contract: rpcContract, method: "scope", input: null });
 }
 
-// The badge and the page read needsYou, deliverables and scope through bb's one query cache (measured 2026-11-18: one
-// fetch of each at load with both mounted). Both refetched them on every change notice, and bb's refetch restarts one in
-// flight, so each went to the server twice. While the page is mounted its refetch serves the badge too.
+// The badge and the page read needsYou, deliverables and scope through bb's one query cache, and bb's refetch restarts
+// one in flight: while the page is mounted its refetch serves the badge too, so each goes to the server once.
 let pagesMounted = 0;
 
 /** The rail badge: only the owner's items (cards + interactions, deliverables in review, and the Scope tab's cards), null at 0. */
@@ -131,14 +127,14 @@ function useOrchestratorBadge(): ExperimentalBadge | null {
 }
 
 const LAYOUT_KEY = "orchestrator.layout.v2";
-/** Before split panes (2026-11-20) each pane held only its view: read once, as that view's root. */
+/** The layout before split panes, one view per pane: read once, as that view's root. */
 const LAYOUT_KEY_V1 = "orchestrator.layout.v1";
 const JOURNAL_KEY = "orchestrator.journal.v1";
 /** The Sidebar open or as its icon rail, per browser. */
 const SIDEBAR_KEY = "orchestrator.sidebar.v1";
 function loadRail(): boolean {
   try {
-    // 2026-11-20 (the owner, "Left nav only"): the Sidebar is the page's navigation, open until the owner collapses it
+    // the Sidebar is the page's navigation, open until the owner collapses it
     return localStorage.getItem(SIDEBAR_KEY) === "rail";
   } catch {
     return false;
@@ -311,7 +307,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   // bb's phone layout: the shared phone spacing (ui.tsx LOOK) keys on it
   const phone = useTouchPhone();
   const compact = width > 0 && width < 720;
-  // The fit rule (spec §5, changed 2026-11-20 after the owner's "where did all the other tabs go"): the Sidebar is a rail
+  // The fit rule (spec §5): the Sidebar is a rail
   // only by its toggle, never by itself, so its labels, Home's filters and Tools stay in view. Panes that don't fit
   // beside it show one at a time
   const [railChoice, setRailChoice] = useState(loadRail);
@@ -362,31 +358,29 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
     }
     return f;
   };
-  // the feed's first page: its own debounced refetch, paused while the page is in the background (scope "Risks")
+  // the feed's first page: its own debounced refetch, paused while the page is in the background
   const feed = experimental_useRpcQuery({ contract: rpcContract, method: "feed", input: { cursor: null, filter: "all" } });
   const feedRefetch = useRef(feed.refetch);
   feedRefetch.current = feed.refetch;
-  const feedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const refetchFeed = useCallback(() => {
-    clearTimeout(feedTimer.current);
-    feedTimer.current = setTimeout(() => {
-      if (typeof document === "undefined" || document.visibilityState !== "hidden") void feedRefetch.current();
-    }, FEED_DEBOUNCE_MS);
-  }, []);
+  const [feedReads] = useState(() => freshRead(() => feedRefetch.current()));
   useRealtime(
     CHANGED_CHANNEL,
-    useCallback((n: unknown) => void (touches(n, "feed") && refetchFeed()), [refetchFeed]),
+    useCallback((n: unknown) => void (touches(n, "feed") && feedReads.notice()), [feedReads]),
   );
   useEffect(() => {
     const back = () => {
-      if (document.visibilityState === "visible") void feedRefetch.current();
+      if (document.visibilityState === "visible") feedReads.now();
     };
     document.addEventListener("visibilitychange", back);
     return () => {
       document.removeEventListener("visibilitychange", back);
-      clearTimeout(feedTimer.current);
+      feedReads.stop();
     };
-  }, []);
+  }, [feedReads]);
+  const turnsIn = turnDelay(feed.data);
+  useEffect(() => {
+    feedReads.turnsIn(turnsIn);
+  }, [feed.data, turnsIn, feedReads]);
   const cloud = experimental_useRpcQuery({ contract: pageContract, method: "cs.available", input: null, enabled: shown.has("cloud") });
   const cloudOn = cloud.data?.available === true;
   // every count the page draws is a part of the rail badge's number (kit.ts ownerCounts), so they add up to it
@@ -417,7 +411,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
     refetchBadge(null);
     refetchRest(null);
   }, [refetchBadge, refetchRest]);
-  // each agent's face (app/face.tsx): its Pokémon, and with a personas pack its person (2026-11-18)
+  // each agent's face (app/face.tsx): its Pokémon, and with a personas pack its person
   const mons = useMemo(() => new Map((board.data?.agents ?? []).map((a) => [a.address, { mon: a.mon, dex: a.dex, persona: a.persona }] as const)), [board.data]);
   // each project's accent type (accent.ts), from its agents: none with the pokemon setting off
   const accents = useMemo(() => new Map((board.data?.agents ?? []).filter((a) => a.project && a.monType).map((a) => [a.project!, a.monType] as const)), [board.data]);
@@ -428,7 +422,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
   useRealtime(MULTIPLAYER_CHANNEL, refetchConfig);
   useRealtime(QUEUE_CHANNEL, refetchConfig);
 
-  // Keyboard shortcuts (2026-11-16, for a macropad): one listener, only while this page is drawn and has the focus. keys.ts
+  // Keyboard shortcuts: one listener, only while this page is drawn and has the focus. keys.ts
   // decides what a key is; the focused pane's view says what it does there. A key we act on is swallowed (so Esc closing
   // the cheat sheet does not also go back a page).
   // a Ctrl/Cmd+click inside a pane: the navigation it causes opens in the pane beside (read by render's `to`)
@@ -496,7 +490,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
       threads: live,
     };
   }, [board.data, needs.data, projects.data, config.data, deliverablesAll]);
-  // Requested 2026-11-17: the hiddenTabs setting drops tabs by id or label (lower-cased by the server); it never hides them all
+  // the hiddenTabs setting drops tabs by id or label (lower-cased by the server); it never hides them all
   const inUse = new Set(config.data?.shown ?? []);
   const visible = shownTabs(VIEWS, new Set(config.data?.hiddenTabs ?? []), scopeWaiting, new Set(panes(layout.root).map((p) => p.route.view)), inUse, PLACES);
   const nav = navOf(visible, inUse);
@@ -614,8 +608,7 @@ function OrchestratorPanel({ subPath }: PluginNavPanelProps) {
     const p = findPane(lay.current!, lay.current!.focus)!;
     act(p.id, { view: "home", path: [], params: f === "all" ? {} : { filter: f } }, p.route.view === "home" ? "replace" : "push");
   };
-  // a phone opens on Needs you (2026-11-21, the owner: "mostly you're still living in 'needs you' and 'delivered'"); a
-  // link names its own place, and the web keeps its saved layout
+  // a phone opens on Needs you; a link names its own place, and the web keeps its saved layout
   const landed = useRef(false);
   useEffect(() => {
     if (landed.current || !compact) return;
@@ -876,7 +869,7 @@ export default definePluginApp((app) => {
   app.slots.navPanel({
     id: "orchestrator",
     title: "Orchestrator",
-    icon: "Workflow", // Requested 2026-11-14: a neutral icon, even with Pokémon on (a built-in bb glyph)
+    icon: "Workflow", // a built-in bb glyph, even with Pokémon on
     path: PANEL_PATH,
     component: OrchestratorPanel,
     experimental_useBadge: useOrchestratorBadge,
@@ -884,7 +877,7 @@ export default definePluginApp((app) => {
   });
   // the sidebar: each role agent's Pokémon, role and priority under its thread title
   app.slots.experimental_threadRowMetadata({ id: "agent", order: 0, useData: useRowData, component: RowMeta });
-  // Requested 2026-11-13: change a project's priority from its lead's sidebar row (right-click → Priority)
+  // change a project's priority from its lead's sidebar row (right-click → Priority)
   app.experimental_icons.register({ name: PRIORITY_ICON, component: PriorityIcon });
   app.slots.experimental_threadAction(priorityAction);
   app.experimental_icons.register({ name: ARCHIVE_PROJECT_ICON, component: ArchiveProjectIcon });

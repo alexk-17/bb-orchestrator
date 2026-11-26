@@ -2,9 +2,6 @@
 // approves one, or requests changes in their own words and the lead re-delivers. Decided and withdrawn ones move to the
 // past list below (past.ts, past-view.tsx), with the outputs that aren't any deliverable's proof under its Files filter. Writes go through the page's one write gate (store.ts): one at a time, every button off while one is in
 // flight, and each write carries the revision the owner is looking at (a newer one is refused, never approved blind).
-// On shadcn/ui since 2026-11-17: Card, Textarea, Collapsible folds and the picker rows as ghost buttons.
-// 2026-11-17, every deliverable keeps its own files: a past one shows as PastDeliverable, its files as full items (images
-// and videos inline at full width, the rest as rows) with Open folder; the Files filter lists every file (past-view.tsx).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Markdown, experimental_useRpcQuery, useBbNavigate, useSdk } from "@get-bb/plugin-sdk/app";
 import { X } from "lucide-react";
@@ -50,20 +47,22 @@ type Output = Outputs[number];
 type Query = { data: DeliverableRows | undefined; error: { message: string } | null; refetch: () => Promise<void> };
 
 const TEXT_LINES = 200;
+const DISK_AGAIN_GAP_MS = 1000;
 export const proofSrc = (id: string) => `${WRITE_BASE}${PROOF_ROUTE}?id=${encodeURIComponent(id)}`;
-/** A recorded output's file, through the same route and rules (2026-11-17). */
+/** A recorded output's file, through the same route and rules. */
 export const outputSrc = (id: string) => `${WRITE_BASE}${PROOF_ROUTE}?output=${encodeURIComponent(id)}`;
 
 export { inReview, inScope, onDeliverablesTab } from "./kit.ts";
 import { onDeliverablesTab } from "./kit.ts";
 import { useChangeNotice } from "./change-listener.ts";
+import { spaced } from "./fresh-read.ts";
 
 /** A Markdown proof (a .md or .markdown file) is rendered the way bb renders a chat message, not shown as its source. */
 const isMarkdown = (p: { path?: string | null; caption: string }) => /\.(md|markdown)$/i.test(p.path ?? "");
 
 /**
  * A text proof: the first TEXT_LINES lines of the (already capped) file. A fixed-height box, so Approve never moves;
- * long lines wrap inside the card (2026-11-13: a wide report ran past the card's edge).
+ * long lines wrap inside the card.
  */
 function TextProof({ id, markdown }: { id: string; markdown: boolean }) {
   const [text, setText] = useState<{ lines: string[]; more: number } | { error: string } | null>(null);
@@ -172,13 +171,11 @@ export function ProofView({ p }: { p: Proof }) {
 }
 
 /**
- * The next-action box, then Request changes and the primary button (2026-11-16: "what I usually have to do is say
- * next move: send this to someone"). Empty box: "Done, nothing more" approves and the lead does nothing further. Words
- * in it: "Send to lead" approves and hands the lead those words as an item they must act on and report back on.
- * Request changes opens its own field; the next box's words are never sent as a change request. Off while any write runs.
- * 2026-11-21, the owner: "we need to fix the text bars for like the 'other' option or request changes back to the same
- * one that's there for the talk directly to lead". So the change box is the compact bar (reply-composer.tsx): one
- * bordered field, focused, with a 32 px Cancel (an X) and Send back beside it; in the full card and the phone's closed one.
+ * The next-action box, then Request changes and the primary button. Empty box: "Done, nothing more" approves and the
+ * lead does nothing further. Words in it: "Send to lead" approves and hands the lead those words as an item they must
+ * act on and report back on. Request changes opens its own field; the next box's words are never sent as a change
+ * request. Off while any write runs. The change box is the compact bar (reply-composer.tsx): one bordered field,
+ * focused, with a 32 px Cancel (an X) and Send back beside it; in the full card and the phone's closed one.
  */
 function Review({ d, refetchAll, compact = false }: { d: Deliverable; refetchAll: () => void; compact?: boolean }) {
   const [asking, setAsking] = useState(false);
@@ -258,8 +255,8 @@ function Review({ d, refetchAll, compact = false }: { d: Deliverable; refetchAll
               }
             }}
             maxLength={4000}
-            // one line to start, up to about four as it fills. The placeholder fits one line on a 360 px phone: the field
-            // sizes to it, and the longer "Next move? e.g. forward this to the team" made the empty box two lines tall
+            // one line to start, up to about four as it fills; the field sizes to the placeholder, which fits one line on a
+            // 360 px phone
             className="max-h-28"
             placeholder="Next move? (optional)"
             data-next-text={d.id}
@@ -389,13 +386,13 @@ function Settled({ d }: { d: Deliverable }) {
 }
 
 /**
- * A deliverable whole (2026-11-23, lag): a list row in review is whole already, and so is the card Delivered shows on
+ * A deliverable whole: a list row in review is whole already, and so is the card Delivered shows on
  * its own (core/deliverables-view.ts shownWhole); any other is read with the `deliverable` read when its card draws,
  * and again on each change while it is shown (its PRs' live state). The row's
  * own fields (state, feedback, next) are the list's, which is never older; the revisions are the last whole ones seen,
  * so a card approved in place keeps drawing while it is read again. Null only before its first whole read.
  */
-// the last whole read of each deliverable, kept across mounts (2026-11-24): a card approved in place moves from the
+// the last whole read of each deliverable, kept across mounts: a card approved in place moves from the
 // in-review card to the past one, a new component, and must not draw loading in between
 const wholeSeen = new Map<string, Deliverable>();
 function useWhole(d: Deliverable): Deliverable | null {
@@ -433,8 +430,8 @@ function WholeCard({ d, refetchAll, outputs, outputsAfter, closed = false }: { d
   const media = proof.filter((p) => p.kind === "image" || p.kind === "video");
   const rest = proof.filter((p) => p.kind !== "image" && p.kind !== "video");
   const short = latest ? lessText(latest) : null;
-  // `closed`: Delivered's own list on a phone starts each card closed (2026-11-21, the owner: one card filled the whole
-  // screen); a tap opens it. Where a deliverable is already the opened item (the feed's item, Scope, a past one) it is whole
+  // `closed`: Delivered's own list on a phone starts each card closed; a tap opens it. Where a deliverable is already
+  // the opened item (the feed's item, Scope, a past one) it is whole
   const phone = useTouchPhone();
   const [opened, setOpened] = useState(false);
   if (closed && phone && !opened) return <CompactCard d={d} summary={latest?.summary ?? d.summary} shot={media.find((m) => m.kind === "image") ?? null} refetchAll={refetchAll} onOpen={() => setOpened(true)} />;
@@ -450,7 +447,7 @@ function WholeCard({ d, refetchAll, outputs, outputsAfter, closed = false }: { d
           <span>{when(d.updatedAt)}</span>
         </div>
         <div className="mt-2 min-w-0 [overflow-wrap:anywhere]"><Markdown content={d.summary} /></div>
-        {/* Requested 2026-11-13: "a lot more visual". What it looks like first (screenshots, video), then the typed
+        {/* What it looks like first (screenshots, video), then the typed
             parts (decisions, diagram, root cause, what to change, checks), then the rest of the proof. */}
         {media.length > 0 ? (
           <div data-gallery="" className={cn("mt-3 grid gap-3", media.length > 1 && GALLERY)}>
@@ -506,7 +503,7 @@ function CompactCard({ d, summary, shot, refetchAll, onOpen }: { d: Deliverable;
 }
 
 /**
- * A past deliverable as the owner looks back at it (2026-11-17): what its card said (summary, points, typed parts, how
+ * A past deliverable as the owner looks back at it: what its card said (summary, points, typed parts, how
  * it was settled), then its files as full items: images and videos inline at full width, the rest as rows with name,
  * kind and size, and Open folder; then its links and PRs, and its history.
  */
@@ -582,7 +579,7 @@ function PastWhole({ d, files, folders, refetchAll, outputsAfter }: { d: Deliver
   );
 }
 
-/** A deliverable with points (2026-11-14, "way less text"): pictures, then each decision and finding in a line; the rest closed. */
+/** A deliverable with points: pictures, then each decision and finding in a line; the rest closed. */
 function ShortCard({ d, rev, layout, media, rest, refetchAll, outputs, outputsAfter }: { d: Deliverable; rev: Deliverable["revisions"][number]; layout: NonNullable<ReturnType<typeof lessText>>; media: Proof[]; rest: Proof[]; refetchAll: () => void; outputs: Output[]; outputsAfter: () => void }) {
   const part = (p: (typeof layout.parts)[number]) => {
     switch (p) {
@@ -646,8 +643,7 @@ function ShortCard({ d, rev, layout, media, rest, refetchAll, outputs, outputsAf
 }
 
 /**
- * The projects in the viewer's sidebar order (2026-11-16: the tree's folders "in the same order as the sidebar's project
- * sections"): bb's section list and the Thread list plugin's manualSectionOrder (the sidebar's own preference), read as
+ * The projects in the viewer's sidebar order: bb's section list and the Thread list plugin's manualSectionOrder (the sidebar's own preference), read as
  * the viewer through the page's bb client, applied to the server's placing order. Read once per visit; the placing order if bb can't say.
  */
 const anything = z.unknown();
@@ -672,7 +668,7 @@ function useSidebarOrder(place: ProjectOrder | undefined): ProjectOrder {
 }
 
 /**
- * The Deliverables tab (2026-11-16, Deliverables and Outputs in one): what waits for the owner on top, exactly as before;
+ * The Deliverables tab: what waits for the owner on top;
  * below it every past deliverable and, under Files, the outputs that never became proof. `files`: opened from an old
  * Outputs link, so the list starts on Files.
  */
@@ -693,7 +689,7 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
   const outputs = experimental_useRpcQuery({ contract: rpcContract, method: "outputs", input: null });
   // the sidebar's project order, for the project filter
   const order = experimental_useRpcQuery({ contract: rpcContract, method: "projectOrder", input: null });
-  // every deliverable's own folder, listed (2026-11-17): its files beside its proof, and a thread's notes
+  // every deliverable's own folder, listed: its files beside its proof, and a thread's notes
   const folders = experimental_useRpcQuery({ contract: rpcContract, method: "deliverableFolders", input: null });
   const latestOutputs = useRef({ outputs: outputs.refetch, order: order.refetch, folders: folders.refetch });
   latestOutputs.current = { outputs: outputs.refetch, order: order.refetch, folders: folders.refetch };
@@ -703,20 +699,38 @@ export function DeliverablesView({ q, refetchAll, files = false }: { q: Query; r
     if (touches(n, "deliverableFolders")) void latestOutputs.current.folders();
   }, []);
   useChangeNotice(refetchOutputs);
+  // the file lists read the disk too, which no notice names: read again on each opening, and when the page is shown or its window focused
+  const cached = useRef({ outputs: outputs.data !== undefined, folders: folders.data !== undefined });
+  useEffect(() => {
+    if (cached.current.outputs) void latestOutputs.current.outputs();
+    if (cached.current.folders) void latestOutputs.current.folders();
+    const disk = spaced(() => {
+      void latestOutputs.current.outputs();
+      void latestOutputs.current.folders();
+    }, DISK_AGAIN_GAP_MS);
+    const back = () => document.visibilityState === "visible" && disk.call();
+    document.addEventListener("visibilitychange", back);
+    window.addEventListener("focus", back);
+    return () => {
+      document.removeEventListener("visibilitychange", back);
+      window.removeEventListener("focus", back);
+      disk.stop();
+    };
+  }, []);
   const sorted = useSidebarOrder(order.data);
   const [view, setView] = useState<View>({ ...START, filter: files ? "files" : "decided" });
   useEffect(() => {
     if (files) setView((v) => ({ ...v, filter: "files" }));
   }, [files]);
-  // Search, Files and the rows' file counts read every revision (the index read, 2026-11-23). Delivered first draws once
-  // an index is in, as it drew from the whole list before (2026-11-24: drawing sooner showed counts and search change
-  // under the owner); if it fails, from the rows alone. Its owner reads it again after a notice that touches it, and
-  // only then (deliverable-reads.ts): it is never judged against the list, which may answer after it (Codex, round 2).
+  // Search, Files and the rows' file counts read every revision (the index read). Delivered first draws once an index
+  // is in, so counts and search don't change under the owner; if it fails, from the rows alone. Its owner reads it again
+  // after a notice that touches it, and only then (deliverable-reads.ts): it is never judged against the list, which may
+  // answer after it.
   // the app root's index read, kept warm at idle (deliverable-prefetch.tsx): a read of its own here would read it again
   const index = useDeliverableIndex();
   const drawn = index.error !== null || index.data !== undefined;
   const data = useMemo(() => expand(q.data, index.data), [q.data, index.data]);
-  // Keys (2026-11-16): J/K select a deliverable; A, twice within APPROVE_MS, is "Done, nothing more". It clicks the card's own
+  // Keys: J/K select a deliverable; A, twice within APPROVE_MS, is "Done, nothing more". It clicks the card's own
   // button, so the page lock applies; with words in the next-move box the button is "Send to lead", which A never presses.
   // Only in-review cards carry data-deliverable, so J/K never select a past row.
   useViewKeys("deliverables", root, "[data-deliverable]", (el) => el.dataset.deliverable ?? "", (a, sel) => {

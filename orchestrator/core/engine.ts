@@ -3,14 +3,14 @@
 // Every write is a transaction on the store; delivery to a bb thread is a separate step (`flush`) that the server
 // runs through bb's SDK. An item is written before it is sent, so a crash between the two re-sends it, marked
 // "(again)" — never loses it. Nothing here calls a model: escalation, resends and dead letters are the `tick`.
-import { cosLine, feedPage, feedThread, type CosLineEntry, type FeedFilter, type FeedMsg, type FeedPage, type FeedPrompt, type FeedSource } from "./feed.ts";
+import { cosLine, feedPage, feedThread, leftOutCount, ownerMailPrint, type CosLineEntry, type FeedFilter, type FeedMsg, type FeedPage, type FeedPrompt, type FeedSource, type FeedThread } from "./feed.ts";
 import { BatchInbox, type MailPolicy } from "./batch-inbox.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { extname, isAbsolute, sep } from "node:path";
 import { type Db, migrate, prepareHinted, tx } from "./db.ts";
 import { MON_POOLS, baseOf, builtInMon, familyThreads, formAt, levelFor, monByName, pickMon, pickPackThread, pickType, setPackLines, shownStage, specialtyLines, typeFamily, type Mon, type MonType, type PackLine } from "../mons.ts";
-import { agentPersona, assignPersonas, type AgentPersona, type PersonaPack } from "../personas.ts";
+import { agentPersona, assignPersonas, type AgentPersona, type Persona, type PersonaPack } from "../personas.ts";
 import { blocksSchema, pointsSchema, type Block, type Point } from "../blocks.ts";
 import { ownerWords, type OwnerWords } from "./owner.ts";
 import type { Verdict } from "./clean.ts";
@@ -18,7 +18,7 @@ import { externalBody, externalMailSchema, externalPreview, type ExternalMail } 
 import type { StartedBy } from "./start.ts";
 import { MOOT_MIN_SHARED, MOOT_WINDOW_MS, sharedWords } from "./moot.ts";
 import { cardRefusal } from "./caps.ts";
-import { LIVE } from "../change-notice.ts";
+import { type DerivedTable, FOLDER_FILES, LIVE, NEXT_MOVES, OWNER_MAIL } from "../change-notice.ts";
 import { type DirectImage, type ImageType, MAX_IMAGE_BYTES, MAX_IMAGES, withImages, wordsOf } from "./direct-images.ts";
 import { type BbPrReading, PR_URL_RE } from "./open-prs.ts";
 import type { WaitView } from "./watchers.ts";
@@ -706,6 +706,9 @@ export function checkMatch(raw: unknown): RuleMatch {
   return m;
 }
 
+// the next moves' rows a deliverable shows, and their print for the notice (change-notice.ts NEXT_MOVES)
+const NEXT_MOVES_SQL = `SELECT id, state, outcome, note, closed_at FROM items WHERE kind = 'deliverable.next'`;
+
 export class Engine {
   private _settings: Settings;
   private packLines: Record<string, PackLine> | null = null;
@@ -981,12 +984,22 @@ export class Engine {
    * each live lead's. Null for threads, and whenever the pokemon setting is off or no pack is loaded.
    */
   personaOf(a: Agent, assigned: Map<string, string> | null = null): AgentPersona | null {
-    const pack = this.leadsArePeople ? this.pack : null;
-    if (!pack) return null;
-    const id = a.role === "cos" || a.role === "steward" ? pack.roles?.[a.role] : a.role === "lead" && a.project && a.status !== "archived" ? (assigned ?? this.personaAssignments()).get(a.project) : undefined;
-    const p = id ? pack.personas[id] : undefined;
+    const p = this.packPersona(a, assigned);
     if (!p) return null;
     return agentPersona(p, a.role === "lead" ? null : (this.formOf(a, this.xpOf(a.address).level)?.name ?? a.mon));
+  }
+
+  /** personaOf for a lead, whose persona has no partner and so reads no XP; null for any other agent. */
+  leadPersonaOf(a: Agent, assigned: Map<string, string> | null = null): AgentPersona | null {
+    const p = a.role === "lead" ? this.packPersona(a, assigned) : undefined;
+    return p ? agentPersona(p, null) : null;
+  }
+
+  private packPersona(a: Agent, assigned: Map<string, string> | null): Persona | undefined {
+    const pack = this.leadsArePeople ? this.pack : null;
+    if (!pack) return undefined;
+    const id = a.role === "cos" || a.role === "steward" ? pack.roles?.[a.role] : a.role === "lead" && a.project && a.status !== "archived" ? (assigned ?? this.personaAssignments()).get(a.project) : undefined;
+    return id ? pack.personas[id] : undefined;
   }
 
   /**
@@ -2140,7 +2153,6 @@ export class Engine {
       seen: this.feedSeen(),
       resendMs: this.settings.resendMs,
       batched: this.settings.batchInbox,
-      batchReadAt: (id) => this.batch.readAt(id), // the feed's read receipts: change-notice.ts READS.feed names inbox_entries
       openCards: this.needsYou().cards,
       scopeCards: this.scopeView().flatMap((p) => p.cards),
       live: (address) => live.get(address) ?? (live.set(address, !!this.liveAt(address)), live.get(address)!),
@@ -2154,6 +2166,10 @@ export class Engine {
     return feedPage(this.feedSource(prompts), opts);
   }
 
+  feedLeftOut(since: number): number {
+    return leftOutCount(this.db, since);
+  }
+
   cosLine(before: number | null, limit = 40): { entries: CosLineEntry[]; more: boolean } {
     return cosLine(this.feedSource(), before, limit, (about) => {
       const p = this.post(about);
@@ -2161,7 +2177,7 @@ export class Engine {
     });
   }
 
-  feedThread(about: string, before: number | null, limit = 100): { messages: FeedMsg[]; more: boolean } {
+  feedThread(about: string, before: number | null, limit = 100): FeedThread {
     return feedThread(this.feedSource(), about, before, limit);
   }
 
@@ -5418,6 +5434,7 @@ export class Engine {
     const k = keepFile(d.folder, src, this.ports.files?.()?.maxBytes ?? COPY_MAX);
     if (k.stored === "failed") throw new Error(`${src} not copied into ${d.folder}: ${k.why}`);
     this.readme(d);
+    this.ports.changed([FOLDER_FILES]);
     return k;
   }
 
@@ -5695,9 +5712,14 @@ export class Engine {
    */
   deliverableNext(d: Deliverable): DeliverableNext | null {
     if (!d.next) return null;
-    const it = this.item(d.next.item);
+    const it = this.db.prepare(`${NEXT_MOVES_SQL} AND id = ?`).get(d.next.item) as { state: string; outcome: string | null; note: string | null; closed_at: number | null } | undefined;
     const state = it?.state === "closed" ? "closed" : it?.state === "dead" ? "dead" : "open";
-    return { ...d.next, state, outcome: state === "closed" ? (it?.outcome ?? null) : null, note: state === "closed" ? (it?.note ?? null) : null, closedAt: state === "closed" ? (it?.closedAt ?? null) : null };
+    return { ...d.next, state, outcome: state === "closed" ? (it?.outcome ?? null) : null, note: state === "closed" ? (it?.note ?? null) : null, closedAt: state === "closed" ? (it?.closed_at ?? null) : null };
+  }
+
+  /** What each derived notice table stands for, printed (write-log.ts DerivedTables). */
+  changePrints(): Record<DerivedTable, () => string> {
+    return { [NEXT_MOVES]: () => JSON.stringify(this.db.prepare(`${NEXT_MOVES_SQL} ORDER BY id`).all()), [OWNER_MAIL]: () => ownerMailPrint(this.db) };
   }
 
   /** The owner sends the revision they saw back with their words. The lead must act on it and re-deliver (`revises`). */

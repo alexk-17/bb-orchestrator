@@ -1,4 +1,4 @@
-// The read map against the code (lag fix, 2026-11-24). change-reads.test.ts runs the reads on a made-up seed, so it only
+// The read map against the code. change-reads.test.ts runs the reads on a made-up seed, so it only
 // sees the tables the seed's data leads them to: it missed a card's PR (no seeded card had a PR block), and the persona
 // paths (no pack is loaded there). A screen that misses a change stays stale until some other notice refetches it. Here
 // each read's handler in server.ts is followed through every Engine method and module function it can call, and every
@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import ts from "typescript";
-import { BB, LIVE, READS, STATUS, type ChangeRead } from "../change-notice.ts";
+import { BB, DERIVED, FOLDER_FILES, LIVE, READS, STATUS, type ChangeRead, type DerivedTable } from "../change-notice.ts";
+import { withinKinds } from "./fixtures/derived-sql.ts";
 
 const ROOT = join(import.meta.dirname, "..");
 const FILES = ["server.ts", "personas.ts", "blocks.ts", "board-since.ts", ...readdirSync(join(ROOT, "core")).filter((f) => f.endsWith(".ts")).map((f) => `core/${f}`)];
@@ -21,12 +22,11 @@ const DECLARED_UNREACHED: Partial<Record<ChangeRead, Record<string, string>>> = 
   projects: { external_mail: "the mail tables go together (ITEMS)" },
   directHistory: { external_mail: "the mail tables go together (ITEMS)" },
   projectHistory: { external_mail: "the mail tables go together (ITEMS)", direct_images: "the mail tables go together (ITEMS)" },
-  feed: { external_mail: "the mail tables go together (ITEMS)" },
 };
 /** Not tables: what a write's change names besides them (change-notice.ts). */
-const PSEUDO = new Set<string>([STATUS, LIVE, BB]);
+const PSEUDO = new Set<string>([STATUS, LIVE, BB, FOLDER_FILES, ...Object.keys(DERIVED)]);
 
-type Fn = { file: string; tables: Set<string>; calls: Set<string> };
+type Fn = { file: string; tables: Set<string>; sqls: Set<string>; calls: Set<string> };
 
 function sqlTables(text: string): string[] {
   return /\bSELECT\b/i.test(text) ? [...text.matchAll(SQL_TABLE)].map((m) => m[1]!.toLowerCase()) : [];
@@ -36,7 +36,7 @@ function sqlTables(text: string): string[] {
 function index() {
   const sources = FILES.map((f) => [f, ts.createSourceFile(f, readFileSync(join(ROOT, f), "utf8"), ts.ScriptTarget.Latest, true)] as const);
   // module-level SQL strings (a fragment a query interpolates), by file and, when exported, by name alone
-  const consts = new Map<string, string[]>();
+  const consts = new Map<string, string>();
   const textOf = (n: ts.Node): string | null =>
     ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) ? n.text : ts.isTemplateExpression(n) ? n.head.text + n.templateSpans.map((s) => ` ? ${s.literal.text}`).join("") : null;
   for (const [f, sf] of sources)
@@ -46,19 +46,25 @@ function index() {
           const text = d.initializer && ts.isIdentifier(d.name) ? textOf(d.initializer) : null;
           if (text === null) continue;
           const name = (d.name as ts.Identifier).text;
-          consts.set(`${f}:${name}`, sqlTables(text));
-          if (st.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) consts.set(`*:${name}`, sqlTables(text));
+          consts.set(`${f}:${name}`, text);
+          if (st.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) consts.set(`*:${name}`, text);
         }
   const fns = new Map<string, Fn>();
   const byName = new Map<string, string[]>();
   // `this.<field>.<method>` in the engine: the fields that read the database, by their class
   const FIELDS: Record<string, string> = { batch: "core/batch-inbox.ts:BatchInbox" };
   const add = (key: string, node: ts.Node, file: string, inEngine: boolean, cls: string | null = null) => {
-    const fn: Fn = { file, tables: new Set(), calls: new Set() };
+    const fn: Fn = { file, tables: new Set(), sqls: new Set(), calls: new Set() };
+    const sql = (text: string) => {
+      const tables = sqlTables(text);
+      for (const t of tables) fn.tables.add(t);
+      if (tables.length) fn.sqls.add(text);
+    };
     const visit = (n: ts.Node) => {
       const text = textOf(n);
-      if (text !== null) for (const t of sqlTables(text)) fn.tables.add(t);
-      if (ts.isIdentifier(n)) for (const t of consts.get(`${file}:${n.text}`) ?? consts.get(`*:${n.text}`) ?? []) fn.tables.add(t);
+      if (text !== null) sql(text);
+      const named = ts.isIdentifier(n) ? (consts.get(`${file}:${n.text}`) ?? consts.get(`*:${n.text}`)) : undefined;
+      if (named !== undefined) sql(named);
       if (ts.isPropertyAccessExpression(n)) {
         const obj = n.expression;
         // a call, or a method passed as a value
@@ -105,8 +111,8 @@ function index() {
   return { fns, byName, handlers };
 }
 
-/** Each table a read's handler can reach, with the call path to it. */
-function reach(ix: ReturnType<typeof index>, read: string): Map<string, string> {
+/** Each table a read's handler can reach, with the call path to it; `sqls`: every SQL text it can run, with its path. */
+function reach(ix: ReturnType<typeof index>, read: string, sqls = new Map<string, string>()): Map<string, string> {
   const out = new Map<string, string>();
   const seen = new Set<string>();
   const stack: [string, string[]][] = [[`rpc:${read}`, [`rpc:${read}`]]];
@@ -117,6 +123,7 @@ function reach(ix: ReturnType<typeof index>, read: string): Map<string, string> 
     const fn = ix.fns.get(key);
     if (!fn) continue;
     for (const t of fn.tables) if (!out.has(t)) out.set(t, path.join(" > "));
+    for (const q of fn.sqls) if (!sqls.has(q)) sqls.set(q, path.join(" > "));
     for (const c of fn.calls) {
       if (!c.startsWith("@")) stack.push([c, [...path, c]]);
       else {
@@ -135,8 +142,16 @@ test("every table a read's code can SELECT is in its READS entry", () => {
     assert.ok(ix.handlers.has(m), `no handler for ${m} in server.ts`);
     const declared = READS[m];
     if (!declared) continue; // refetched on every change
-    // sqlite_master is the schema: no write names it, and a schema change already makes the notice null (refetch all)
-    for (const [t, path] of reach(ix, m)) if (t !== "sqlite_master" && !(declared as readonly string[]).includes(t)) missing.push(`${m} reads ${t} via ${path}`);
+    const sqls = new Map<string, string>();
+    const reached = reach(ix, m, sqls);
+    const derived = (Object.keys(DERIVED) as DerivedTable[]).filter((d) => (declared as readonly string[]).includes(d));
+    for (const [t, path] of reached) {
+      // sqlite_master is the schema: no write names it, and a schema change already makes the notice null (refetch all)
+      if (t === "sqlite_master" || (declared as readonly string[]).includes(t)) continue;
+      const kinds = derived.map((d) => (DERIVED[d] as Record<string, readonly string[]>)[t]).find((k) => k !== undefined);
+      if (kinds === undefined) missing.push(`${m} reads ${t} via ${path}`);
+      else for (const [q, via] of sqls) if (sqlTables(q).includes(t) && !withinKinds(q, kinds)) missing.push(`${m} reads ${t} beyond its derived table's kinds (${kinds.join(", ")}) via ${via}: ${q.slice(0, 120)}`);
+    }
   }
   assert.deepEqual(missing, [], "add each to change-notice.ts READS, or the screen misses that change");
 });

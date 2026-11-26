@@ -1,11 +1,11 @@
-// The change notice's tables (core/write-log.ts; lag fix 2026-11-23). Each screen refetches only the reads a notice
+// The change notice's tables (core/write-log.ts). Each screen refetches only the reads a notice
 // names, so a write the notice misses is a screen that never updates: these pin what a write is reported as, and that
 // anything the recorder can't name refetches everything.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { ChangeTables, eventKindAt, recordWrites, writtenTables } from "../core/write-log.ts";
-import { KNOWN_TABLES, STATUS } from "../change-notice.ts";
+import { ChangeTables, DerivedTables, eventKindAt, recordWrites, writtenTables } from "../core/write-log.ts";
+import { KNOWN_TABLES, NEXT_MOVES, OWNER_MAIL, STATUS } from "../change-notice.ts";
 import { Engine } from "../core/engine.ts";
 import type { Db } from "../core/db.ts";
 import { statusParams } from "../core/status.ts";
@@ -56,6 +56,49 @@ test("the recorder reports a write after it ran, a status event as STATUS, and r
   assert.deepEqual(seen.length, 2);
 });
 
+test("a write that changed no row names no table; one that changed a row, and a schema change, still do", () => {
+  const { db, seen } = recorded();
+  db.exec("CREATE TABLE items (id TEXT PRIMARY KEY, state TEXT)");
+  db.exec("CREATE TABLE inbox_entries (item_id TEXT UNIQUE)");
+  assert.deepEqual(seen, [["*"], ["*"]], "a schema change is everything, though it changes no row");
+  seen.length = 0;
+  db.prepare("INSERT INTO items (id, state) VALUES (?, ?)").run("i-1", "pending");
+  assert.deepEqual(seen, [["items"]]);
+  seen.length = 0;
+  db.prepare("INSERT OR IGNORE INTO items (id, state) VALUES (?, ?)").run("i-1", "pending");
+  db.prepare("UPDATE items SET state = 'closed' WHERE id = ?").run("i-none");
+  db.prepare("DELETE FROM items WHERE id = ?").run("i-none");
+  db.prepare("INSERT INTO items (id, state) VALUES (?, ?) ON CONFLICT (id) DO NOTHING").run("i-1", "x");
+  const sync = "INSERT OR IGNORE INTO inbox_entries (item_id) SELECT id FROM items WHERE NOT EXISTS (SELECT 1 FROM inbox_entries e WHERE e.item_id = items.id)";
+  db.exec(sync);
+  assert.deepEqual(seen, [["inbox_entries"]], "only the sync that added a row");
+  seen.length = 0;
+  db.exec(sync);
+  db.prepare("UPDATE items SET state = 'closed' WHERE id = ?").run("i-1");
+  assert.deepEqual(seen, [["items"]], "the same sync again adds nothing; the close changed a row");
+});
+
+test("a batched-inbox flush with nothing new names no table, so no screen refetches on the clock's pass", async () => {
+  const { db, seen } = recorded();
+  let t = 1_000;
+  const e = new Engine(db, { now: () => t, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} }, { owner: "Robin", batchInbox: true, inboxDebounceMs: 2000, inboxGapMs: 120_000 });
+  const cos = e.register("T-cos", "cos", null);
+  const lead = e.register("T-lead", "lead", "kite");
+  e.setStatus("T-lead", "idle");
+  e.send(cos, lead.address, "first", null);
+  await e.flush();
+  t += 3000;
+  await e.flush();
+  t += 3000;
+  seen.length = 0;
+  await e.flush();
+  t += 5000;
+  await e.flush();
+  assert.deepEqual([...seen], [], "nothing changed: no table, no refetch");
+  e.send(cos, lead.address, "second", null);
+  assert.ok(seen.flat().includes("inbox_entries"), "new mail still names the inbox");
+});
+
 test("the engine runs on the recorded database, and Engine.setStatus is reported as STATUS alone", () => {
   const { db, seen } = recorded();
   const e = new Engine(db, { now: () => 1_000, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} }, { owner: "Robin" });
@@ -74,7 +117,7 @@ test("the notice: the tables written; an unmapped table, or a call naming everyt
   assert.deepEqual(n.take(), [], "taken: starts over");
 
   // the flush re-announces writes the last notice carried (Engine.changedSinceFlush): nothing new, so no mapped read
-  // refetches; before this, it made every screen refetch everything a second time
+  // refetches
   n.call();
   assert.deepEqual(n.take(), []);
 
@@ -88,7 +131,7 @@ test("the notice: the tables written; an unmapped table, or a call naming everyt
   assert.equal(n.take(), null);
 });
 
-// The lead wake gap (2026-11-24) logs each wake in inbox_wake_log. An unmapped table makes the notice null, and every
+// The lead wake gap logs each wake in inbox_wake_log. An unmapped table makes the notice null, and every
 // open screen refetches everything: at each wake, the cost the read map was built to remove.
 test("a lead's wake and its gap's log keep the notice to named tables, not everything", async () => {
   const { db, seen } = recorded();
@@ -110,8 +153,8 @@ test("a lead's wake and its gap's log keep the notice to named tables, not every
   assert.notEqual(n.take(), null, `every table written is mapped: ${[...written].filter((x) => !KNOWN_TABLES.has(x)).join(", ")}`);
 });
 
-// The work board (migrations 42-45) writes tasks, task_moves and task_prs on a lead's status, a plan card and a
-// thread's PR. Unmapped, each of those writes would make every open screen refetch everything, as the wake log did.
+// The work board writes tasks, task_moves and task_prs on a lead's status, a plan card and a thread's PR. Unmapped,
+// each of those writes would make every open screen refetch everything.
 test("a lead's plan, its thread and the thread's PR keep the notice to named tables, not everything", () => {
   const { db, seen } = recorded();
   const e = new Engine(db, { now: () => 1_000, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} }, { owner: "Robin" });
@@ -130,4 +173,29 @@ test("a lead's plan, its thread and the thread's PR keep the notice to named tab
   n.wrote([...written]);
   n.call();
   assert.notEqual(n.take(), null, `every table written is mapped: ${[...written].filter((x) => !KNOWN_TABLES.has(x)).join(", ")}`);
+});
+
+test("a derived table is named when its print moved since the last notice that wrote its tables, and only then", () => {
+  let print = "a";
+  let calls = 0;
+  const failures: string[] = [];
+  let mail = "m";
+  const d = new DerivedTables({ [NEXT_MOVES]: () => (calls++, print), [OWNER_MAIL]: () => mail }, (name) => failures.push(name));
+  assert.deepEqual(d.add(["items"]), ["items", NEXT_MOVES, OWNER_MAIL], "the first print has nothing to match: named");
+  assert.deepEqual(d.add(["items"]), ["items"], "mail that moved no next move");
+  calls = 0;
+  assert.deepEqual(d.add(["agents"]), ["agents"]);
+  assert.deepEqual(d.add([]), []);
+  assert.equal(calls, 0, "no table of its written: not printed");
+  print = "b";
+  assert.deepEqual(d.add(["inbox_entries", "items"]), ["inbox_entries", "items", NEXT_MOVES]);
+  mail = "n";
+  assert.deepEqual(d.add(["inbox_entries"]), ["inbox_entries", OWNER_MAIL], "a receipt: the owner's mail only");
+  print = "c";
+  assert.equal(d.add(null), null, "everything refetches anyway");
+  assert.deepEqual(d.add(["items"]), ["items"], "the null notice's print is the one matched next");
+  const broken = new DerivedTables({ [NEXT_MOVES]: () => { throw new Error("made-up"); }, [OWNER_MAIL]: () => mail }, (name) => failures.push(name));
+  assert.deepEqual(broken.add(["items"]), ["items", NEXT_MOVES, OWNER_MAIL], "a print that fails names it");
+  assert.deepEqual(broken.add(["items"]), ["items", NEXT_MOVES]);
+  assert.deepEqual(failures, [NEXT_MOVES, NEXT_MOVES]);
 });

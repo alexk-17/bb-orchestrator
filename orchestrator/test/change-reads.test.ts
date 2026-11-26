@@ -6,11 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import plugin from "../server.ts";
 import { Engine } from "../core/engine.ts";
-import { BB, KNOWN_TABLES, LIVE, READS, STATUS, touches, type ChangeRead } from "../change-notice.ts";
+import { BB, DERIVED, KNOWN_TABLES, LIVE, NEXT_MOVES, OWNER_MAIL, READS, STATUS, touches, type ChangeRead, type DerivedTable } from "../change-notice.ts";
 import { statusParams } from "../core/status.ts";
 import { WRITES } from "../contract.ts";
-import { ChangeTables, recordWrites } from "../core/write-log.ts";
+import { ChangeTables, DerivedTables, recordWrites } from "../core/write-log.ts";
 import { pr, seedBusy } from "./fixtures/busy-seed.ts";
+import { withinKinds } from "./fixtures/derived-sql.ts";
 
 const roots: string[] = [];
 after(() => {
@@ -37,13 +38,14 @@ async function host(opts: { batchInbox?: boolean; kv?: unknown } = {}) {
   const raw = new DatabaseSync(join(root, "data.db"));
   raw.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = OFF");
   const reads = new Set<string>();
+  const sqls = new Set<string>();
   const db: any = {
     name: join(root, "data.db"),
     exec: (sql: string) => raw.exec(sql),
     prepare: (sql: string) => {
       const st = raw.prepare(sql);
       const t = readTables(sql);
-      const mark = () => t.forEach((x) => reads.add(x));
+      const mark = () => (t.forEach((x) => reads.add(x)), t.length && sqls.add(sql));
       return { run: (...a: any[]) => st.run(...a), get: (...a: any[]) => (mark(), st.get(...a)), all: (...a: any[]) => (mark(), st.all(...a)), iterate: (...a: any[]) => (mark(), st.iterate(...a)) };
     },
     close: () => raw.close(),
@@ -52,6 +54,7 @@ async function host(opts: { batchInbox?: boolean; kv?: unknown } = {}) {
   const seedTables = new ChangeTables(KNOWN_TABLES);
   const seedEngine = new Engine(recordWrites(raw as never, (t) => seedTables.wrote(t)) as never, { now: () => clock.t, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: (t?: readonly string[]) => seedTables.call(t), log: () => {}, files: () => ({ dir: join(root, "state", "deliverables"), kept: join(root, "state", "threads") }) } as never, { batchInbox: opts.batchInbox ?? false, owner: "Robin" });
   const seeded = seedBusy(seedEngine, (ms) => (clock.t += ms), proof);
+  const seedDerived = new DerivedTables(seedEngine.changePrints());
   const sdkCalls: string[] = [];
   const warnings: string[] = [];
   const prompts = new Map<string, unknown[]>();
@@ -143,14 +146,14 @@ async function host(opts: { batchInbox?: boolean; kv?: unknown } = {}) {
     assert.equal(r.status, 200, JSON.stringify(r.o));
     return r.o;
   };
-  const seedNotice = () => ({ tables: seedTables.take() });
+  const seedNotice = () => ({ tables: seedDerived.add(seedTables.take()) });
   seedNotice();
   const tool = async (name: string, raw: unknown, threadId: string) => {
     const t = tools.get(name)!;
     const r = await t.execute(t.parameters.parse(raw), { threadId });
     return { ok: !r.isError, text: r.content[0]!.text as string };
   };
-  return { raw, reads, seeded, seedEngine, seedNotice, sdkCalls, warnings, slowThreads, prompts, read, events, post, tool, notices, announce, quiet, calm, stop, settingsChange, settingsValues: () => settingsValues };
+  return { raw, reads, sqls, seeded, seedEngine, seedNotice, sdkCalls, warnings, slowThreads, prompts, read, events, post, tool, notices, announce, quiet, calm, stop, settingsChange, settingsValues: () => settingsValues };
 }
 
 const INPUTS: Record<ChangeRead, unknown> = {
@@ -169,14 +172,19 @@ const INPUTS: Record<ChangeRead, unknown> = {
   directHistory: { slug: "kite-app" },
   projectBook: { slug: "kite-app" },
   projectHistory: { slug: "kite-app" },
+  feedLeftOut: { since: 0 },
   feed: { cursor: null, filter: "all" },
+  feedThread: null,
   workBoard: { since: 0, project: null },
   boardSince: { since: 0, project: null },
   viewPrefs: null,
 };
 
-const inputOf = (h: { raw: unknown }, m: ChangeRead) =>
-  m === "deliverable" ? { id: ((h.raw as { prepare: (q: string) => { get: (t: string) => unknown } }).prepare("SELECT id FROM deliverables WHERE title = ?").get("Made-up deliverable with a next move") as { id: string }).id } : INPUTS[m];
+const inputOf = (h: { raw: unknown }, m: ChangeRead) => {
+  if (m !== "deliverable" && m !== "feedThread") return INPUTS[m];
+  const { id } = (h.raw as { prepare: (q: string) => { get: (t: string) => unknown } }).prepare("SELECT id FROM deliverables WHERE title = ?").get("Made-up deliverable with a next move") as { id: string };
+  return m === "deliverable" ? { id } : { about: `deliverable:${id}`, before: null };
+};
 
 for (const batchInbox of [false, true])
 test(`every read reads only the tables its READS entry declares${batchInbox ? " (batched inbox on)" : ""}`, async () => {
@@ -186,9 +194,16 @@ test(`every read reads only the tables its READS entry declares${batchInbox ? " 
     const declared = READS[m];
     if (!declared) continue;
     h.reads.clear();
+    h.sqls.clear();
     await h.read(m, inputOf(h, m));
-    // sqlite_master is the schema: no write names it, a schema change refetches all
-    for (const t of h.reads) if (t !== "sqlite_master" && !(declared as readonly string[]).includes(t)) missing.push(`${m} reads ${t}`);
+    const derived = (Object.keys(DERIVED) as DerivedTable[]).filter((d) => (declared as readonly string[]).includes(d));
+    for (const t of h.reads) {
+      // sqlite_master is the schema: no write names it, a schema change refetches all
+      if (t === "sqlite_master" || (declared as readonly string[]).includes(t)) continue;
+      const kinds = derived.map((d) => (DERIVED[d] as Record<string, readonly string[]>)[t]).find((k) => k !== undefined);
+      if (kinds === undefined) missing.push(`${m} reads ${t}`);
+      else for (const q of h.sqls) if (readTables(q).includes(t) && !withinKinds(q, kinds)) missing.push(`${m} reads ${t} beyond ${kinds.join(", ")}: ${q.slice(0, 120)}`);
+    }
   }
   h.stop.abort();
   assert.deepEqual(missing, [], "add each to change-notice.ts READS, or the screen misses that change");
@@ -328,8 +343,8 @@ test("the notice after each change refetches the reads that show it, and not the
 
   await h.events.get("thread.idle")!({ thread: { id: t.threadId }, lastAssistantText: "Made-up: done" });
   await h.quiet();
-  assert.ok(touches(last(), "feed"));
-  assert.ok(touches(last(), "deliverables"), "mail can be a next move's outcome, which Delivered shows");
+  assert.ok(touches(last(), "feedLeftOut") && !touches(last(), "feed"), `mail between agents: the Feed's count, not its list: ${JSON.stringify(last())}`);
+  assert.ok(last().tables!.includes("items") && !touches(last(), "deliverables") && !touches(last(), "deliverable"), `mail that is no next move leaves Delivered: ${JSON.stringify(last())}`);
   assert.ok(!touches(last(), "config"));
 
   const card = h.seeded.open[0]!;
@@ -344,10 +359,18 @@ test("the notice after each change refetches the reads that show it, and not the
 
   const d = h.seeded.delivered[0]!;
   h.notices.length = 0;
-  await h.post(WRITES.approve, { id: d.id, rev: d.rev, note: null });
+  await h.post(WRITES.approve, { id: d.id, rev: d.rev, note: null, next: "Made-up: send it to the team" });
   await h.quiet();
   assert.ok(touches(last(), "deliverables"), JSON.stringify(last()));
   assert.ok(h.notices.every((n: any) => Array.isArray(n.tables) && !n.tables.includes("*")), JSON.stringify(h.notices));
+  type Next = { next: { item: string; state: string; note: string | null } };
+  const move = ((await h.read("deliverable", { id: d.id })) as Next).next;
+  assert.equal(move.state, "open");
+  h.notices.length = 0;
+  assert.ok((await h.tool("orch_ack", { id: move.item, outcome: "done", note: "Made-up: sent" }, h.seeded.leads[0]!.threadId)).ok);
+  await h.quiet();
+  assert.ok(h.notices.some((n) => touches(n, "deliverables")) && h.notices.some((n) => touches(n, "deliverable")), `the lead's ack of a next move: ${JSON.stringify(h.notices)}`);
+  assert.deepEqual(((await h.read("deliverable", { id: d.id })) as Next).next.note, "Made-up: sent", "Delivered shows the move's outcome");
 
   h.notices.length = 0;
   await h.events.get("interaction.pending")!({ thread: { id: t.threadId }, interaction: { id: "ix-2" } });
@@ -502,6 +525,12 @@ test("each change's notice touches every read whose answer it changed", async (t
   await change("thread idle", () => h.events.get("thread.idle")!({ thread: { id: t.threadId }, lastAssistantText: "Made-up: done" }));
   await change("thread archived", () => h.events.get("thread.archived")!({ thread: { id: threads[9]!.threadId } }));
   await change("XP", () => h.seedEngine.gainXp(threads[3]!.threadId, 50_000_000, 1));
+  const d = h.seeded.delivered[1]!;
+  await change("approved with a next move", () => h.post(WRITES.approve, { id: d.id, rev: d.rev, note: null, next: "Made-up: hand it over" }));
+  const item = (h.raw.prepare("SELECT id FROM items WHERE kind = 'deliverable.next' AND ref = ?").get(d.id) as { id: string }).id;
+  assert.ok((await change("the lead acks the next move", () => h.seedEngine.ack(h.seeded.leads[1]!, item, "done", "Made-up: handed over"))).includes("deliverables"), "Delivered shows the outcome");
+  await change("mail to a lead", () => h.seedEngine.send(cos, leads[1]!.address, "Made-up note", null));
+  assert.ok((await change("an output recorded", () => h.seedEngine.addOutput(leads[1]!, { title: "Made-up link output", kind: "link", url: "https://example.test/made-up" }, { roots: [], hostId: null }))).includes("outputs"), "Files lists it");
   h.stop.abort();
   assert.deepEqual(missed, [], "add the table each names to that read's change-notice.ts READS entry");
 });
@@ -525,18 +554,99 @@ test("which change refetches which read", () => {
   const reads = (...names: string[]) => Object.keys(READS).filter((m) => names.includes(m) || READS[m as ChangeRead] === null);
   assert.deepEqual(touched({}), Object.keys(READS));
   assert.deepEqual(touched({ tables: null }), Object.keys(READS));
-  assert.deepEqual(touched({ tables: [] }), ["outputs", "deliverableFolders", "projectBook"]);
+  assert.deepEqual(touched({ tables: [] }), ["projectBook"], "Delivered's file lists read again on each opening, not on every notice");
+  assert.deepEqual(touched({ tables: ["outputs"] }), reads("outputs"));
   assert.deepEqual(touched({ tables: [STATUS] }), reads("needsYou", "board", "projects", "agents", "scope", "projectHistory", "workBoard"));
-  assert.deepEqual(touched({ tables: ["deliverables"] }), reads("projects", "scope", "deliverables", "deliverable", "deliverableIndex", "feed", "workBoard", "boardSince"));
-  assert.deepEqual(touched({ tables: ["decisions"] }), reads("needsYou", "board", "projects", "scope", "projectHistory", "feed", "workBoard", "boardSince"));
+  assert.deepEqual(touched({ tables: ["deliverables"] }), reads("projects", "scope", "deliverables", "deliverable", "deliverableIndex", "deliverableFolders", "feed", "feedThread", "workBoard", "boardSince"));
+  assert.deepEqual(touched({ tables: ["decisions"] }), reads("needsYou", "board", "projects", "scope", "projectHistory", "feed", "feedThread", "workBoard", "boardSince"));
   assert.deepEqual(touched({ tables: [BB] }), reads("needsYou", "agents", "scope", "feed"));
-  assert.deepEqual(touched({ tables: ["items"] }), reads("board", "projects", "deliverables", "deliverable", "directHistory", "projectHistory", "feed"));
+  assert.deepEqual(touched({ tables: ["items"] }), reads("board", "projects", "directHistory", "projectHistory", "feedLeftOut"), "mail: Delivered only on a next move's, the Feed's list only on the owner's");
+  assert.deepEqual(touched({ tables: ["inbox_entries"] }), reads());
+  assert.deepEqual(touched({ tables: [NEXT_MOVES] }), reads("deliverables", "deliverable"));
+  assert.deepEqual(touched({ tables: [OWNER_MAIL] }), reads("feed", "feedThread"), "an open conversation shows the owner's mail too");
   assert.deepEqual(touched({ tables: ["prs"] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "deliverable", "projectHistory", "workBoard", "boardSince"));
+  assert.deepEqual(touched({ tables: ["xp"] }), reads("board", "projects", "agents"), "Delivered shows a lead's persona, which no XP changes");
   assert.deepEqual(touched({ tables: ["pr_readings"] }), reads("board", "workBoard", "boardSince"), "a PR read merged can ship a card off the board, and its count with it");
   assert.deepEqual(touched({ tables: ["tasks", "task_moves"] }), reads("workBoard", "boardSince"));
   assert.deepEqual(touched({ tables: ["task_prs"] }), reads("workBoard", "boardSince"));
   assert.deepEqual(touched({ tables: ["task_moves"] }), reads("boardSince"));
-  assert.deepEqual(touched({ tables: [STATUS, LIVE] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "deliverable", "projectHistory", "feed", "workBoard"));
+  assert.deepEqual(touched({ tables: [STATUS, LIVE] }), reads("needsYou", "board", "projects", "agents", "scope", "deliverables", "deliverable", "projectHistory", "feed", "feedThread", "workBoard"));
+});
+
+test("mail between agents moves the Feed's count and leaves its list; the owner's mail, its answer and its receipt refetch the list", async (tc) => {
+  const h = await host({ batchInbox: true });
+  tc.after(() => h.stop.abort());
+  await h.announce();
+  const lead = h.seeded.leads[0]!;
+  const thread = h.seeded.threads[0]!;
+  type Page = { leftOutSince: number; posts: { key: string; self: { id: string; state: string | null } | null; thread: { who: string; text: string }[] }[] };
+  const page = async () => (await h.read("feed", INPUTS.feed)) as Page;
+  const { leftOutSince } = await page();
+  const count = async () => (await h.read("feedLeftOut", { since: leftOutSince })) as number;
+  const list = async () => JSON.stringify((await page()).posts);
+  const settled = async () => {
+    await h.calm();
+    await h.quiet();
+  };
+  const before = { count: await count(), list: await list() };
+
+  h.notices.length = 0;
+  assert.ok((await h.tool("orch_send", { to: lead.address, text: "Made-up progress note" }, thread.threadId)).ok);
+  await settled();
+  assert.ok(h.notices.some((n) => touches(n, "feedLeftOut")), `the count refetches: ${JSON.stringify(h.notices)}`);
+  assert.ok(!h.notices.some((n) => touches(n, "feed")), `the list doesn't: ${JSON.stringify(h.notices)}`);
+  assert.ok((await count()) > before.count, "the count moved");
+  assert.equal(await list(), before.list, "the list shows nothing new");
+
+  h.notices.length = 0;
+  await h.post(WRITES.directMessage, { slug: lead.project!, text: "Made-up question for the lead", followUp: null });
+  await settled();
+  assert.ok(h.notices.some((n) => touches(n, "feed")), `the owner's message: ${JSON.stringify(h.notices)}`);
+  const id = (h.raw.prepare("SELECT id FROM items WHERE kind = 'owner.message' AND body LIKE ?").get("%Made-up question for the lead%") as { id: string }).id;
+  assert.ok((await page()).posts.some((p) => p.self?.id === id), "its post is on the Feed");
+
+  h.notices.length = 0;
+  assert.ok((await h.tool("orch_ack", { id, outcome: "done", note: "Made-up answer" }, lead.threadId)).ok);
+  await settled();
+  assert.ok(h.notices.some((n) => touches(n, "feed") && touches(n, "feedThread")), `the lead's answer, which an open conversation shows too: ${JSON.stringify(h.notices)}`);
+  assert.ok((await page()).posts.some((p) => p.self?.id === id && p.thread.some((m) => m.text === "Made-up answer")), "the answer shows under it");
+
+  await h.post(WRITES.cosMessage, { text: "Made-up question for the CoS" });
+  await settled();
+  const toCos = (h.raw.prepare("SELECT id FROM items WHERE kind = 'owner.cos' AND body LIKE ?").get("%Made-up question for the CoS%") as { id: string }).id;
+  const cosState = async () => (await page()).posts.find((p) => p.self?.id === toCos)!.self!.state;
+  assert.equal(await cosState(), "delivered");
+  const { cursor } = JSON.parse((await h.tool("orch_inbox", {}, h.seeded.cos.threadId)).text) as { cursor: string };
+  await settled();
+  h.notices.length = 0;
+  assert.ok((await h.tool("orch_ack", { through: cursor }, h.seeded.cos.threadId)).ok);
+  await settled();
+  assert.ok(h.notices.some((n) => touches(n, "feed")), `the CoS read it: ${JSON.stringify(h.notices)}`);
+  assert.equal(await cosState(), "read");
+
+  const cos = h.seeded.cos.threadId;
+  const replies = async () => (await page()).posts.find((p) => p.self?.id === toCos)!.thread.map((m) => m.text);
+  assert.ok((await h.tool("orch_reply_owner", { ref: toCos, text: "Made-up reply" }, cos)).ok);
+  await settled();
+  h.notices.length = 0;
+  assert.ok((await h.tool("orch_reply_owner", { ref: toCos, text: "Made-up second reply" }, cos)).ok);
+  await settled();
+  assert.ok(h.notices.some((n) => touches(n, "feed") && touches(n, "feedThread")), `a second reply to a closed message writes only the reply: ${JSON.stringify(h.notices)}`);
+  assert.deepEqual((await replies()).slice(-2), ["Made-up reply", "Made-up second reply"]);
+
+  await h.post(WRITES.cosMessage, { text: "Made-up question delivered before batching" });
+  await settled();
+  const early = (h.raw.prepare("SELECT id FROM items WHERE kind = 'owner.cos' AND body LIKE ?").get("%delivered before batching%") as { id: string }).id;
+  const digest = (JSON.parse((await h.tool("orch_inbox", {}, cos)).text) as { cursor: string }).cursor;
+  // delivered one by one before batching was on, so the digest's ack writes only the entry's acked_at
+  h.raw.prepare("UPDATE items SET state = 'delivered', delivered_at = created_at WHERE id = ?").run(early);
+  assert.ok((await h.tool("orch_send", { to: lead.address, text: "Made-up note" }, thread.threadId)).ok);
+  await settled();
+  h.notices.length = 0;
+  assert.ok((await h.tool("orch_ack", { through: digest }, cos)).ok);
+  await settled();
+  assert.ok(h.notices.some((n) => touches(n, "feed")), `the CoS read a delivered message: ${JSON.stringify(h.notices)}`);
+  assert.equal((await page()).posts.find((p) => p.self?.id === early)!.self!.state, "read");
 });
 
 test("the viewer's pick of Board and a board's folds are kept by the plugin and read back after a restart, each save with the next revision", async () => {
