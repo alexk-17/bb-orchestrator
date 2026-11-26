@@ -4,6 +4,7 @@
 // started it, its providers, its PRs) and what waits on what.
 import { type Db, tx } from "./db.ts";
 import { MOOT_MIN_SHARED, sharedWords } from "./moot.ts";
+import { BUSY_STATUSES, PR_BLOCKED, prWait, reviewOf, threadState } from "./attach-state.ts";
 
 // lead-status: an orch_status publish (value = the status as JSON); the history builder doesn't draw it.
 // mode (1.11.0): the project's mode changed (value = the new mode, address = its lead's, note = who, ref = the card).
@@ -184,14 +185,8 @@ export interface DecisionLite {
   question?: string;
 }
 
-const BUSY = new Set(["active", "pending", "starting", "stopping"]);
 export function segState(status: string | null): SegState {
-  if (!status) return "unknown";
-  if (BUSY.has(status)) return "working";
-  if (status === "idle") return "idle";
-  if (status === "error") return "blocked";
-  if (status === "stopped" || status === "archived") return "released";
-  return "unknown";
+  return threadState(status);
 }
 
 /** thread:<p>:<n> → n; a lead sorts first. */
@@ -226,17 +221,39 @@ export function buildHistory(x: HistoryInput): ProjectHistory {
   const { now, logSince: since } = x;
   // holders by address: the agents rows, plus those only the events know (a thread that later took a new role)
   const holders = new Map<string, { threadId: string; role: string; parent: string | null; from: number; to: number | null; live: boolean }[]>();
+  const held = new Set<string>(); // every thread id some address's holders list has
   const add = (address: string, h: { threadId: string; role: string; parent: string | null; from: number; to: number | null; live: boolean }) => {
     const list = holders.get(address) ?? [];
     if (!list.some((y) => y.threadId === h.threadId)) list.push(h);
     holders.set(address, list);
+    held.add(h.threadId);
   };
+  // the log grouped once, in log order, by address and by thread (2026-11-23, lag: each address filtered the whole log,
+  // 140 ms on a busy project); an event with both lands in both lists, and a row's own events are their union
+  const byAddress = new Map<string, number[]>();
+  const byThread = new Map<string, number[]>();
+  const at = (m: Map<string, number[]>, k: string, i: number) => {
+    const l = m.get(k);
+    if (l) l.push(i);
+    else m.set(k, [i]);
+  };
+  x.events.forEach((e, i) => {
+    if (e.address != null) at(byAddress, e.address, i);
+    if (e.thread_id !== null) at(byThread, e.thread_id, i);
+  });
   for (const a of x.agents) add(a.address, { threadId: a.thread_id, role: a.role, parent: a.parent_thread_id, from: a.created_at, to: a.retired_at, live: a.retired_at === null });
   for (const e of x.events) {
     if (e.kind !== "spawn" || !e.address || !e.thread_id) continue;
-    if ([...holders.values()].some((l) => l.some((h) => h.threadId === e.thread_id))) continue;
-    const end = x.events.find((r) => r.kind === "retire" && r.thread_id === e.thread_id && r.at >= e.at);
+    if (held.has(e.thread_id)) continue;
+    const end = (byThread.get(e.thread_id) ?? []).map((i) => x.events[i]!).find((r) => r.kind === "retire" && r.at >= e.at);
     add(e.address, { threadId: e.thread_id, role: e.value ?? "thread", parent: e.ref, from: e.at, to: end?.at ?? e.at, live: false });
+  }
+  const asksOf = new Map<string, DecisionLite[]>();
+  for (const d of x.decisions) {
+    if (d.level !== "person") continue;
+    const l = asksOf.get(d.origin);
+    if (l) l.push(d);
+    else asksOf.set(d.origin, [d]);
   }
   const addressOfThread = new Map<string, string>();
   for (const [address, list] of holders) for (const h of list) addressOfThread.set(h.threadId, address);
@@ -253,7 +270,9 @@ export function buildHistory(x: HistoryInput): ProjectHistory {
   for (const [address, list] of holders) {
     list.sort((a, b) => a.from - b.from);
     const own = new Set(list.map((h) => h.threadId));
-    const evs = x.events.filter((e) => e.address === address || (e.thread_id !== null && own.has(e.thread_id)));
+    const mine = new Set(byAddress.get(address));
+    for (const id of own) for (const i of byThread.get(id) ?? []) mine.add(i);
+    const evs = [...mine].sort((a, b) => a - b).map((i) => x.events[i]!);
     const marks: HistoryRow["marks"] = [];
     const prState = new Map<string, { number: number | null; state: string }>();
     for (const e of evs) {
@@ -285,8 +304,7 @@ export function buildHistory(x: HistoryInput): ProjectHistory {
       prState.set(p.url, { number: p.number ?? prState.get(p.url)?.number ?? null, state: p.state });
     }
     marks.sort((a, b) => a.at - b.at);
-    const asks = x.decisions
-      .filter((d) => d.level === "person" && d.origin === address)
+    const asks = (asksOf.get(address) ?? [])
       .map((d) => ({ id: d.id, title: d.title, from: d.askedAt, to: d.endedAt }))
       .sort((a, b) => a.from - b.from);
     const first = list[0]!;
@@ -372,17 +390,15 @@ function depRules(x: DepInput, ours: Set<string>, live: Set<string>, prThreads: 
     if (!live.has(address)) continue;
     for (const p of x.prs) {
       if (!ids.has(p.thread_id) || !p.url || (p.state !== "open" && p.state !== "draft")) continue;
-      const review = reviewOf(p.sig);
-      if (p.checks === "pending") out.push({ from: address, on: "ci", kind: "ci", label: `PR #${p.number ?? "?"}`, since: null, ref: p.url, block: false });
-      else if (p.state === "open" && (review === "review_required" || review === "review_requested" || p.attention === "review_requested"))
+      const w = prWait({ ...p, review: reviewOf(p.sig) });
+      if (w === "ci") out.push({ from: address, on: "ci", kind: "ci", label: `PR #${p.number ?? "?"}`, since: null, ref: p.url, block: false });
+      else if (w === "review")
         out.push({ from: address, on: "review", kind: "review", label: `PR #${p.number ?? "?"}`, since: null, ref: p.url, block: false });
     }
   }
   return out.sort((a, b) => Number(b.block) - Number(a.block) || DEP_RANK[a.kind] - DEP_RANK[b.kind] || (a.since ?? Infinity) - (b.since ?? Infinity));
 }
 
-/** The review decision a PR row's signature holds (v2|url|state|checks|review|merge|queued), else null. */
-const reviewOf = (sig: string) => (sig.startsWith("v2|") ? sig.split("|")[4] || null : null);
 
 // ---------------------------------------------------------------- the Projects row (2026-11-16, the command center)
 
@@ -449,11 +465,10 @@ export interface SummaryInput extends DepInput {
   last: { text: string; at: number } | null;
 }
 
-const WORKING = new Set(["active", "pending", "starting", "stopping"]);
+const WORKING = BUSY_STATUSES;
 export const SUMMARY_DONE_MS = 24 * 3_600_000;
 /** A wait on the lead's own thread is part of the title until that thread has been idle this long (or failed). */
 export const OWN_THREAD_IDLE_MS = 30 * 60_000;
-const PR_BLOCKED = new Set(["conflicts", "blocked", "checks_failed"]);
 
 /**
  * One project's row, from the dependency rules kept in one place (depRules), filtered to waits by the project on

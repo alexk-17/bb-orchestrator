@@ -15,6 +15,9 @@ const FOLDED_IN: Record<string, Record<string, string>> = { "needs-you": { filte
 /** Views that went into another, by old id (links, saved layouts): Agents, Outputs (2026-11-16); the Feed, Needs you and Deliverables are Home, Scope and Pathways are in Projects (2026-11-20). */
 export const RENAMED_VIEWS: Record<string, string> = { agents: "projects", outputs: "home", feed: "home", "needs-you": "home", deliverables: "home", scope: "projects", pathways: "projects" };
 
+/** The work board's place under Projects: "~" is unreserved in a URL, so no encoding pass changes it, and no project slug starts with it. */
+export const BOARD = "~board";
+
 export const rootOf = (view: string): Route => ({ view, path: [], params: {} });
 
 // bb encodes our sub-path once more ("%3A" came back as "%253A", 2026-11-20), so decode until stable; keys never hold "%".
@@ -38,6 +41,8 @@ export function toPath(r: Route, views: readonly ViewPath[]): string {
     return `home/${f}${r.params.item ? `/${enc(r.params.item)}` : ""}`;
   }
   if (r.view === "projects") {
+    // the work board (2026-11-23): projects/~board, then a project's slice ("-" for every project, before an open task: no slug starts with "-"), then the task
+    if (r.params.board) return `projects/${BOARD}${r.params.in ? `/${enc(r.params.in)}` : r.params.task ? "/-" : ""}${r.params.task ? `/${enc(r.params.task)}` : ""}`;
     if (r.params.scope) return `scope/${enc(r.params.scope)}`;
     if (r.params.open) return `projects/@${enc(r.params.open)}`;
     if (r.path[0]) return `${r.params.pathways ? "pathways" : "projects"}/${enc(r.path[0])}`;
@@ -60,6 +65,11 @@ export function fromPath(subPath: string, views: readonly ViewPath[]): Route {
   if (first === "scope") {
     const key = rest.length ? dec(rest.join("/")) : null;
     return { view: "projects", path: [], params: key ? { scope: key } : {} };
+  }
+  if (first === "projects" && one === BOARD) {
+    const slice = rest[1] ? dec(rest[1]) : null;
+    const task = rest[2] ? dec(rest[2]) : null;
+    return { view: "projects", path: [], params: { board: "1", ...(slice && slice !== "-" ? { in: slice } : {}), ...(task ? { task } : {}) } };
   }
   if (first === "projects" && one?.startsWith("@")) return { view: "projects", path: [], params: one.length > 1 ? { open: one.slice(1) } : {} };
   if (first === "projects" || first === "pathways") return { view: "projects", path: one ? [one] : [], params: one && first === "pathways" ? { pathways: "1" } : {} };

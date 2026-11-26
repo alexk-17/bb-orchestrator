@@ -4,15 +4,17 @@
 // start, refuses anything that would clobber or shadow an existing one, and leaves nothing behind when it refuses.
 // The server tests load the real server entry against a fake bb host, so both callers run the real wiring.
 import assert from "node:assert/strict";
-import { after, test } from "node:test";
+import { after, mock, test } from "node:test";
+import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import plugin from "../server.ts";
 import { Engine, type DeliverResult } from "../core/engine.ts";
 import { EngineError } from "../core/model.ts";
 import { liveProjects } from "../core/memory.ts";
-import { newProject, type NewProjectPorts } from "../core/new-project.ts";
+import { newProject, type NewProjectPorts, writeAutocompactSetting } from "../core/new-project.ts";
 import { primaryRepo } from "../core/start.ts";
 import { WRITES } from "../contract.ts";
 import { z } from "zod";
@@ -59,6 +61,7 @@ async function server(settings: Record<string, unknown> = {}) {
   let instructions: (c: { threadId: string }) => string | null = () => null;
   const threadRows = new Map<string, any>();
   const metadata: any[] = [];
+  const updates: any[] = [];
   const noop: any = new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : noop), apply: () => noop });
   const sdk = {
     environments: { get: async () => ({ hostId: "host-1" }) },
@@ -73,6 +76,7 @@ async function server(settings: Record<string, unknown> = {}) {
       send: async (input: Record<string, any>) => { sends.push(input); return { delivery: "sent" }; },
       queuedMessages: { list: async () => [] },
       updatePluginMetadata: async (p: any) => { metadata.push(p); return {}; },
+      update: async (u: any) => { updates.push(u); Object.assign(threadRows.get(u.threadId) ?? {}, { parentThreadId: u.parentThreadId, parentNotifications: u.parentNotifications }); return {}; },
       get: async ({ threadId }: { threadId: string }) => threadRows.get(threadId) ?? ({ id: threadId, projectId: "bbp-1", environmentId: "env-lead", status: "idle", archivedAt: null, parentThreadId: null }),
       list: async () => [],
     },
@@ -118,7 +122,7 @@ async function server(settings: Record<string, unknown> = {}) {
     const r = await t.execute(t.parameters.parse(raw), { threadId });
     return { ok: !r.isError, text: r.content[0]!.text };
   };
-  return { root, projects, repo, engine, tools, spawns, sends, db, button, call, instructions: (threadId: string) => instructions({ threadId }), threadRows, metadata, cli: (args: string[], threadId: string | null = null) => cli(args, { threadId, cwd: root }) };
+  return { root, projects, repo, engine, tools, spawns, sends, db, button, call, instructions: (threadId: string) => instructions({ threadId }), threadRows, metadata, updates, cli: (args: string[], threadId: string | null = null) => cli(args, { threadId, cwd: root }) };
 }
 
 const cosStarted = (e: Engine, address: string) => e.board().find((b) => b.title === `cos started ${address}`);
@@ -261,7 +265,7 @@ test("newProject writes the folder in the existing projects' shape, the row and 
   const r = newProject(p, { ...brief, repo_url: "https://git.example.com/acme/delta.git" });
   const folder = join(p.root, "delta");
   assert.equal(r.folder, folder);
-  assert.deepEqual(readdirSync(folder).sort(), ["PROJECT.md", "library", "memory", RECORD, "scratch"]);
+  assert.deepEqual(readdirSync(folder).sort(), [".claude", "PROJECT.md", "library", "memory", RECORD, "scratch"]);
   const rec = JSON.parse(readFileSync(join(folder, RECORD), "utf8"));
   assert.deepEqual(Object.keys(rec), ["slug", "name", "dir", "repo", "created_at", "archived_at", "on_hold"], "the record's keys, in the real records' order");
   assert.deepEqual(rec, { slug: "delta", name: "Delta", dir: folder, repo: { path: repo, base: "main" }, created_at: "2026-11-16T10:00:00.000Z", archived_at: null, on_hold: null });
@@ -276,6 +280,108 @@ test("newProject writes the folder in the existing projects' shape, the row and 
   assert.equal(notices.length, 1);
   assert.equal(notices[0]!.title, "cos created project delta");
   assert.equal(notices[0]!.from, "cos");
+});
+
+// ---------------------------------------------------------------- the auto-compaction setting
+
+const SETTINGS = ".claude/settings.local.json";
+const modeOf = (f: string) => statSync(f).mode & 0o777;
+
+test("a new project's lead compacts at 50% like every other lead: its folder gets the settings file, 0600", () => {
+  // Without it the global 30% wins and the new lead compacts earlier than the rest; someone dropped it in by hand.
+  const { p, brief } = core();
+  newProject(p, brief);
+  const file = join(p.root, "delta", SETTINGS);
+  assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { env: { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "50" } });
+  assert.equal(modeOf(file), 0o600, "a settings file is private to its owner");
+  assert.deepEqual(readdirSync(join(p.root, "delta", ".claude")), ["settings.local.json"], "no temporary file left behind");
+});
+
+test("an existing settings file keeps its permission rules and every other key exactly; only the env key is added", () => {
+  // Some folders' files carry permission rules: losing them would make the lead ask for every command again.
+  const folder = scratch("settings-perms");
+  mkdirSync(join(folder, ".claude"));
+  const file = join(folder, SETTINGS);
+  const before = { permissions: { allow: ["Bash(npm test:*)", "Read(//srv/**)"], deny: ["Bash(rm -rf:*)"] }, env: { OTHER: "1" }, model: "opus" };
+  writeFileSync(file, JSON.stringify(before));
+  chmodSync(file, 0o640);
+  const warnings: string[] = [];
+  writeAutocompactSetting(folder, (m) => warnings.push(m));
+  const after = JSON.parse(readFileSync(file, "utf8"));
+  assert.deepEqual(after, { ...before, env: { OTHER: "1", CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "50" } });
+  assert.equal(modeOf(file), 0o640, "the file keeps its mode");
+  assert.deepEqual(warnings, []);
+});
+
+test("a different auto-compaction value is replaced with 50, so every lead compacts at the same point", () => {
+  const folder = scratch("settings-other");
+  mkdirSync(join(folder, ".claude"));
+  writeFileSync(join(folder, SETTINGS), JSON.stringify({ env: { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "30" } }));
+  writeAutocompactSetting(folder, () => assert.fail("no warning for a valid file"));
+  assert.deepEqual(JSON.parse(readFileSync(join(folder, SETTINGS), "utf8")), { env: { CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "50" } });
+});
+
+test("a settings file that isn't a JSON object is left byte-identical with one warning, and doesn't fail", () => {
+  // Rewriting a file we can't read would destroy whatever the owner put there; the project still gets made.
+  for (const [i, content] of ["{ not json,", "[1, 2]", "null", JSON.stringify({ env: "x" })].entries()) {
+    const folder = scratch(`settings-bad-${i}`);
+    mkdirSync(join(folder, ".claude"));
+    const file = join(folder, SETTINGS);
+    writeFileSync(file, content);
+    chmodSync(file, 0o644);
+    const warnings: string[] = [];
+    assert.doesNotThrow(() => writeAutocompactSetting(folder, (m) => warnings.push(m)));
+    assert.equal(readFileSync(file, "utf8"), content, "byte-identical");
+    assert.equal(modeOf(file), 0o644);
+    assert.equal(warnings.length, 1, "exactly one warning");
+    assert.match(warnings[0]!, /settings\.local\.json/);
+    assert.deepEqual(readdirSync(join(folder, ".claude")), ["settings.local.json"], "no temporary file left behind");
+  }
+});
+
+test("a failing settings write (chmod, write or rename) never stops the project: it is created, with one warning", () => {
+  // The setting is a convenience: a filesystem that refuses chmod (EPERM, EOPNOTSUPP) must not cost the owner the project.
+  for (const op of ["chmodSync", "writeFileSync", "renameSync"] as const) {
+    const real = fs[op] as (...a: unknown[]) => unknown;
+    mock.method(fs, op, (...a: unknown[]) => {
+      if (String(a[0]).includes("settings.local.json")) throw Object.assign(new Error(`${op} refused`), { code: "EPERM" });
+      return real(...a);
+    });
+    syncBuiltinESMExports(); // the core imports node:fs by name
+    const warnings: string[] = [];
+    const { engine, p, brief } = core({ log: (m) => warnings.push(m) });
+    try {
+      assert.doesNotThrow(() => newProject(p, brief), op);
+    } finally {
+      mock.restoreAll();
+      syncBuiltinESMExports();
+    }
+    const folder = join(p.root, "delta");
+    assert.ok(existsSync(join(folder, "PROJECT.md")), `${op}: the folder is in place`);
+    assert.ok(engine.project("delta"), `${op}: the row exists`);
+    assert.equal(warnings.length, 1, `${op}: exactly one warning`);
+    assert.match(warnings[0]!, new RegExp(`${op} refused`));
+    assert.ok(!existsSync(join(folder, SETTINGS)), `${op}: no half-written settings file`);
+    assert.deepEqual(readdirSync(join(folder, ".claude")), [], `${op}: no temporary file left behind`);
+  }
+});
+
+test("a logger that throws on that warning costs only the warning, never the project", () => {
+  const { engine, p, brief } = core({ log: () => { throw new Error("log down"); } });
+  const real = fs.chmodSync;
+  mock.method(fs, "chmodSync", (...a: Parameters<typeof fs.chmodSync>) => {
+    if (String(a[0]).includes("settings.local.json")) throw new Error("chmod refused");
+    return real(...a);
+  });
+  syncBuiltinESMExports();
+  try {
+    assert.doesNotThrow(() => newProject(p, brief));
+  } finally {
+    mock.restoreAll();
+    syncBuiltinESMExports();
+  }
+  assert.ok(engine.project("delta"));
+  assert.ok(existsSync(join(p.root, "delta", "PROJECT.md")));
 });
 
 test("newProject refuses an incomplete or malformed brief, naming the field", () => {
@@ -454,7 +560,7 @@ test("integration CLI is opt-in, rejects agent callers and preserves idempotent 
 test("operator adopts existing parented lead and worker through the CLI without spawning or reparenting", async () => {
   const s = await server();
   s.engine.register("T-cos", "cos", null);
-  for (const [id, parent] of [["T-lead", "T-cos"], ["T-worker", "T-lead"]]) s.threadRows.set(id, { id, parentThreadId: parent, projectId: "bbp-1", environmentId: `env-${id}`, status: "idle", archivedAt: null });
+  for (const [id, parent] of [["T-lead", "T-cos"], ["T-worker", "T-lead"]]) s.threadRows.set(id, { id, parentThreadId: parent, parentNotifications: "auto", projectId: "bbp-1", environmentId: `env-${id}`, status: "idle", archivedAt: null });
   for (const [id, role, parent] of [["T-lead", "lead", "T-cos"], ["T-worker", "thread", "T-lead"]]) {
     const args = ["adopt", id!, role!, "--project", "alpha", "--parent", parent!, "--approval", "approved-map"];
     const first = await s.cli(args);
@@ -467,6 +573,9 @@ test("operator adopts existing parented lead and worker through the CLI without 
   assert.equal(s.engine.board().filter((b) => b.title.startsWith("Adopted ")).length, 2);
   assert.equal(s.metadata.length, 4);
   assert.match((await s.cli(["status"])).stdout, /T-worker parent=T-lead/);
+  // the worker gets the level orch_spawn_thread sets, once: under bb's "auto" every turn end of it woke the lead
+  // outside the plugin's inbox (seen live after adoptions, 2026-11-24); the lead under the CoS is left as it was
+  assert.deepEqual(s.updates, [{ threadId: "T-worker", parentThreadId: "T-lead", parentNotifications: "stuck" }]);
 });
 
 // ---------------------------------------------------------------- scoping mode (1.11.0)

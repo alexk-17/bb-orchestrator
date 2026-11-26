@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-orchestrator",
-  "version": "1.41.0",
+  "version": "1.45.13",
   "private": true,
   "type": "module",
   "description": "Orchestration for bb: roles, decisions, mail and the Steward, in one plugin.",

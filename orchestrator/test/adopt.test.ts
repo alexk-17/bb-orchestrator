@@ -11,7 +11,7 @@ function setup() {
   const rows = new Map<string, AdoptThread>(["worker", "lead", "cos"].map((id) => [id, { id, status: "idle", archivedAt: null, parentThreadId: null, environmentId: `env-${id}`, projectId: "project" }]));
   const changes: string[] = [];
   const request: Adoption = { threadId: "worker", role: "thread", project: "alpha", parentThreadId: "lead", approval: "owner-approved migration 1" };
-  const ports = { engine, queued: async () => false, get: async (id: string) => ({ ...rows.get(id)! }), parent: async (id: string, parent: string) => { rows.get(id)!.parentThreadId = parent; changes.push(id); }, mirror: async () => {} };
+  const ports = { engine, queued: async () => false, get: async (id: string) => ({ ...rows.get(id)! }), parent: async (id: string, parent: string, notify: string) => { Object.assign(rows.get(id)!, { parentThreadId: parent, parentNotifications: notify }); changes.push(id); }, mirror: async () => {} };
   return { engine, rows, changes, request, ports };
 }
 
@@ -28,6 +28,29 @@ test("adoption preserves thread/environment, sets both parents and idle state, r
   assert.deepEqual(s.changes, ["worker"]);
   assert.equal(s.engine.board().filter((b) => b.title.startsWith("Adopted ")).length, 1);
   assert.equal(s.engine.flagUnplanned(0), 0, "explicitly adopted workers are not accidental unplanned spawns");
+});
+
+// 2026-11-24 (the lead's call): bb woke a lead at every turn end of its adopted threads,
+// because adoption kept bb's "auto" level, while threads from orch_spawn_thread are "stuck" and wake it only through
+// the plugin (reports, prompts, failures), within the lead wake gap. An adopted thread must match the spawn path.
+test("an adopted thread gets the spawn path's notify level, even when its bb parent was already right", async () => {
+  const s = setup();
+  Object.assign(s.rows.get("worker")!, { parentThreadId: "lead", parentNotifications: "auto" });
+  await adoptThread(s.ports, s.request);
+  assert.equal(s.rows.get("worker")!.parentNotifications, "stuck", "under auto bb would wake the lead at every turn end");
+  assert.equal(s.rows.get("worker")!.parentThreadId, "lead");
+  await adoptThread(s.ports, s.request);
+  assert.deepEqual(s.changes, ["worker"], "a retry on a thread already at stuck changes nothing");
+});
+
+test("an adopted lead under the CoS is not switched to stuck: only threads match the spawn path", async () => {
+  const s = setup();
+  const engine = new Engine(new DatabaseSync(":memory:") as never, { now: Date.now, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} });
+  engine.register("cos", "cos", null);
+  Object.assign(s.rows.get("lead")!, { parentThreadId: "cos", parentNotifications: "auto" });
+  await adoptThread({ ...s.ports, engine }, { threadId: "lead", role: "lead", project: "alpha", parentThreadId: "cos", approval: "owner-approved migration 2" });
+  assert.equal(s.rows.get("lead")!.parentNotifications, "auto");
+  assert.deepEqual(s.changes, []);
 });
 
 test("active/archived threads and parent conflicts fail before mutation", async () => {
@@ -72,7 +95,7 @@ test("failure after parent update or registration converges on retry without res
 
 test("concurrent activation is reported rather than registering an active thread", async () => {
   const s = setup();
-  await assert.rejects(adoptThread({ ...s.ports, parent: async (id, parent) => { await s.ports.parent(id, parent); s.rows.get(id)!.status = "active"; } }, s.request), /idle/);
+  await assert.rejects(adoptThread({ ...s.ports, parent: async (id, parent, notify) => { await s.ports.parent(id, parent, notify); s.rows.get(id)!.status = "active"; } }, s.request), /idle/);
   assert.equal(s.engine.agentByThread("worker"), null);
 });
 

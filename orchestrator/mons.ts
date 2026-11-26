@@ -1,6 +1,4 @@
-// Each role agent's Pokémon (2026-11-13): the CoS is Rayquaza, the Steward Chansey, leads start as the base
-// form of a strong line and threads as early-route ones; both evolve as they level. Assigned at registration and kept
-// for the address's life. Only names, types and National Dex numbers live here: the sprites load at runtime from PokeAPI's public sprite repo, never bundled.
+// Sprites load at runtime from PokeAPI's public sprite repo, never bundled.
 
 export interface Mon {
   name: string;
@@ -9,12 +7,6 @@ export interface Mon {
 
 const m = (name: string, dex: number): Mon => ({ name, dex });
 
-// Requested 2026-11-16 ("each project gets a Pokémon type"): every live project holds one of the 18 types, its own.
-// Its lead is the strongest line of that type (shiny); its threads are other three-stage lines of the same type, then
-// of the lead's secondary type, then of a fixed sibling type, so a project's family reads as one. The CoS and the
-// Steward stay Rayquaza and Chansey. A project's type is picked once by the words of its slug (or the first free
-// one) and kept in the projects table; nothing here names a project.
-
 export type MonType =
   | "normal" | "fire" | "water" | "electric" | "grass" | "ice" | "fighting" | "poison" | "ground"
   | "flying" | "psychic" | "bug" | "rock" | "ghost" | "dragon" | "dark" | "steel" | "fairy";
@@ -22,46 +14,40 @@ export type MonType =
 export interface TypeFamily {
   type: MonType;
   label: string;
-  /** The project accent: readable as text on bb's light and dark surfaces and on a tint of itself (palette.test.ts). */
   tone: { light: string; dark: string };
-  /** The lead's line (its base form). No thread pool lists it, so a live thread never blocks a lead. */
+  /** No thread pool lists it, so a live thread never blocks a lead. */
   lead: string;
-  /** The lead line's other type: where threads go when the type's own lines are all held. */
   second: MonType | null;
-  /** Then this fixed sibling type. */
   sibling: MonType;
-  /** Slug words that ask for this type ("code-reviews" → review). */
   words: readonly string[];
   why: string;
-  /** Three-stage lines that carry this type in some form, best first. */
   threads: readonly string[];
 }
 
-// Tones: the type's colour darkened (light theme) or lightened (dark theme) until text in it reads at 4.5:1 on bb's
-// surfaces and on a 12-20% tint of itself.
+// Each tone reads at 4.5:1 as text on bb's surfaces and on a 12-20% tint of itself, and sits >= 0.06 from every other in OKLab.
 export const TYPES: readonly TypeFamily[] = [
-  { type: "normal", label: "Normal", tone: { light: "#434331", dark: "#b6b58f" }, lead: "Porygon", second: null, sibling: "fighting", why: "Porygon was built by programmers", words: ["dev", "dx", "experience", "tooling", "sdk", "upgrades", "helper", "misc", "one", "off"], threads: ["Whismur", "Lillipup", "Slakoth", "Happiny", "Igglybuff", "Azurill"] },
-  { type: "fire", label: "Fire", tone: { light: "#693915", dark: "#f29f62" }, lead: "Charmander", second: "flying", sibling: "dragon", why: "Charizard: speed and heat", words: ["perf", "performance", "optimization", "speed", "fast", "latency"], threads: ["Cyndaquil", "Torchic", "Chimchar", "Tepig", "Magby", "Litwick"] },
-  { type: "water", label: "Water", tone: { light: "#2e426e", dark: "#93b2f5" }, lead: "Magikarp", second: "flying", sibling: "ice", why: "Gyarados: data flows", words: ["data", "anonymize", "stream", "streams", "flow", "etl", "warehouse"], threads: ["Squirtle", "Totodile", "Oshawott", "Piplup", "Mudkip", "Poliwag", "Tympole", "Horsea", "Lotad", "Spheal", "Azurill"] },
-  { type: "electric", label: "Electric", tone: { light: "#4f430e", dark: "#f7d02c" }, lead: "Shinx", second: null, sibling: "steel", why: "Luxray: a terminal's current", words: ["cli", "terminal", "shell", "command", "commands"], threads: ["Mareep", "Tynamo", "Pichu", "Elekid"] },
-  { type: "grass", label: "Grass", tone: { light: "#2e4c1d", dark: "#7ac74c" }, lead: "Bulbasaur", second: "poison", sibling: "bug", why: "Venusaur: things that grow", words: ["eye", "candy", "ui", "ux", "design", "frontend", "growth", "web"], threads: ["Chikorita", "Treecko", "Turtwig", "Snivy", "Oddish", "Bellsprout", "Seedot", "Lotad", "Sewaddle", "Budew", "Hoppip"] },
-  { type: "ice", label: "Ice", tone: { light: "#314847", dark: "#96d9d6" }, lead: "Swinub", second: "ground", sibling: "water", why: "Mamoswine: what is frozen and old", words: ["deprecation", "migration", "migrations", "archive", "legacy", "cache"], threads: ["Spheal", "Vanillite"] },
-  { type: "fighting", label: "Fighting", tone: { light: "#8e221d", dark: "#e4a3a0" }, lead: "Riolu", second: "steel", sibling: "normal", why: "Lucario senses the aura of hidden flaws", words: ["qa", "test", "tests", "testing", "runners", "e2e"], threads: ["Machop", "Timburr", "Poliwag", "Torchic", "Chimchar", "Tepig"] },
-  { type: "poison", label: "Poison", tone: { light: "#6f2a6d", dark: "#d4a4d3" }, lead: "Nidoran♀", second: "ground", sibling: "bug", why: "Nidoqueen guards the nest", words: ["security", "pii", "guard", "privacy", "rate", "limiting", "abuse", "anonymization"], threads: ["Venipede", "Oddish", "Bellsprout", "Budew", "Weedle", "Zubat", "Nidoran♂"] },
-  { type: "ground", label: "Ground", tone: { light: "#4d4122", dark: "#e2bf65" }, lead: "Gible", second: "dragon", sibling: "rock", why: "Garchomp digs: file systems and machines", words: ["file", "files", "system", "microvm", "vm", "storage", "fs", "disk", "cloud"], threads: ["Geodude", "Rhyhorn", "Trapinch", "Nidoran♂", "Sandile", "Mudkip", "Turtwig", "Tympole"] },
-  { type: "flying", label: "Flying", tone: { light: "#473c66", dark: "#bba7f6" }, lead: "Dratini", second: "dragon", sibling: "normal", why: "Dragonite delivers the mail: shipping", words: ["deploy", "deployment", "deployments", "release", "releases", "ci", "cd", "continuous", "ship", "delivery"], threads: ["Pidgey", "Starly", "Pidove", "Zubat", "Hoppip"] },
-  { type: "psychic", label: "Psychic", tone: { light: "#7a2a42", dark: "#fb92b2" }, lead: "Beldum", second: "steel", sibling: "fairy", why: "Metagross: four brains, a supercomputer", words: ["ai", "llm", "llms", "ml", "model", "models", "classifier", "benchmark", "benchmarks", "harness", "agent", "agents", "eval", "evals"], threads: ["Abra", "Ralts", "Gothita", "Solosis"] },
-  { type: "bug", label: "Bug", tone: { light: "#3f460a", dark: "#aabc23" }, lead: "Scyther", second: "steel", sibling: "grass", why: "it takes one to catch one", words: ["bug", "bugs", "debug", "incident", "investigation", "healing", "triage"], threads: ["Caterpie", "Weedle", "Wurmple", "Venipede", "Sewaddle"] },
-  { type: "rock", label: "Rock", tone: { light: "#4c4417", dark: "#c4b35c" }, lead: "Larvitar", second: "dark", sibling: "ground", why: "Tyranitar: the bedrock everything stands on", words: ["gateway", "mcp", "db", "database", "backend", "platform", "api", "infra"], threads: ["Geodude", "Roggenrola", "Rhyhorn", "Aron"] },
-  { type: "ghost", label: "Ghost", tone: { light: "#4e3b67", dark: "#baadcc" }, lead: "Gastly", second: "poison", sibling: "dark", why: "Gengar: the hand behind every thread", words: ["orchestrator", "orchestration", "coordinator", "memory", "dreams", "plugin"], threads: ["Litwick", "Duskull"] },
-  { type: "dragon", label: "Dragon", tone: { light: "#5127b8", dark: "#bea4fe" }, lead: "Bagon", second: "flying", sibling: "fire", why: "Salamence: a Champion's dragon leads the team", words: ["team", "management", "people", "playbook", "workflow", "hiring"], threads: ["Axew", "Trapinch", "Horsea"] },
-  { type: "dark", label: "Dark", tone: { light: "#524033", dark: "#bcb0a8" }, lead: "Deino", second: "dragon", sibling: "ghost", why: "Hydreigon: three heads review from every side", words: ["review", "reviews", "pr", "prs", "audit", "code"], threads: ["Sandile", "Seedot"] },
-  { type: "steel", label: "Steel", tone: { light: "#42424a", dark: "#b7b7ce" }, lead: "Drilbur", second: "ground", sibling: "rock", why: "Excadrill: industry and machines", words: ["factory", "automation", "software", "self", "improvement", "pipeline", "pipelines", "build"], threads: ["Magnemite", "Klink", "Aron", "Piplup"] },
-  { type: "fairy", label: "Fairy", tone: { light: "#5c394a", dark: "#dfa0bf" }, lead: "Togepi", second: "flying", sibling: "psychic", why: "Togekiss flies out to where the customer is", words: ["fde", "field", "customer", "forward", "desk", "support", "success"], threads: ["Cleffa", "Igglybuff", "Azurill", "Ralts"] },
+  { type: "normal", label: "Normal", tone: { light: "#525252", dark: "#bcba94" }, lead: "Porygon", second: null, sibling: "fighting", why: "Porygon was built by programmers", words: ["dev", "dx", "experience", "tooling", "sdk", "upgrades", "helper", "misc", "one", "off"], threads: ["Whismur", "Lillipup", "Slakoth", "Happiny", "Igglybuff", "Azurill"] },
+  { type: "fire", label: "Fire", tone: { light: "#7c3212", dark: "#fdb088" }, lead: "Charmander", second: "flying", sibling: "dragon", why: "Charizard: speed and heat", words: ["perf", "performance", "optimization", "speed", "fast", "latency"], threads: ["Cyndaquil", "Torchic", "Chimchar", "Tepig", "Magby", "Litwick"] },
+  { type: "water", label: "Water", tone: { light: "#274567", dark: "#8cc1ff" }, lead: "Magikarp", second: "flying", sibling: "ice", why: "Gyarados: data flows", words: ["data", "anonymize", "stream", "streams", "flow", "etl", "warehouse"], threads: ["Squirtle", "Totodile", "Oshawott", "Piplup", "Mudkip", "Poliwag", "Tympole", "Horsea", "Lotad", "Spheal", "Azurill"] },
+  { type: "electric", label: "Electric", tone: { light: "#6a6323", dark: "#f1e15b" }, lead: "Shinx", second: null, sibling: "steel", why: "Luxray: a terminal's current", words: ["cli", "terminal", "shell", "command", "commands"], threads: ["Mareep", "Tynamo", "Pichu", "Elekid"] },
+  { type: "grass", label: "Grass", tone: { light: "#075803", dark: "#a5e75c" }, lead: "Bulbasaur", second: "poison", sibling: "bug", why: "Venusaur: things that grow", words: ["eye", "candy", "ui", "ux", "design", "frontend", "growth", "web"], threads: ["Chikorita", "Treecko", "Turtwig", "Snivy", "Oddish", "Bellsprout", "Seedot", "Lotad", "Sewaddle", "Budew", "Hoppip"] },
+  { type: "ice", label: "Ice", tone: { light: "#226457", dark: "#8cf0f8" }, lead: "Swinub", second: "ground", sibling: "water", why: "Mamoswine: what is frozen and old", words: ["deprecation", "migration", "migrations", "archive", "legacy", "cache"], threads: ["Spheal", "Vanillite"] },
+  { type: "fighting", label: "Fighting", tone: { light: "#9d2925", dark: "#daaba7" }, lead: "Riolu", second: "steel", sibling: "normal", why: "Lucario senses the aura of hidden flaws", words: ["qa", "test", "tests", "testing", "runners", "e2e"], threads: ["Machop", "Timburr", "Poliwag", "Torchic", "Chimchar", "Tepig"] },
+  { type: "poison", label: "Poison", tone: { light: "#762b7a", dark: "#d194af" }, lead: "Nidoran♀", second: "ground", sibling: "bug", why: "Nidoqueen guards the nest", words: ["security", "pii", "guard", "privacy", "rate", "limiting", "abuse", "anonymization"], threads: ["Venipede", "Oddish", "Bellsprout", "Budew", "Weedle", "Zubat", "Nidoran♂"] },
+  { type: "ground", label: "Ground", tone: { light: "#6a4c20", dark: "#f6cd91" }, lead: "Gible", second: "dragon", sibling: "rock", why: "Garchomp digs: file systems and machines", words: ["file", "files", "system", "microvm", "vm", "storage", "fs", "disk", "cloud"], threads: ["Geodude", "Rhyhorn", "Trapinch", "Nidoran♂", "Sandile", "Mudkip", "Turtwig", "Tympole"] },
+  { type: "flying", label: "Flying", tone: { light: "#4a2b6c", dark: "#c18dd8" }, lead: "Dratini", second: "dragon", sibling: "normal", why: "Dragonite delivers the mail: shipping", words: ["deploy", "deployment", "deployments", "release", "releases", "ci", "cd", "continuous", "ship", "delivery"], threads: ["Pidgey", "Starly", "Pidove", "Zubat", "Hoppip"] },
+  { type: "psychic", label: "Psychic", tone: { light: "#631743", dark: "#fb86b8" }, lead: "Beldum", second: "steel", sibling: "fairy", why: "Metagross: four brains, a supercomputer", words: ["ai", "llm", "llms", "ml", "model", "models", "classifier", "benchmark", "benchmarks", "harness", "agent", "agents", "eval", "evals"], threads: ["Abra", "Ralts", "Gothita", "Solosis"] },
+  { type: "bug", label: "Bug", tone: { light: "#2f330e", dark: "#99be15" }, lead: "Scyther", second: "steel", sibling: "grass", why: "it takes one to catch one", words: ["bug", "bugs", "debug", "incident", "investigation", "healing", "triage"], threads: ["Caterpie", "Weedle", "Wurmple", "Venipede", "Sewaddle"] },
+  { type: "rock", label: "Rock", tone: { light: "#484710", dark: "#c6bf54" }, lead: "Larvitar", second: "dark", sibling: "ground", why: "Tyranitar: the bedrock everything stands on", words: ["gateway", "mcp", "db", "database", "backend", "platform", "api", "infra"], threads: ["Geodude", "Roggenrola", "Rhyhorn", "Aron"] },
+  { type: "ghost", label: "Ghost", tone: { light: "#815381", dark: "#989bbd" }, lead: "Gastly", second: "poison", sibling: "dark", why: "Gengar: the hand behind every thread", words: ["orchestrator", "orchestration", "coordinator", "memory", "dreams", "plugin"], threads: ["Litwick", "Duskull"] },
+  { type: "dragon", label: "Dragon", tone: { light: "#5127b8", dark: "#a3a2fb" }, lead: "Bagon", second: "flying", sibling: "fire", why: "Salamence: a Champion's dragon leads the team", words: ["team", "management", "people", "playbook", "workflow", "hiring"], threads: ["Axew", "Trapinch", "Horsea"] },
+  { type: "dark", label: "Dark", tone: { light: "#433f3e", dark: "#b29179" }, lead: "Deino", second: "dragon", sibling: "ghost", why: "Hydreigon: three heads review from every side", words: ["review", "reviews", "pr", "prs", "audit", "code"], threads: ["Sandile", "Seedot"] },
+  { type: "steel", label: "Steel", tone: { light: "#3d2c49", dark: "#bec0d1" }, lead: "Drilbur", second: "ground", sibling: "rock", why: "Excadrill: industry and machines", words: ["factory", "automation", "software", "self", "improvement", "pipeline", "pipelines", "build"], threads: ["Magnemite", "Klink", "Aron", "Piplup"] },
+  { type: "fairy", label: "Fairy", tone: { light: "#6b3648", dark: "#edbbd9" }, lead: "Togepi", second: "flying", sibling: "psychic", why: "Togekiss flies out to where the customer is", words: ["fde", "field", "customer", "forward", "desk", "support", "success"], threads: ["Cleffa", "Igglybuff", "Azurill", "Ralts"] },
 ];
 export const typeFamily = (t: string | null | undefined): TypeFamily | null => TYPES.find((x) => x.type === t) ?? null;
 
-/** Every line's dex number and the types it carries in any form (PokeAPI; Fairy as typed since Gen 6). */
+/** PokeAPI's types; Fairy as typed since Gen 6. */
 export const LINES: Record<string, { dex: number; types: readonly MonType[] }> = {
   Porygon: { dex: 137, types: ["normal"] }, Whismur: { dex: 293, types: ["normal"] }, Lillipup: { dex: 506, types: ["normal"] },
   Slakoth: { dex: 287, types: ["normal"] }, Happiny: { dex: 440, types: ["normal"] }, Igglybuff: { dex: 174, types: ["normal", "fairy"] },
@@ -97,36 +83,28 @@ export const LINES: Record<string, { dex: number; types: readonly MonType[] }> =
   Drilbur: { dex: 529, types: ["ground", "steel"] }, Klink: { dex: 599, types: ["steel"] },
   Togepi: { dex: 175, types: ["fairy", "flying"] }, Cleffa: { dex: 173, types: ["fairy"] },
 };
-/** The types a line carries in any of its forms (Nidoran♂ counts as Ground through Nidoking). */
+/** Any form counts: Nidoran♂ is Ground through Nidoking. */
 export const lineTypes = (base: string): readonly MonType[] => LINES[base]?.types ?? PACK.get(base)?.types ?? [];
 
 const lineMon = (name: string): Mon => m(name, LINES[name]!.dex);
 
-/** A family's types in the order its threads take them: its own, the lead's secondary, the sibling. */
 export const familyTypes = (t: TypeFamily): MonType[] => [...new Set([t.type, ...(t.second ? [t.second] : []), t.sibling])];
-/** The thread lines a project of this type takes, in order, each once. */
 export const familyThreads = (t: TypeFamily): string[] => [...new Set(familyTypes(t).flatMap((x) => typeFamily(x)!.threads))].filter((n) => !LEAD_NAMES.has(n));
 const LEAD_NAMES = new Set(TYPES.map((t) => t.lead));
 
 export const MON_POOLS: Record<"cos" | "steward" | "lead" | "thread", readonly Mon[]> = {
   cos: [m("Rayquaza", 384)],
-  // 2026-11-18, the owner: Chansey, to match the Steward's Nurse persona (Regigigas before). It never evolves. Chansey is
-  // the middle of Happiny's line, a thread line: while the Steward is live it holds that whole line (held is by line,
-  // baseOf), so no thread shows a second Chansey
+  // Chansey is the middle of Happiny's thread line, held by line, so no thread shows a second Chansey
   steward: [m("Chansey", 113)],
   lead: TYPES.map((t) => lineMon(t.lead)),
   thread: [...new Set(TYPES.flatMap((t) => t.threads))].map(lineMon),
 };
-/** Pokémon of earlier pools (before 2026-11-16): still named on old rows, so they keep resolving; never picked again. */
+/** Never picked: old rows still name them, so they keep resolving. */
 const RETIRED_MONS: readonly Mon[] = [
   m("Bidoof", 399), m("Zigzagoon", 263), m("Rattata", 19), m("Sentret", 161), m("Patrat", 504), m("Kricketot", 401),
   m("Larvesta", 636), m("Eevee", 133), m("Staryu", 120), m("Onix", 95), m("Joltik", 595), m("Regigigas", 486),
 ];
 
-/**
- * The type a new project takes: the free type whose words its slug matches most (ties: TYPES order), then a free
- * sibling of a matched type, then the first free type. With all 18 held, they are shared in TYPES order.
- */
 export function pickType(project: string, taken: readonly string[]): MonType {
   const words = project.toLowerCase().split(/[^a-z0-9]+/);
   const matched = TYPES.map((t) => ({ t, n: t.words.filter((w) => words.includes(w)).length }))
@@ -140,14 +118,8 @@ export function pickType(project: string, taken: readonly string[]): MonType {
 
 const BY_NAME = new Map([...Object.values(MON_POOLS).flat(), ...RETIRED_MONS, ...Object.keys(LINES).map(lineMon)].map((x) => [x.name, x]));
 export const monByName = (name: string | null | undefined): Mon | null => (name ? (BY_NAME.get(name) ?? PACK_NAMES.get(name) ?? null) : null);
-/** A Pokémon mons.ts itself knows, whatever pack is loaded. */
 export const builtInMon = (name: string): Mon | null => BY_NAME.get(name) ?? null;
 
-/**
- * The Pokémon a new agent gets; `taken` is every live agent's, whatever its role (no two share a line: freeLine).
- * A lead: its type's line, else the first free lead line. A thread: the first free line of its family (own type,
- * lead's secondary, sibling), else any free thread line, else its family's lines in turn (only when all are held).
- */
 export function pickMon(role: keyof typeof MON_POOLS, taken: readonly string[], type: string | null = null): Mon {
   const free = freeLine(taken);
   const fam = typeFamily(type) ?? TYPES[0]!;
@@ -162,7 +134,6 @@ export function pickMon(role: keyof typeof MON_POOLS, taken: readonly string[], 
 }
 
 const SPRITES = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon";
-/** Requested 2026-11-13: the CoS, the Steward and the leads are shiny; threads are normal. */
 export const isShiny = (role: string | null | undefined) => role === "cos" || role === "steward" || role === "lead";
 /** Animated Black/White sprite (dex ≤ 649), and a still one for reduced motion or as a fallback. */
 export const monSprite = (x: Mon, animated: boolean, shiny = false) => {
@@ -170,20 +141,16 @@ export const monSprite = (x: Mon, animated: boolean, shiny = false) => {
   return animated && x.dex <= 649 ? `${SPRITES}/versions/generation-v/black-white/animated/${s}${x.dex}.gif` : `${SPRITES}/${s}${x.dex}.png`;
 };
 
-// ---------------------------------------------------------------- levels and evolution (2026-11-13)
-// Every agent levels up from the tokens its turns process, without a cap. Pokémon's "medium fast" curve: level L
-// needs L³ × XP_PER_LEVEL_CUBE tokens, so level 10 is 10M tokens and level 50 is 1.25B. Threads evolve at their
-// species' real evolution levels; so do leads (2026-11-13). Where the games evolve by trade, stone or friendship,
-// the level is a fair stand-in. The CoS and the Steward are legendaries: they just keep levelling.
+// Pokémon's medium-fast curve: level L needs L³ × XP_PER_LEVEL_CUBE tokens.
 export const XP_PER_LEVEL_CUBE = 10_000;
 export const levelFor = (tokens: number): number => Math.max(1, Math.floor(Math.cbrt(Math.max(0, tokens) / XP_PER_LEVEL_CUBE) + 1e-9));
 export const tokensForLevel = (level: number): number => level ** 3 * XP_PER_LEVEL_CUBE;
 
-/** Each thread's and lead's line: the level each later form arrives at. */
 export interface Evolution {
   at: number;
   mon: Mon;
 }
+/** Where the games evolve by trade, stone or friendship, the level is a stand-in. */
 const EVOLUTIONS: Record<string, readonly Evolution[]> = {
   Caterpie: [{ at: 7, mon: m("Metapod", 11) }, { at: 10, mon: m("Butterfree", 12) }],
   Starly: [{ at: 14, mon: m("Staravia", 397) }, { at: 34, mon: m("Staraptor", 398) }],
@@ -227,7 +194,6 @@ const EVOLUTIONS: Record<string, readonly Evolution[]> = {
   Seedot: [{ at: 14, mon: m("Nuzleaf", 274) }, { at: 30, mon: m("Shiftry", 275) }],
   Lotad: [{ at: 14, mon: m("Lombre", 271) }, { at: 30, mon: m("Ludicolo", 272) }],
   Kricketot: [{ at: 10, mon: m("Kricketune", 402) }],
-  // leads
   Abra: [{ at: 16, mon: m("Kadabra", 64) }, { at: 36, mon: m("Alakazam", 65) }],
   Ralts: [{ at: 20, mon: m("Kirlia", 281) }, { at: 30, mon: m("Gardevoir", 282) }],
   Eevee: [{ at: 25, mon: m("Espeon", 196) }],
@@ -254,7 +220,6 @@ const EVOLUTIONS: Record<string, readonly Evolution[]> = {
   Magikarp: [{ at: 20, mon: m("Gyarados", 130) }],
   Axew: [{ at: 38, mon: m("Fraxure", 611) }, { at: 48, mon: m("Haxorus", 612) }],
   Gastly: [{ at: 25, mon: m("Haunter", 93) }, { at: 40, mon: m("Gengar", 94) }],
-  // 2026-11-16, the type families. Where the games evolve by trade, stone or friendship, the level is a stand-in.
   Horsea: [{ at: 32, mon: m("Seadra", 117) }, { at: 50, mon: m("Kingdra", 230) }],
   Tynamo: [{ at: 39, mon: m("Eelektrik", 603) }, { at: 50, mon: m("Eelektross", 604) }],
   Pichu: [{ at: 12, mon: m("Pikachu", 25) }, { at: 30, mon: m("Raichu", 26) }],
@@ -280,56 +245,41 @@ const EVOLUTIONS: Record<string, readonly Evolution[]> = {
   Happiny: [{ at: 15, mon: m("Chansey", 113) }, { at: 40, mon: m("Blissey", 242) }],
   Magby: [{ at: 30, mon: m("Magmar", 126) }, { at: 50, mon: m("Magmortar", 467) }],
 };
-/** A form's base (Alakazam → Abra); a base or a Pokémon without a line is its own. */
 export function baseOf(name: string): string {
   for (const [base, line] of [...Object.entries(EVOLUTIONS), ...[...PACK].map(([b, x]) => [b, x.evolutions] as const)]) if (line.some((e) => e.mon.name === name)) return base;
   return name;
 }
-/**
- * Whether a Pokémon's line is free, given the Pokémon live agents hold (`taken`, any form): no two share a line, so the
- * Steward's Chansey holds Happiny's line (2026-11-18, the owner saw two Chanseys).
- */
 export function freeLine(taken: readonly string[]): (name: string) => boolean {
   const held = new Set(taken.map(baseOf));
   return (n) => !held.has(baseOf(n));
 }
-/** With every line held, a thread shares its own lines in turn, never the CoS's or the Steward's. */
 function shared(own: readonly string[], taken: readonly string[]): string {
   const standing = new Set([...MON_POOLS.cos, ...MON_POOLS.steward].map((x) => baseOf(x.name)));
   const ok = own.filter((n) => !standing.has(baseOf(n)));
   const pool = ok.length ? ok : own;
   return pool[taken.length % pool.length]!;
 }
-/** A line's later forms: mons.ts's own, else a loaded pack's (none for a name with no line). */
 const evolutionsOf = (base: string | null | undefined): readonly Evolution[] => EVOLUTIONS[base ?? ""] ?? PACK.get(base ?? "")?.evolutions ?? [];
-/** mons.ts's own line for a base, whatever pack is loaded (null: it has none). */
 export const builtInEvolutions = (base: string): readonly Evolution[] | null => EVOLUTIONS[base] ?? null;
 for (const line of Object.values(EVOLUTIONS)) for (const e of line) BY_NAME.set(e.mon.name, e.mon);
-/** Every Pokémon name the orchestrator can show, evolutions included (the leak test checks none appears with the setting off). */
 export const allMonNames = (): string[] => [...new Set([...BY_NAME.keys(), ...PACK_NAMES.keys()])];
 
-/** Which form of its line a Pokémon is at a level: 0 for the base, 1 and 2 for its evolutions. */
 export function stageAt(base: string | null | undefined, level: number): number {
   return evolutionsOf(base).filter((e) => level >= e.at).length;
 }
 
-/**
- * A stage kept through a change of Pokémon (2026-11-16, the type families): the stage it had and its level then.
- * Up to that level it shows exactly that stage; past it never less, so it evolves on at its new line's levels.
- */
+/** Up to the level it was kept at, exactly the kept stage; past it never less, so it evolves on at its new line's levels. */
 export interface StagePin {
   stage: number;
   level: number;
 }
 
-/** The stage a Pokémon shows at a level: its line's, or the one it keeps (0 for a name with no line). */
 export function shownStage(base: string | null | undefined, level: number, pin: StagePin | null = null): number {
   const line = evolutionsOf(base);
   const byLevel = stageAt(base, level);
   return Math.min(line.length, pin ? (level <= pin.level ? pin.stage : Math.max(pin.stage, byLevel)) : byLevel);
 }
 
-/** The form a Pokémon has at a level: its base, or the last evolution it has reached (or is pinned to). */
 export function formAt(base: string | null | undefined, level: number, pin: StagePin | null = null): Mon | null {
   const b = monByName(base);
   if (!b) return null;
@@ -337,11 +287,8 @@ export function formAt(base: string | null | undefined, level: number, pin: Stag
   return stage ? evolutionsOf(b.name)[stage - 1]!.mon : b;
 }
 
-// ---------------------------------------------------------------- lines a personas pack adds (personas.ts, 2026-11-18)
-// The one hook mons.ts has for a pack: lines it defines (base, dex, types, later forms) resolve like mons.ts's own while
-// it is loaded, for names, stages and forms. A pack never changes one of mons.ts's lines (personas.ts validates that).
+// A pack's lines resolve like the built-in ones while it is loaded; a pack never changes a built-in line.
 
-/** A line a pack defines: its base's dex, the types it carries, and each later form with the level it arrives at. */
 export interface PackLine {
   dex: number;
   types?: readonly MonType[];
@@ -350,7 +297,7 @@ export interface PackLine {
 const PACK = new Map<string, { types: readonly MonType[]; evolutions: readonly Evolution[] }>();
 const PACK_NAMES = new Map<string, Mon>();
 
-/** Load a pack's lines (null: none). Each call replaces the last; mons.ts's own lines win over a pack's. */
+/** Each call replaces the last; built-in lines win over a pack's. */
 export function setPackLines(lines: Readonly<Record<string, PackLine>> | null): void {
   PACK.clear();
   PACK_NAMES.clear();
@@ -361,20 +308,11 @@ export function setPackLines(lines: Readonly<Record<string, PackLine>> | null): 
     for (const e of l.evolutions) if (!BY_NAME.has(e.name)) PACK_NAMES.set(e.name, m(e.name, e.dex));
   }
 }
-/** The bases of the loaded pack's lines. */
 export const packLineNames = (): string[] => [...PACK.keys()];
 
-/**
- * A family's lines while a pack gives leads people instead of Pokémon (scope §4): each family type's lead line, then
- * its thread lines, in familyTypes order, each once. The lead lines are free then, as no lead holds a Pokémon.
- */
+/** The lead lines are free while a pack gives leads people, as no lead holds a Pokémon. */
 export const familyLinesWithLeads = (t: TypeFamily): string[] => [...new Set(familyTypes(t).flatMap((x) => [typeFamily(x)!.lead, ...typeFamily(x)!.threads]))];
 
-/**
- * The lines of a trainer's specialty type (2026-11-18, the owner: past its team a trainer's threads take lines of the
- * type it specialises in): the type's lead line and thread lines, then every other line of mons.ts that carries the
- * type, then the loaded pack's lines that do. Empty for no type (a Champion with no specialty).
- */
 export function specialtyLines(type: string | null | undefined): string[] {
   const t = typeFamily(type);
   if (!t) return [];
@@ -382,11 +320,6 @@ export function specialtyLines(type: string | null | undefined): string[] {
   return [...new Set([t.lead, ...t.threads, ...Object.keys(LINES).filter((b) => carries(LINES[b]!.types)), ...[...PACK].filter(([, l]) => carries(l.types)).map(([b]) => b)])];
 }
 
-/**
- * A thread's Pokémon while a pack applies: `first` (its trainer's lines: roster, specialty, fits; core/engine.ts threadTiers), then its family with the lead
- * lines (familyLinesWithLeads), then any free line; never one in `skip` (another live trainer's signature). A line any
- * of `taken` is on is skipped (freeLine); with every line held, its own lines are shared in turn, as pickMon does.
- */
 export function pickPackThread(taken: readonly string[], type: string | null, first: readonly string[], skip: readonly string[]): Mon {
   const fam = typeFamily(type) ?? TYPES[0]!;
   const ok = (n: string) => !!monByName(n) && !skip.includes(n);

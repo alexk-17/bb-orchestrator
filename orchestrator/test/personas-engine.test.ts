@@ -1,4 +1,4 @@
-// The personas hook in the engine (2026-11-18, scope §3-4): with the pokemon setting on and a pack loaded, the CoS, the
+// The personas hook in the engine (scope §3-4): with the pokemon setting on and a pack loaded, the CoS, the
 // Steward and the leads are people (a persona), and a lead's Pokémon is hidden, never deleted, and frees its line.
 // Threads draw from their lead's persona's lines first. Loading a pack moves each lead's oldest threads onto its
 // persona's roster lines (scope answer 4), and nothing else; removing one gives the leads their Pokémon back. Personas and projects here are made up (test/fixtures/personas-pack.json).
@@ -10,6 +10,7 @@ import { Engine, type DeliverResult, type Settings } from "../core/engine.ts";
 import { BRIEFS, BRIEF_VARS, introSentence, loadBrief } from "../core/start.ts";
 import { readPersonaPack, type PersonaPack } from "../personas.ts";
 import { baseOf, monByName, tokensForLevel } from "../mons.ts";
+import { deliverableRows, deliverableWhole } from "../core/deliverables-view.ts";
 
 const ports = { now: () => Date.parse("2026-11-18T10:00:00Z"), deliver: async (): Promise<DeliverResult> => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} };
 const PACK = readPersonaPack(join(import.meta.dirname, "fixtures", "personas-pack.json"));
@@ -119,7 +120,6 @@ function ticking(s: Partial<Settings>, db = new DatabaseSync(":memory:")) {
 const put = (db: DatabaseSync, threadId: string, mon: string) => db.prepare(`UPDATE agents SET mon = ?, mon_stage = NULL, mon_stage_level = NULL WHERE thread_id = ?`).run(mon, threadId);
 
 test("loading a pack moves each lead's oldest threads onto its persona's roster lines, in order; the CoS and the Steward stay", () => {
-  // the owner saw a trainer's party of the threads' old Pokémon beside its game team (2026-11-18): the moves fix that
   const { db, e } = ticking({ pokemon: true });
   e.register("T-cos", "cos", null);
   e.register("T-st", "steward", null);
@@ -141,7 +141,7 @@ test("loading a pack moves each lead's oldest threads onto its persona's roster 
 });
 
 test("with a pack, no thread holds the Steward's line, even when its trainer's roster names it", () => {
-  // 2026-11-18, the owner saw two Chanseys: the Steward's partner and a thread on Happiny's line, which shows Chansey
+  // a thread on Happiny's line shows Chansey, the Steward's partner
   const pack: PersonaPack = { ...PACK, personas: { ...PACK.personas, vesna: { ...PACK.personas.vesna!, roster: ["Happiny", "Feebas", "Budew"] } } };
   const { db, e } = ticking({ pokemon: true });
   e.register("T-st", "steward", null);
@@ -189,9 +189,7 @@ test("a roster move never takes another live trainer's signature; a line a threa
   assert.equal(e.settleMons(), 0);
 });
 
-// 2026-11-18, the owner: "Team only then after you run out of the team only pokemon that are of the same type that the
-// leads specialty is, then should fall back to other pokemon that would be a good fit". A thread's lines while a pack
-// applies: its trainer's roster, then its specialty type's lines, then its good fits, then (rarely) its project's family.
+// A thread's lines while a pack applies: its trainer's roster, then its specialty type's lines, then its good fits, then (rarely) its project's family.
 const withPersonas = (over: Record<string, Partial<PersonaPack["personas"][string]>>): PersonaPack => ({
   ...PACK,
   personas: Object.fromEntries(Object.entries(PACK.personas).map(([id, p]) => [id, { ...p, ...(over[id] ?? {}) }])),
@@ -221,8 +219,7 @@ test("a Champion with no specialty goes from its team straight to its fits", () 
 });
 
 test("the re-settle goes tier by tier across projects: a line goes back to the thread that ranks it higher", () => {
-  // a trainer's team line, held by another project's thread, goes back to that trainer's project (the owner's sidebar,
-  // 2026-11-18)
+  // a trainer's team line, held by another project's thread, goes back to that trainer's project
   const pack = withPersonas({
     vesna: { roster: ["Feebas", "Horsea", "Pichu"], type: "ghost" },
     pell: { roster: [], fits: ["Duskull"] }, // no team, no specialty: Duskull is his fits tier
@@ -370,4 +367,21 @@ test("a pack that fails its checks shows nothing and moves nothing", () => {
   assert.equal(e.personaOf(e.agentByAddress("lead:code-reviews")!), null);
   setup({ pokemon: true, personas: { error: "broken" } }, db);
   assert.deepEqual(rows(db), before, "nor at load");
+});
+
+test("Delivered shows a lead's persona, which no XP gain changes: only leads deliver, and a lead has no partner", () => {
+  const { e } = setup();
+  e.register("T-cos", "cos", null);
+  e.register("L-cr", "lead", "code-reviews");
+  e.register("W-1", "thread", "code-reviews", "L-cr");
+  const lead = e.agentByAddress("lead:code-reviews")!;
+  const d = e.deliver(lead, { title: "Made-up report", summary: "Done.", proof: [{ kind: "link", caption: "the report", url: "https://example.test/report" }] }, { roots: [] });
+  const rows = () => JSON.stringify([deliverableRows(e), deliverableWhole(e, d.id)]);
+  assert.equal(deliverableRows(e)[0]!.leadPersona?.name, "Vesna");
+  assert.deepEqual(deliverableWhole(e, d.id)!.leadPersona, e.personaOf(lead), "the same persona the other screens show");
+  assert.equal(e.leadPersonaOf(e.agentByAddress("cos")!), null, "the CoS's persona has a partner, from its XP: not on this path");
+  const before = rows();
+  for (const t of ["L-cr", "T-cos", "W-1"]) e.gainXp(t, tokensForLevel(60), 1);
+  assert.equal(e.xpOf("lead:code-reviews").level, 60);
+  assert.equal(rows(), before);
 });

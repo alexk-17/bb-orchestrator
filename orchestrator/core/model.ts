@@ -168,6 +168,8 @@ export interface Decision {
     revised?: { count: number; at: string; why: string } | null;
     /** A flagged board deliverable's card: its answer approves or sends back that revision. */
     board_review?: { deliverable: string; rev: number } | null;
+    /** The work-board task it is about (core/tasks.ts); absent: it follows its thread's. A plan card's threads get it. */
+    task?: string;
   };
 }
 
@@ -287,6 +289,8 @@ export interface Deliverable {
   folder?: string;
   /** A review a Multiplayer board triggered: reviewed on that board, never on Deliverables. `card`: the flag's Needs you card. */
   board?: DeliverableBoard;
+  /** The work-board task it belongs to (core/tasks.ts); absent: Unfiled. */
+  task?: string;
 }
 
 export interface DeliverableBoard {

@@ -51,7 +51,7 @@ async function host() {
   const remotes: string[] = []; // none: a local-only repo
   const cap = { n: 1000 };
   const prs: Record<string, unknown> = {}; // no PR: this project merges locally
-  const rec = { archived: [] as string[], hidden: [] as string[], stopped: [] as string[], prompts: [] as string[] };
+  const rec = { archived: [] as string[], hidden: [] as string[], stopped: [] as string[], prompts: [] as string[], parented: [] as { threadId: string; parentThreadId: string; parentNotifications?: string }[] };
   const tools = new Map<string, Tool>();
   let cliRun: ((argv: string[], ctx: { threadId: string | null; cwd: string | null }) => Promise<{ exitCode: number; stdout: string; stderr?: string }>) | null = null;
   const noop: any = new Proxy(function () {}, { get: (_t, k) => (k === "then" ? undefined : noop), apply: () => noop });
@@ -68,8 +68,9 @@ async function host() {
         threads.get(threadId)!.archivedAt = Date.now();
         return { ok: true, archivedThreadIds: [threadId] };
       },
-      update: async (u: { threadId: string; visibility?: string }) => {
+      update: async (u: { threadId: string; visibility?: string; parentThreadId?: string; parentNotifications?: string }) => {
         if (u.visibility === "hidden") rec.hidden.push(u.threadId);
+        if (u.parentThreadId) rec.parented.push({ threadId: u.threadId, parentThreadId: u.parentThreadId, parentNotifications: u.parentNotifications });
         return {};
       },
       stop: async ({ threadId }: { threadId: string }) => void rec.stopped.push(threadId),
@@ -202,6 +203,9 @@ test("a handoff hides its predecessor at once; resolving the successor archives 
   assert.deepEqual(h.rec.hidden, ["T-w"], "the stopped predecessor leaves the sidebar now, not at resolve");
   assert.deepEqual(h.rec.archived, [], "and is not archived: it shares the successor's worktree");
   assert.doesNotMatch(h.rec.prompts[0]!, /scoping thread/, "a thread started for no scoping task isn't told it is one");
+  // the successor gets the level orch_spawn_thread sets: under "auto", bb woke the lead at every turn end of a
+  // handed-off successor (seen live, 2026-11-24), outside the plugin's inbox and its wake gap
+  assert.deepEqual(h.rec.parented, [{ threadId: "T-succ", parentThreadId: "T-lead", parentNotifications: "stuck" }]);
   const res = await h.call("orch_resolve", { to: "thread:demo:1" });
   assert.match(res, /Archived T-w, T-succ/);
   assert.deepEqual(h.rec.archived, ["T-w", "T-succ"]);

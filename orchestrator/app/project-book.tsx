@@ -7,8 +7,9 @@
 // refreshed on the same change signal as the list, so the two sides never disagree.
 import { Fragment, useCallback, useContext, useLayoutEffect, useRef, useState, type CSSProperties, type MouseEvent, type ReactNode } from "react";
 import type { z } from "zod";
-import { experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
-import { CHANGED_CHANNEL, WRITES, rpcContract, type NeedsYou, type ProjectBook as Book, type Projects, type pinBody } from "../contract.ts";
+import { experimental_useRpcQuery, useBbNavigate } from "@get-bb/plugin-sdk/app";
+import { WRITES, rpcContract, type NeedsYou, type ProjectBook as Book, type Projects, type pinBody } from "../contract.ts";
+import { touches } from "../change-notice.ts";
 import { position } from "../core/status.ts";
 import { outOfDateLine, statusStale, waitLine } from "./command-center.ts";
 import { INLINE_LINK, RefText, RefsContext } from "./ref-text.tsx";
@@ -29,6 +30,7 @@ import { Btn } from "./ui.tsx";
 import { ThreadCards } from "./thread-card.tsx";
 import { PinStrip } from "./pins.tsx";
 import type { OpenCard } from "./projects.tsx";
+import { useChangeNotice } from "./change-listener.ts";
 
 type Project = Projects[number];
 
@@ -69,13 +71,13 @@ export function OpenRef({ open, children, title, data, className = "ref" }: { op
     if (plainClick(e) && openInBb(nav, open)) e.preventDefault();
   };
   return open.url ? (
-    <a className={className} href={open.url} target="_blank" rel="noopener noreferrer" data-ref={data} data-open-in-bb="" title={title} onClick={click}>
+    <a className={className} href={open.url} target="_blank" rel="noopener noreferrer" data-ref={data} data-open-in-bb="" data-prefetch-deliverable={open.panel?.deliverable} title={title} onClick={click}>
       {children}
     </a>
   ) : (
     // in a row beside a pill it gives way and ends in an ellipsis (2026-11-18: shadcn's Button never shrinks, so a long
     // deliverable title pushed the pill out of the Scope tab's status card; the ellipsis needs a block, not the flex button)
-    <Button variant="link" className={cn(className, INLINE_LINK, "min-w-0 shrink justify-start")} data-ref={data} data-open-in-bb="" title={title} onClick={click}>
+    <Button variant="link" className={cn(className, INLINE_LINK, "min-w-0 shrink justify-start")} data-ref={data} data-open-in-bb="" data-prefetch-deliverable={open.panel?.deliverable} title={title} onClick={click}>
       <span className="min-w-0 truncate">{children}</span>
     </Button>
   );
@@ -345,9 +347,8 @@ export function ProjectBook({
   const q = experimental_useRpcQuery({ contract: rpcContract, method: "projectBook", input: { slug: p.slug, dayStart: dayStart(now) } });
   const refetch = useRef(q.refetch);
   refetch.current = q.refetch;
-  useRealtime(
-    CHANGED_CHANNEL,
-    useCallback(() => void refetch.current(), []),
+  useChangeNotice(
+    useCallback((n: unknown) => void (touches(n, "projectBook") && refetch.current()), []),
   );
   const reload = () => void refetch.current();
   const shared = useContext(RefsContext);

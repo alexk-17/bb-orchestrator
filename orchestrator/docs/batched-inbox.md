@@ -38,7 +38,12 @@ carries the digest (2026-11-19): its own cursor covers exactly the items it show
 later arrivals stay unread for the next wake, and past `WAKE_DIGEST_CAP` characters
 it shows the first items and says how many more `orch_inbox` will read. A wake to a
 thread bb reports busy goes bare (no bodies), since bb queues it behind the turn. `inboxDebounceMs` defaults to 2000 and is checked by
-the existing 5-second clock. Busy/stopped/archived recipients and held projects
+the existing 5-second clock. A lead gets at least `inboxGapMs` (default 120000, 0 = off)
+between two wakes (2026-11-24): mail inside the gap joins the next wake, whose
+`due_at` moves to the gap's end; the owner's items, overdue items, the owner's Resend
+and the CoS's `retry_wake` skip it. The wake timer also fires at each unread deadline still to come, so an item due inside the gap goes at its deadline, not at the gap's end. The CoS, the Steward and threads have no gap. A held wake's `due_at` is worked out again at each flush from its own debounce, and a change to `inboxGapMs` runs a flush, so lowering the gap or turning it off shortens a wake it already held. Each
+wake that goes is kept in `inbox_wake_log`, and a status nudge waits for one after the
+lead's last status. Busy/stopped/archived recipients and held projects
 wait. Delivery uses `queue-if-active`, so a status race cannot steer an active
 turn. A queued wake is not retried while it remains queued.
 

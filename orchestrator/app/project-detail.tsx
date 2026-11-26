@@ -8,15 +8,16 @@
 // Projects tab's own reads. 2026-11-17 (the shadcn pass): the Range is a ToggleGroup, the chips Badges in the
 // palette's tones; the diagrams keep their own geometry.
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
-import { CHANGED_CHANNEL, rpcContract, type ProjectHistory, type Projects } from "../contract.ts";
+import { experimental_useRpcQuery, useBbNavigate } from "@get-bb/plugin-sdk/app";
+import { rpcContract, type ProjectHistory, type Projects } from "../contract.ts";
+import { touches } from "../change-notice.ts";
 import { Badge } from "./ui/badge.tsx";
 import { Button } from "./ui/button.tsx";
 import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group.tsx";
 import { AgentFace } from "./face.tsx";
 import { KIND_TONES, ROLE_TONES, css, roleOf, tint, type Tone } from "./palette.ts";
 import { ACCENT, accentTone, accentVars } from "./accent.ts";
-import { useWidth } from "./panes.tsx";
+import { usePaneFits, useWidth } from "./panes.tsx";
 import { ProofLink } from "./proof-link.tsx";
 import { Btn, EmptyState, Kind, ReadState } from "./ui.tsx";
 import { age, type Lane } from "./lanes.ts";
@@ -29,6 +30,7 @@ import { useIdentity } from "./identity.ts";
 import { PathwaysSection } from "./scope.tsx";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collapsible.tsx";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { useChangeNotice } from "./change-listener.ts";
 
 type Hist = ProjectHistory;
 type Row = Hist["rows"][number];
@@ -73,7 +75,8 @@ function Timeline({ h, width, lanes }: { h: Hist; width: number; lanes: Map<stri
   return (
     <div data-timeline="" className="flex flex-col gap-2">
       {long ? (
-        <div className="flex">
+        // the Range stays at the top of the scroll while the lanes go under it, down to the last lane
+        <div className="sticky top-0 z-10 flex bg-background pb-1" data-range-row="">
           <ToggleGroup type="single" variant="outline" size="sm" aria-label="Range" value={range} onValueChange={(v) => v && setRange(v as Range)}>
             <ToggleGroupItem value="all">All</ToggleGroupItem>
             <ToggleGroupItem value="week">7 days</ToggleGroupItem>
@@ -530,9 +533,8 @@ export function ProjectSections({ project, lanes, openCard, ownerName }: { proje
   const q = experimental_useRpcQuery({ contract: rpcContract, method: "projectHistory", input: { slug: project.slug } });
   const refetch = useRef(q.refetch);
   refetch.current = q.refetch;
-  useRealtime(
-    CHANGED_CHANNEL,
-    useCallback(() => void refetch.current(), []),
+  useChangeNotice(
+    useCallback((n: unknown) => void (touches(n, "projectHistory") && refetch.current()), []),
   );
   const box = useRef<HTMLDivElement>(null);
   const width = useWidth(box);
@@ -566,10 +568,13 @@ export function ProjectDetail({ project, lanes, onBack, openCard, ownerName, pat
   const now = useMinute();
   const { cosTitle } = useIdentity();
   const lead = project.lead;
+  // the page lays out its own scroll (panes.tsx [data-fits-pane]): its name row and Back stay put above the one region
+  // that scrolls, so a long lane list never takes them off screen (2026-11-24, the owner: the lanes couldn't be reached)
+  usePaneFits(true);
   return (
-    <div data-project-detail={project.slug} data-accent={project.monType ?? undefined} className="flex min-w-0 flex-col gap-3 pb-8" style={accentVars(project.monType)}>
+    <div data-project-detail={project.slug} data-fits-pane="" data-accent={project.monType ?? undefined} className="flex min-w-0 flex-col gap-3" style={accentVars(project.monType)}>
       {/* 2026-11-17: no accent bar under the head (the kept rule); the project's colour stays on its name */}
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
+      <div className="flex min-w-0 flex-none flex-wrap items-center gap-2" data-detail-name-row="">
         <Btn tone="ghost" data-detail-back="" onClick={onBack} aria-label="Back to Projects">
           ← Projects
         </Btn>
@@ -579,10 +584,14 @@ export function ProjectDetail({ project, lanes, onBack, openCard, ownerName, pat
         </span>
         {project.heldAt !== null ? <Kind of="held">On hold</Kind> : null}
       </div>
-      <StatusBar status={project.status} ownerName={ownerName} lanes={lanes} openCard={openCard} />
-      <AllWaits waits={project.summary?.waits ?? []} now={now} cos={cosTitle} />
-      <ProjectSections project={project} lanes={lanes} openCard={openCard} ownerName={ownerName} />
-      <PathwaysPart slug={project.slug} open={pathwaysOpen} />
+      {/* the one region that scrolls; 2 px each side so a card's edge or a focus ring isn't clipped, and a kept gutter so
+          the timeline's measured width doesn't change when the scrollbar comes */}
+      <div className="-mx-0.5 flex min-h-0 min-w-0 flex-1 flex-col gap-3 overflow-y-auto px-0.5 pb-8 [scrollbar-gutter:stable]" data-detail-scroll={project.slug}>
+        <StatusBar status={project.status} ownerName={ownerName} lanes={lanes} openCard={openCard} />
+        <AllWaits waits={project.summary?.waits ?? []} now={now} cos={cosTitle} />
+        <ProjectSections project={project} lanes={lanes} openCard={openCard} ownerName={ownerName} />
+        <PathwaysPart slug={project.slug} open={pathwaysOpen} />
+      </div>
     </div>
   );
 }

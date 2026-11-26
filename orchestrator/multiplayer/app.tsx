@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState, type ReactNode } from "react";
 import { experimental_useRpcQuery, useBbNavigate, useRealtime } from "@get-bb/plugin-sdk/app";
 import { ChevronRight, ExternalLink, Lock, Plus, Search } from "lucide-react";
-import { CHANGED_CHANNEL, type Deliverables } from "../contract.ts";
+import { type Deliverables } from "../contract.ts";
 import { DeliverableCard } from "../app/deliverables.tsx";
 import { PR_CHIP_TONES, ROLE_TONES, SLACK_TONES, css, roleOf, tint } from "../app/palette.ts";
 import { useElementWidth } from "../app/panes.tsx";
@@ -20,6 +20,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { ToggleGroup, ToggleGroupItem } from "../app/ui/toggle-group.tsx";
 import { MULTIPLAYER_CHANNEL, MULTIPLAYER_WRITES, multiplayerContract, type BoardView, type PrView, type RecordView } from "./contract.ts";
 import { FILTERS, ago, byDay, clock, counts, filterCounts, healthAt, open, reviewed, settled, shown, span, took, type Filter } from "./core/views.ts";
+import { useChangeNotice } from "../app/change-listener.ts";
 
 const WHERE = "multiplayer";
 const NO_WATCHER = "-";
@@ -115,7 +116,7 @@ export function MultiplayerTab({ deliverables, refetchAll, openCard, initial = n
   refetch.current = q.refetch;
   const again = useCallback(() => void refetch.current(), []);
   useRealtime(MULTIPLAYER_CHANNEL, again);
-  useRealtime(CHANGED_CHANNEL, again);
+  useChangeNotice(again);
   const [width, measure] = useElementWidth();
   const [picked, setPicked] = useState<string | null>(initial);
   const [view, setView] = useState<View>({ t: "now" });
@@ -399,6 +400,7 @@ function Now({ b, records, now, wide, show, openCard }: { b: BoardView; records:
             <Row
               key={r.id}
               data-record={r.id}
+              data-prefetch-deliverable={r.deliverable?.id}
               face={<Face address={r.thread?.address ?? r.lead} />}
               main={
                 <>
@@ -443,7 +445,7 @@ function Now({ b, records, now, wide, show, openCard }: { b: BoardView; records:
                       Open card
                     </Btn>
                   ) : null}
-                  <Btn size="sm" tone="ghost" icon={<ChevronRight />} aria-label="Open the review" onClick={() => show(r)} />
+                  <Btn size="sm" tone="ghost" icon={<ChevronRight />} aria-label="Open the review" onClick={() => show(r)} data-prefetch-deliverable={r.deliverable?.id} />
                 </>
               }
             />
@@ -547,7 +549,7 @@ function Timeline({ records, now, show }: { records: RecordView[]; now: number; 
           {d.records.map((r) => {
             const t = took(r);
             return (
-              <div key={r.id} className="flex flex-col gap-2" data-record={r.id}>
+              <div key={r.id} className="flex flex-col gap-2" data-record={r.id} data-prefetch-deliverable={r.deliverable?.id}>
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
                   <span className="text-xs text-muted-foreground tabular-nums">{clock(r.askedAt ?? r.createdAt)}</span>
                   <b className="font-semibold">{asker(r)}</b>
@@ -562,7 +564,7 @@ function Timeline({ records, now, show }: { records: RecordView[]; now: number; 
                     <ul className="m-0 list-none divide-y p-0">
                       {r.prs.map((p) => (
                         <li key={p.url}>
-                          <Btn tone="ghost" className="h-auto w-full flex-wrap justify-start gap-x-3 gap-y-1 rounded-none px-4 py-2.5 text-left font-normal whitespace-normal" onClick={() => show(r, p.url)} data-pr={p.url}>
+                          <Btn tone="ghost" className="h-auto w-full flex-wrap justify-start gap-x-3 gap-y-1 rounded-none px-4 py-2.5 text-left font-normal whitespace-normal" onClick={() => show(r, p.url)} data-pr={p.url} data-prefetch-deliverable={r.deliverable?.id}>
                             <span className="flex min-w-48 flex-1 items-baseline gap-2">
                               <span className="font-medium underline underline-offset-2">{p.name}</span>
                               <span className="min-w-0 [overflow-wrap:anywhere]">{p.title ?? ""}</span>

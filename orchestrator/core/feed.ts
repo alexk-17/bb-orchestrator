@@ -1,7 +1,9 @@
 // The Feed tab's read (D2-D6): one paged list of posts by latest agent activity, reply counts from one grouped query.
-import type { Db } from "./db.ts";
+import { type Db, prepareHinted } from "./db.ts";
 import type { Decision, Deliverable } from "./model.ts";
 import type { LeadStatus } from "./status.ts";
+import { DROPPED } from "./batch-inbox.ts";
+import { DERIVED, OWNER_MAIL } from "../change-notice.ts";
 
 export const FEED_PAGE = 50;
 /** Newest exchanges a post carries; "Show N earlier replies" reads the rest (feedThread). */
@@ -57,9 +59,10 @@ export interface FeedPage {
   seen: number;
   newCount: number;
   counts: { needsYou: number; delivered: number; alerts: number };
-  leftOut: number;
+  leftOutSince: number;
   now: number;
   last: (FeedMsg & { to: string; about: string }) | null; // the owner's latest message on either line, for the dock's state line
+  turnsAt: number | null;
 }
 
 /** A pending bb prompt from the CoS, the Steward or a lead (worker threads' stay on Needs you, D2). */
@@ -78,12 +81,13 @@ export interface FeedSource {
   seen: number;
   resendMs: number;
   batched: boolean;
-  batchReadAt: (itemId: string) => number | null;
   openCards: Decision[];
   scopeCards: Decision[];
   live: (address: string) => boolean;
   heldProjects: ReadonlySet<string>;
   prompts: FeedPrompt[];
+  /** A message's state turns at this time by the clock alone, with no write to tell the page. */
+  turnsAt?: (at: number) => void;
 }
 
 const ms = (iso: string | null | undefined) => (iso ? Date.parse(iso) : 0);
@@ -91,6 +95,14 @@ const one = (s: string, n = 280) => s.replace(/\s+/g, " ").trim().slice(0, n);
 
 // A lead's answer is its ack note on the owner's message; the engine's own closures (archive, dead letter) aren't.
 const LEAD_ANSWER = `(kind = 'owner.message' AND state = 'closed' AND note IS NOT NULL AND TRIM(note) != '' AND NOT (outcome = 'superseded' AND note = 'project archived') AND note NOT LIKE 'closed by %')`;
+/** The owner's answered cards, and the time their post is at (cardCand's `at`): db.ts decisions_feed_answered indexes both. */
+const ANSWERED = `state IN ('answered','acked') AND json_extract(json, '$.answer.by') = 'person'`;
+const ANSWERED_AT = `COALESCE(NULLIF(json_extract(json, '$.returned.at'), ''), NULLIF(json_extract(json, '$.ask.at'), ''), json_extract(json, '$.created_at'))`;
+/** A page's upper bound as the cards' ISO time text (all toISOString, so text order is time order); none past the dates. */
+const isoBound = (top: number) => {
+  const d = new Date(top);
+  return Number.isNaN(d.getTime()) ? "~" : d.toISOString();
+};
 const ANSWER_AT = `CASE WHEN kind = 'cos.reply' THEN created_at WHEN ${LEAD_ANSWER} THEN closed_at END`;
 
 interface ItemRow {
@@ -121,13 +133,17 @@ function conversations(db: Db): Map<string, { n: number; answered: number | null
 function stateOf(row: ItemRow, src: FeedSource, answered: boolean): { state: string; tone: "ok" | "warn" | null; resend: boolean } {
   // batched, a message stays pending until its recipient's digest is acked: it went out with the wake
   const r = src.batched && row.state === "pending" ? { ...row, state: "delivered", delivered_at: row.delivered_at ?? row.created_at } : row;
-  const late = (since: number | null) => src.now - (since ?? r.created_at) >= src.resendMs;
+  const late = (since: number | null) => {
+    const at = (since ?? r.created_at) + src.resendMs;
+    if (src.now < at) src.turnsAt?.(at);
+    return src.now >= at;
+  };
   if (r.kind === "owner.cos") {
     if (answered) return { state: "answered", tone: "ok", resend: false };
     if (r.state === "dead") return { state: "no reply yet", tone: "warn", resend: true };
     if (r.state === "pending") return { state: "sent", tone: null, resend: false };
     if (r.state === "queued") return { state: "queued", tone: null, resend: false };
-    const read = r.state === "closed" || src.batchReadAt(r.id) !== null;
+    const read = r.state === "closed" || readAt(src.db, r.id) !== null;
     if (late(r.delivered_at ?? r.closed_at)) return { state: read ? "read · no reply yet" : "no reply yet", tone: "warn", resend: true };
     return { state: read ? "read" : "delivered", tone: null, resend: false };
   }
@@ -138,6 +154,18 @@ function stateOf(row: ItemRow, src: FeedSource, answered: boolean): { state: str
   if (r.state === "pending" || r.state === "queued") return { state: "sent", tone: null, resend: false };
   if (late(r.delivered_at)) return { state: "no reply yet", tone: "warn", resend: true };
   return { state: "delivered", tone: null, resend: false };
+}
+
+/** A batched message's receipt: when its recipient acked the digest it went out in. */
+function readAt(db: Db, id: string): number | null {
+  const e = db.prepare(`SELECT e.acked_at FROM inbox_entries e JOIN items ON items.id = e.item_id WHERE e.item_id = ? AND items.kind IN ('owner.message','owner.cos')`).get(id) as { acked_at: number | null } | undefined;
+  return !e || e.acked_at === DROPPED ? null : e.acked_at;
+}
+
+/** The owner's mail and its receipts, as the feed reads them, printed for the change notice (change-notice.ts OWNER_MAIL). */
+export function ownerMailPrint(db: Db): string {
+  const kinds = DERIVED[OWNER_MAIL].items.map((k) => `'${k}'`).join(",");
+  return JSON.stringify(db.prepare(`SELECT ${ITEM_COLS}, (SELECT acked_at FROM inbox_entries WHERE item_id = items.id) AS read_at FROM items WHERE kind IN (${kinds}) ORDER BY id`).all());
 }
 
 /** A deliverable's revision at a time: the newest delivered by then. */
@@ -226,6 +254,13 @@ function cardCand(d: Decision, open: boolean, scope: boolean): Cand {
   };
 }
 
+/** A deliverable's post whose JSON is parsed only when the post is built (deliverableCand's `at`, read from the index). */
+function lazyDeliverableCand(db: Db, id: string, at: number): Cand {
+  let c: Cand | null = null;
+  const real = () => (c ??= deliverableCand(JSON.parse((db.prepare(`SELECT json FROM deliverables WHERE id = ?`).get(id) as { json: string }).json) as Deliverable));
+  return { key: `deliverable:${id}`, at, build: () => real().build() };
+}
+
 function deliverableCand(d: Deliverable): Cand {
   const last = d.revisions.at(-1);
   const at = ms(last?.at) || d.createdAt;
@@ -251,8 +286,15 @@ function deliverableCand(d: Deliverable): Cand {
   };
 }
 
+/** The source, and the earliest time a state drawn from it turns by the clock alone. */
+function timed(source: FeedSource): { src: FeedSource; turnsAt: () => number | null } {
+  let turnsAt: number | null = null;
+  return { src: { ...source, turnsAt: (at) => void (turnsAt = Math.min(turnsAt ?? at, at)) }, turnsAt: () => turnsAt };
+}
+
 /** One page, newest activity first: each source's newest posts plus each post a later answer lifted. */
-export function feedPage(src: FeedSource, opts: { cursor: string | null; filter: FeedFilter; limit?: number }): FeedPage {
+export function feedPage(source: FeedSource, opts: { cursor: string | null; filter: FeedFilter; limit?: number }): FeedPage {
+  const { src, turnsAt } = timed(source);
   const { db } = src;
   const limit = Math.max(1, Math.min(FEED_PAGE, opts.limit ?? FEED_PAGE));
   const [curAt, curKey] = opts.cursor ? [Number(opts.cursor.slice(0, opts.cursor.indexOf("|"))), opts.cursor.slice(opts.cursor.indexOf("|") + 1)] : [Number.POSITIVE_INFINITY, ""];
@@ -270,9 +312,22 @@ export function feedPage(src: FeedSource, opts: { cursor: string | null; filter:
     for (const d of src.openCards) if (!held(d.project)) (openIds.add(d.id), add(cardCand(d, true, false)));
     for (const d of src.scopeCards) if (!held(d.project)) (openIds.add(d.id), add(cardCand(d, true, true)));
     if (f === "all") {
-      const rows = db.prepare(`SELECT json FROM decisions WHERE state IN ('answered','acked') AND json_extract(json, '$.answer.by') = 'person'`).all() as { json: string }[];
-      const acted = rows.map((r) => JSON.parse(r.json) as Decision).filter((d) => !held(d.project) && !openIds.has(d.id)).map((d) => cardCand(d, false, !!d.orchestrator.scope));
-      for (const c of acted.filter((c) => c.at < top).sort((a, b) => b.at - a.at).slice(0, limit + 1)) add(c);
+      // the newest limit + 1 before the cursor, in post order straight from their index (db.ts decisions_feed_answered):
+      // only those are parsed. Ties keep the order the whole set had before (state, then rowid)
+      const out = [...src.heldProjects];
+      const open = [...openIds];
+      const rows = prepareHinted(
+        db,
+        "decisions_feed_answered",
+        `SELECT json FROM decisions INDEXED BY decisions_feed_answered WHERE ${ANSWERED} AND ${ANSWERED_AT} < ?
+             AND (project IS NULL OR project NOT IN (${out.map(() => "?").join(",")})) AND id NOT IN (${open.map(() => "?").join(",")})
+           ORDER BY ${ANSWERED_AT} DESC, state, rowid LIMIT ?`,
+      ).all(isoBound(top), ...out, ...open, limit + 1) as { json: string }[];
+      for (const r of rows) {
+        const d = JSON.parse(r.json) as Decision;
+        const c = cardCand(d, false, !!d.orchestrator.scope);
+        if (c.at < top) add(c);
+      }
     }
   }
   if (want("prompt"))
@@ -280,13 +335,15 @@ export function feedPage(src: FeedSource, opts: { cursor: string | null; filter:
       add({ key: `prompt:${p.id}`, at: ms(p.since), build: () => ({ ...blank, key: `prompt:${p.id}`, kind: "prompt", author: p.address, project: p.address.startsWith("lead:") ? p.address.slice(5) : null, line: null, title: p.title, text: "Waits on your answer in its thread.", at: ms(p.since), needsOwner: true, prompt: { threadId: p.threadId, id: p.id } }) });
   const revs = new Map<string, { rev: number; at: number }[]>();
   if (want("deliverable")) {
-    const rows = db.prepare(`SELECT json FROM deliverables WHERE state != 'withdrawn' AND json_extract(json, '$.board') IS NULL ORDER BY updated_at DESC LIMIT 500`).all() as { json: string }[];
+    // every column here is in db.ts deliverables_list, so no JSON is read: a post parses its deliverable only when built
+    // (on the page, or lifted). Its revisions for "on rev n" are read for the page's posts below (revsOf).
+    const rows = db
+      .prepare(`SELECT id, project, state, created_at, json_extract(json, '$.revisions[#-1].at') AS last_at FROM deliverables WHERE json_extract(json, '$.board') IS NULL AND state != 'withdrawn' ORDER BY updated_at DESC, rowid ASC LIMIT 500`)
+      .all() as { id: string; project: string | null; state: string; created_at: number; last_at: string | null }[];
     for (const r of rows) {
-      const d = JSON.parse(r.json) as Deliverable;
-      if (held(d.project) || (d.state !== "review" && f !== "all" && f !== "delivered")) continue;
-      revs.set(`deliverable:${d.id}`, d.revisions.map((x) => ({ rev: x.rev, at: ms(x.at) })));
-      const c = deliverableCand(d);
-      if (c.at < top || d.state === "review") add(c);
+      if (held(r.project) || (r.state !== "review" && f !== "all" && f !== "delivered")) continue;
+      const at = ms(r.last_at) || r.created_at;
+      if (at < top || r.state === "review") add(lazyDeliverableCand(db, r.id, at));
     }
   }
   if (f === "all") {
@@ -310,13 +367,13 @@ export function feedPage(src: FeedSource, opts: { cursor: string | null; filter:
     }
   }
   if (want("alarm")) {
-    const rows = db.prepare(`SELECT id, kind, from_address, project, title, body, ref, at FROM board WHERE kind IN ('alarm','dead') AND at < ? ORDER BY at DESC LIMIT ?`).all(top, limit + 1) as { id: string; kind: string; from_address: string | null; project: string | null; title: string; body: string; at: number }[];
+    const rows = db.prepare(`SELECT id, kind, from_address, project, title, body, ref, at FROM board WHERE kind IN ('alarm','dead') AND at < ? ORDER BY at DESC, rowid ASC LIMIT ?`).all(top, limit + 1) as { id: string; kind: string; from_address: string | null; project: string | null; title: string; body: string; at: number }[];
     for (const b of rows)
       add({ key: `board:${b.id}`, at: b.at, build: () => ({ ...blank, key: `board:${b.id}`, kind: b.kind === "dead" ? "dead" : "alarm", author: b.kind === "dead" ? (b.from_address ?? "cos") : "steward", project: b.project, line: b.kind === "dead" ? "cos" : null, title: b.title, text: one(b.kind === "alarm" ? "" : b.body.split("\n")[0] ?? ""), at: b.at }) });
   }
   if (f === "all") {
     // the owner's own posts: a message written with no post (the Projects tab, the docked bar, the Chat tab)
-    const rows = db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE about >= 'msg:' AND about < 'msg;' AND about = 'msg:' || id AND created_at < ? ORDER BY created_at DESC LIMIT ?`).all(top, limit + 1) as ItemRow[];
+    const rows = db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE about >= 'msg:' AND about < 'msg;' AND about = 'msg:' || id AND kind IN ('owner.message','owner.cos') AND created_at < ? ORDER BY created_at DESC LIMIT ?`).all(top, limit + 1) as ItemRow[];
     for (const r of rows) add(ownCand(r));
   }
 
@@ -346,7 +403,7 @@ export function feedPage(src: FeedSource, opts: { cursor: string | null; filter:
     const conversation = conv.get(c.key);
     const rootId = p.kind === "message" ? p.key.slice(4) : null;
     const rows = thread.get(c.key) ?? [];
-    const rootRow = rootId ? (rows.find((r) => r.id === rootId) ?? (db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE id = ?`).get(rootId) as ItemRow | undefined)) : undefined;
+    const rootRow = rootId ? (rows.find((r) => r.id === rootId) ?? (db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE id = ? AND kind IN ('owner.message','owner.cos')`).get(rootId) as ItemRow | undefined)) : undefined;
     const all = entries(rootRow && !rows.includes(rootRow) ? [rootRow, ...rows] : rows, src, revs, imgs);
     const self = rootId ? (all.find((m) => m.id === rootId) ?? null) : null;
     const rest = all.filter((m) => m !== self);
@@ -355,13 +412,9 @@ export function feedPage(src: FeedSource, opts: { cursor: string | null; filter:
     return { ...p, activity, isNew: p.needsOwner || activity > src.seen, held: held(p.project), lineLive: !!p.line && src.live(p.line), replies: n, thread: shown, earlier: Math.max(0, n - shown.length), self };
   });
   const lastRow = db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE sender = 'person' AND kind IN ('owner.message','owner.cos') ORDER BY created_at DESC, rowid DESC LIMIT 1`).get() as ItemRow | undefined;
-  const lastMsg = lastRow ? entries([lastRow, ...(db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE kind = 'cos.reply' AND ref = ?`).all(lastRow.id) as ItemRow[])], src, new Map(), new Map())[0]! : null;
+  const lastMsg = lastRow ? entries([lastRow, ...(db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE kind = 'cos.reply' AND ref = ?`).all(lastRow.id) as ItemRow[])], source, new Map(), new Map())[0]! : null;
 
   const last = page.at(-1);
-  const oldest = last ? last.activity : src.now;
-  const leftOut =
-    (db.prepare(`SELECT COUNT(*) AS n FROM items WHERE created_at >= ? AND kind NOT IN ('owner.message','owner.cos','cos.reply')`).get(oldest) as { n: number }).n +
-    (db.prepare(`SELECT COUNT(*) AS n FROM board WHERE at >= ? AND kind NOT IN ('alarm','dead')`).get(oldest) as { n: number }).n;
   const reviewCount = (db.prepare(`SELECT COUNT(*) AS n FROM deliverables WHERE state = 'review' AND json_extract(json, '$.board') IS NULL`).get() as { n: number }).n;
   return {
     posts,
@@ -373,10 +426,19 @@ export function feedPage(src: FeedSource, opts: { cursor: string | null; filter:
       delivered: reviewCount,
       alerts: (db.prepare(`SELECT COUNT(*) AS n FROM board WHERE kind IN ('alarm','dead') AND at > ?`).get(src.seen) as { n: number }).n,
     },
-    leftOut,
+    leftOutSince: last ? last.activity : src.now,
     now: src.now,
     last: lastRow && lastMsg ? { ...lastMsg, to: lastRow.recipient, about: lastRow.about } : null,
+    turnsAt: turnsAt(),
   };
+}
+
+/** The footer's count: the mail and board rows since the first page's oldest post, which the feed leaves out. */
+export function leftOutCount(db: Db, since: number): number {
+  return (
+    (db.prepare(`SELECT COUNT(*) AS n FROM items WHERE created_at >= ? AND kind NOT IN ('owner.message','owner.cos','cos.reply')`).get(since) as { n: number }).n +
+    (db.prepare(`SELECT COUNT(*) AS n FROM board WHERE at >= ? AND kind NOT IN ('alarm','dead')`).get(since) as { n: number }).n
+  );
 }
 
 function revsOf(db: Db, id: string): { rev: number; at: number }[] {
@@ -409,7 +471,7 @@ function candFor(db: Db, src: FeedSource, key: string): Cand | null {
     return r ? deliverableCand(JSON.parse(r.json) as Deliverable) : null;
   }
   if (key.startsWith("msg:")) {
-    const r = db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE id = ?`).get(id) as ItemRow | undefined;
+    const r = db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE id = ? AND kind IN ('owner.message','owner.cos')`).get(id) as ItemRow | undefined;
     return r && r.about === key ? ownCand(r) : null;
   }
   if (key.startsWith("board:")) {
@@ -430,13 +492,21 @@ function candFor(db: Db, src: FeedSource, key: string): Cand | null {
   return null;
 }
 
+export interface FeedThread {
+  messages: FeedMsg[];
+  more: boolean;
+  now: number;
+  turnsAt: number | null;
+}
+
 /** A post's conversation before `before` (null: all of it), oldest first, at most the newest `limit` entries. */
-export function feedThread(src: FeedSource, about: string, before: number | null, limit = 100): { messages: FeedMsg[]; more: boolean } {
+export function feedThread(source: FeedSource, about: string, before: number | null, limit = 100): FeedThread {
+  const { src, turnsAt } = timed(source);
   const rows = src.db.prepare(`SELECT ${ITEM_COLS} FROM items WHERE about = ? AND kind IN ('owner.message','owner.cos','cos.reply') ORDER BY created_at, rowid`).all(about) as ItemRow[];
   const revs = new Map<string, { rev: number; at: number }[]>();
   if (about.startsWith("deliverable:")) revs.set(about, revsOf(src.db, about.slice("deliverable:".length)));
   const all = entries(rows, src, revs, imagesOf(src.db, rows.map((r) => r.id))).filter((m) => before === null || m.at < before);
-  return { messages: all.slice(-limit), more: all.length > limit };
+  return { messages: all.slice(-limit), more: all.length > limit, now: src.now, turnsAt: turnsAt() };
 }
 
 export interface CosLineEntry {

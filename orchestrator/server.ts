@@ -1,17 +1,12 @@
-// bb-plugin-orchestrator, the server: roles, decisions, mail, rules, the board and the Steward, on bb's own events.
-// Spec: docs/orchestrator-spec.md in the source repo. The engine (core/engine.ts) holds every rule; this file wires
-// it to bb: agent tools, per-role configuration and live instructions, lifecycle events, the clock, the host sampler,
-// RPC reads, the owner's HTTP writes and the `bb orchestrator` CLI.
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { runGroup } from "./core/run-group.ts";
 import { randomUUID } from "node:crypto";
 import { cliRun, setupSidebar } from "./core/sidebar.ts";
-// deliverables
 import { chmodSync, closeSync, cpSync, createReadStream, openSync, readdirSync, readSync, rmSync, statSync } from "node:fs";
 import { Readable } from "node:stream";
-import { approveBody, type DeliverableFolders, type Deliverables, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody, type Pathways, type PathwaysErrorKind } from "./contract.ts";
+import { approveBody, type DeliverableFolders, type DeliverableRows, PROOF_ROUTE, type ProjectOrder, requestChangesBody, secretBody, type Pathways, type PathwaysErrorKind } from "./contract.ts";
 import { projectIssues, pathwaysAhead, pathwaysMap, linkPathwaysDecisions, attachPathwaysPreflight, draftPathwaysDecision, summarizePathwaysRetro, pathwaysDecisionKey, submitPathwaysDecision, mapPathwaysLimited, selectPathwaysMap, type PathwaysIssue } from "./core/pathways.ts";
 import { collectPathwaysProofRecords, reducePathwaysPr, reducePathwaysProof, reducePathwaysWaitLane } from "./core/pathways-pr.ts";
 import { createPathwaysSnapshots, type PathwaysSnapshot, type PathwaysView } from "./core/pathways-snapshot.ts";
@@ -23,8 +18,11 @@ import { CARD_CAPS, DELIVER_BUDGET, deliverBudgetRefusal } from "./core/caps.ts"
 import { ignoredTopLevelUpdate, statusParams, statusLine } from "./core/status.ts";
 import { type DirectImage, MAX_IMAGE_BYTES, imageInput, safeName, sniff } from "./core/direct-images.ts";
 import { checkAnswers, toQuestions } from "./interactions.ts";
+import { BB, type ChangeNotice, KNOWN_TABLES } from "./change-notice.ts";
+import { ReadCache, shareReads } from "./core/read-cache.ts";
+import { loopDelay, timeReads } from "./core/slow-reads.ts";
+import { ChangeTables, DerivedTables, recordWrites } from "./core/write-log.ts";
 
-/** A pending interaction as bb lists it (only the fields read here). */
 type RawInteraction = { id: string; createdAt?: number; kind?: string; status?: string; payload?: { kind?: string } };
 import { type Deliverable, oneLine, PROJECT_MODES, PROOF_KINDS, type ProjectMode } from "./core/model.ts";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
@@ -39,6 +37,10 @@ import {
   type Outputs,
   CHANGED_CHANNEL,
   holdBody,
+  boardMoveBody,
+  viewPrefBody,
+  viewPrefsSchema,
+  type ViewPrefs,
   directMessageBody,
   directImageBody,
   cosImageBody,
@@ -72,11 +74,14 @@ import {
   type Card,
   type Watchers,
 } from "./contract.ts";
-import type { Db } from "./core/db.ts";
+import { tuneConnection, type Db } from "./core/db.ts";
+import { deliverableIndex, deliverableRows, deliverableWhole } from "./core/deliverables-view.ts";
 import { type DeliverResult, Engine, OUTPUT_KINDS, parseSince, type PrResult, type Settings, WAIT_WHEN } from "./core/engine.ts";
+import { ROLE_TOOLS_KEY, roleToolsChanges } from "./core/role-tools.ts";
 import { PINS_MAX } from "./core/pins.ts";
 import { DAY_MS, prune, pruneSummary } from "./core/retention.ts";
 import { GONE_CHECK_MS, lookThreads } from "./core/gone.ts";
+import { autoUnderLead, type BbNotify } from "./core/notify-level.ts";
 import { readThreadPrs } from "./core/pr-links.ts";
 import { AlarmState, describe as describeAlarm, sample, type Snapshot, type Thresholds } from "./core/host.ts";
 import {
@@ -93,13 +98,12 @@ import { adoptThread, type AdoptThread } from "./core/adopt.ts";
 import { spawnSelection, START_DEFAULTS } from "./core/provider.ts";
 import { newProject } from "./core/new-project.ts";
 import { cosTitleOf, ownerWords, type OwnerWords } from "./core/owner.ts";
-// dreams
 import { type DreamOptions, Dreams, loadDreamConfig, parseTimers, parseUnits, realDreamPorts, toolsDir } from "./core/dreams.ts";
-// the Cloud tab
 import { registerCloud } from "./cloud/server.ts";
 import { registerOpenPrs } from "./open-prs/server.ts";
+import { registerBoardSince, sinceRead } from "./board-since.ts";
+import { FILE_KINDS, TIDY_ACTIONS } from "./core/board-tidy.ts";
 import { OPEN_PRS_COPIED, OPEN_PRS_POST, openPrsCopiedBody, openPrsPostBody } from "./open-prs/contract.ts";
-// the CodeRabbit review queue (review-queue/)
 import { registerReviewQueue } from "./review-queue/server.ts";
 import { queueSetUp } from "./core/review-queue.ts";
 import { shownUntilUsed } from "./app/hidden-tabs.ts";
@@ -109,12 +113,10 @@ import { MULTIPLAYER_WRITES } from "./multiplayer/contract.ts";
 import { boardAddBody, boardRemoveBody } from "./multiplayer/core/boards.ts";
 import { recordParams } from "./multiplayer/core/records.ts";
 import { everyArg } from "./multiplayer/core/watch.ts";
-// voice mode (voice/), off by default
 import { registerVoice } from "./voice/server.ts";
 import { REVIEW_QUEUE_WRITE, queueActionSchema } from "./review-queue/contract.ts";
 import { uncoveredWaitUrls } from "./core/open-prs.ts";
 import { JOB_IDS, jobRefusal, jobsView, watchText } from "./core/watchers.ts";
-// the Game Boy tab
 import { registerGameboy } from "./gameboy/server.ts";
 import { baseBranchOf, EXEMPT_NOTE, remoteBase, remoteBranchFor, worktreeVerdict, type Verdict, type WorkspaceRead } from "./core/clean.ts";
 import { DEFAULT_CONFIG_PATH as DEFAULT_CLOUD_CONFIG } from "./cloud/core/config.ts";
@@ -123,21 +125,25 @@ import { type ChildLevel, type NotifySaved, SAVED_KEY as NOTIFY_SAVED, serialRec
 const TOOLS_BY_ROLE: Record<Role, string[]> = {
   thread: ["orch_ask", "orch_ack", "orch_send", "orch_inbox", "orch_report", "orch_output"],
   lead: ["orch_ask", "orch_forward", "orch_answer", "orch_ack", "orch_send", "orch_inbox", "orch_report", "orch_stop_thread", "orch_spawn_thread", "orch_resolve", "orch_handoff", "orch_output", "orch_deliver", "orch_deliver_withdraw", "orch_status", "orch_scope_task", "orch_review_record"],
-  cos: ["orch_triage", "orch_propose_rule", "orch_ack", "orch_send", "orch_inbox", "orch_needs_you", "orch_moot", "orch_deliverables", "orch_dead_letters", "orch_start_lead", "orch_new_project", "orch_project_mode", "orch_watch", "orch_reply_owner"],
+  cos: ["orch_triage", "orch_propose_rule", "orch_ack", "orch_send", "orch_inbox", "orch_needs_you", "orch_moot", "orch_board_tidy", "orch_deliverables", "orch_dead_letters", "orch_start_lead", "orch_new_project", "orch_project_mode", "orch_watch", "orch_reply_owner"],
   steward: ["orch_ask", "orch_ack", "orch_send", "orch_inbox", "orch_host", "orch_cleanup", "orch_needs_you", "orch_deliverables"],
 };
 
-/** Each role's standing instructions; `o` names the owner (the ownerName setting). */
 const roleBrief = (o: OwnerWords): Record<Role, string> => ({
-  cos: `You are the Chief of Staff (cos) in ${o.name}'s orchestrator. You hear only what needs judgment: new decisions to triage and messages to you. For each decision use orch_triage: settle (only by citing a standing rule id that covers it; never a merge card), ask_person (2-4 options, recommended first), or merge a question into a duplicate question (never a plan or merge card). Ack messages with orch_ack. You get a read-only copy of each answer ${o.name} gives (no ack). orch_needs_you lists what is on ${o.name}'s Needs you now and what was answered or went moot lately; when a card there no longer needs an answer (its PR merged, the asker found out), take it off with orch_moot(id, reason): the asker is told why. orch_deliverables lists what leads delivered to ${o.name}, its review state and proof. Dead letters (mail nobody took) come to you, not ${o.name}'s board: an hourly notice lists new ones; with orch_dead_letters resend one, re-route it to the right address, close it for its recipient, or escalate it to ${o.name}'s board with your note when only ${o.name} can fix it. orch_new_project(brief) creates a project (its folder with PROJECT.md and the project record, and its row at the brief's priority) from slug, title, repo (an existing absolute path; a URL alone is refused, nothing is cloned), goal, and optional repo_url, base, constraints, priority, mode; it refuses a taken slug or folder and never starts the lead. mode=scoping starts the project in scoping mode: its lead's cards and deliverables go only to ${o.name}'s Scope tab, you get read-only copies (never triage, settle, merge or moot them), and ${o.name}'s yes on the lead's "Scoping done?" card makes it active; orch_project_mode(slug, mode) sets or clears it on an existing project. orch_watch lists every open PR wait and timed job, and adds, retargets (another PR and/or condition), moves (to another agent) or drops any PR wait, for anyone; its owners are told. Intervals are ${o.name}'s settings: you only list them. orch_start_lead(slug) starts lead:<slug> through the same checks as ${o.name}'s Start lead button (project folder, a repo under "## Repos" that exists here, not on hold, no live lead); ${o.name}'s board shows that you started it. You get a read-only copy of each direct message ${o.name} sends a lead from the Projects tab and of the lead's ack note: for 48 h it wins on its point over your instructions, earlier or later, and as a dead letter you may resend or escalate it but never re-route or close it. ${o.Name}'s replies to you under a post in the feed are tracked: answer each with orch_reply_owner(ref=<its id>, text), which shows your reply under it in ${o.name}'s feed; an answer only in your chat leaves it "no reply yet". A message typed straight into your chat (the Chat tab) is plain chat: answer it there. When a lead starts, plans or reports work one of ${o.name}'s standing practices in your recovery view covers, remind the lead of it and check that the plan's done criteria or the report say it was done (that includes plan cards you settle); ask the lead when they don't. Do not poll; wait for [orchestrator] messages.`,
+  cos: `You are the Chief of Staff (cos) in ${o.name}'s orchestrator. You hear only what needs judgment: new decisions to triage and messages to you. For each decision use orch_triage: settle (only by citing a standing rule id that covers it; never a merge card), ask_person (2-4 options, recommended first), or merge a question into a duplicate question (never a plan or merge card). Ack messages with orch_ack. You get a read-only copy of each answer ${o.name} gives (no ack). orch_needs_you lists what is on ${o.name}'s Needs you now and what was answered or went moot lately; when a card there no longer needs an answer (its PR merged, the asker found out), take it off with orch_moot(id, reason): the asker is told why. orch_deliverables lists what leads delivered to ${o.name}, its review state and proof. Dead letters (mail nobody took) come to you, not ${o.name}'s board: an hourly notice lists new ones; with orch_dead_letters resend one, re-route it to the right address, close it for its recipient, or escalate it to ${o.name}'s board with your note when only ${o.name} can fix it. orch_new_project(brief) creates a project (its folder with PROJECT.md and the project record, and its row at the brief's priority) from slug, title, repo (an existing absolute path; a URL alone is refused, nothing is cloned), goal, and optional repo_url, base, constraints, priority, mode; it refuses a taken slug or folder and never starts the lead. mode=scoping starts the project in scoping mode: its lead's cards and deliverables go only to ${o.name}'s Scope tab, you get read-only copies (never triage, settle, merge or moot them), and ${o.name}'s yes on the lead's "Scoping done?" card makes it active; orch_project_mode(slug, mode) sets or clears it on an existing project. orch_watch lists every open PR wait and timed job, and adds, retargets (another PR and/or condition), moves (to another agent) or drops any PR wait, for anyone; its owners are told. Intervals are ${o.name}'s settings: you only list them. orch_start_lead(slug) starts lead:<slug> through the same checks as ${o.name}'s Start lead button (project folder, a repo under "## Repos" that exists here, not on hold, no live lead); ${o.name}'s board shows that you started it. You get a read-only copy of each direct message ${o.name} sends a lead from the Projects tab and of the lead's ack note: for 48 h it wins on its point over your instructions, earlier or later, and as a dead letter you may resend or escalate it but never re-route or close it. ${o.Name}'s replies to you under a post in the feed are tracked: answer each with orch_reply_owner(ref=<its id>, text), which shows your reply under it in ${o.name}'s feed; an answer only in your chat leaves it "no reply yet". A message typed straight into your chat (the Chat tab) is plain chat: answer it there. Tidy the work board at each digest with orch_board_tidy: action=list shows each project's tasks dropped with attachments, its Unfiled threads, PRs, deliverables and cards, its open tasks, and its newest Shipped tasks with a count of the older ones. A drop the lead meant (the work is over or lives elsewhere): confirm it, or merge it into the task that carries on; one dropped by mistake: restore it (its lead is told to send it back). File an Unfiled item under a task (file, with kind, ref and task) only when it is obvious where it belongs (its title or PR names the task, its thread was briefed for it); otherwise ask the lead with orch_send which task it belongs to, and file it on the answer. Merge two tasks that are the same work. A request to file merges that have no task ("file them") is the same: file each PR its thread holds under its task; a PR no thread holds you may file itself (kind pr, its URL) when its task is obvious, and the next PR pass reads its state from GitHub; ask the lead for the rest. Each change tells the lead. When a lead starts, plans or reports work one of ${o.name}'s standing practices in your recovery view covers, remind the lead of it and check that the plan's done criteria or the report say it was done (that includes plan cards you settle); ask the lead when they don't. Do not poll; wait for [orchestrator] messages.`,
   steward: `You are the Steward (steward) of the runner's resources. Host alarms arrive as [orchestrator] alarm messages with a snapshot. Report with orch_send to cos; run only the allow-listed orch_cleanup actions on your own; anything else (stopping a process, deleting other files) becomes an orch_ask card listing the exact commands. When ${o.name} answers Go on your own cleanup card, run exactly those commands, after re-checking each path for 0 processes, 0 dirty and 0 unpushed; a refused command goes back to ${o.name} with the denial and the allow rule it needs. Never kill processes you didn't start, remove a worktree outside such a card, touch other agents' files or point caches at /tmp.`,
-  lead: `You are a project lead in ${o.name}'s orchestrator. Your threads' questions come to you as decision.new: settle with orch_answer (citing a standing rule that covers it, or with a note as your own call), else orch_forward to file it up. Answers to your decisions come only to you: relay to the thread with orch_send(ref=<decision id>) unless you withhold it, and ack. An answer to carry out only once a PR gets somewhere ("merge when approved"): ack it with pr and when, and the orchestrator brings it back to you then and reminds you daily; arm no watcher of your own. Use orch_ask for your own questions (2-4 options, recommended first; it never blocks). While your project is scoping (orch_inbox says so), your cards and deliverables go only to ${o.name}'s Scope tab: ask ${o.name} there, start no build threads (read-only investigation is fine), and end it with orch_ask(scoping_done={summary, project_md}) once the goal, constraints and first plan are in PROJECT.md. To scope only part of a project, open a scoping task (orch_scope_task), start its scoping thread with orch_spawn_thread(scope_task) and file its cards with scope_task (${o.name} sees who plans each task: you, or its scoping thread); orch_ask(scoping_done={summary, doc, task}) proposes closing it, and ${o.name}'s yes closes only that task. Threads start only from a plan card ${o.name} approved: orch_ask(kind=plan, threads=<n>, options with the go option first) lists each thread (title, goal, model, done criteria); once the answer is its go, start each with orch_spawn_thread(plan=<id>). Threads you start any other way are flagged. Put each of ${o.name}'s standing practices in your recovery view that applies into your plan cards' done criteria and your threads' briefs, and check your threads' reports against it.Resolve a finished thread with orch_resolve: it retires the role and archives the thread once its worktree is clean (nothing uncommitted, its branch in its base branch or pushed) and its PR is merged, its branch is merged into its base, its PR was closed unmerged after its report, or ${o.name} has read its final report, or pass handed_off {pr, owner} when its open PR now belongs to someone else; a dirty worktree is refused with the reason. To swap a thread to another provider, have it write handoff-<UTC date>.md in its worktree, then orch_handoff. ${o.Name} sees only your deliverables and your questions: orch_deliver (finished work with proof) and orch_ask. Bundle your threads' work into deliverables that prove the result (screenshots, video, test output, PR), not into narration. Write them for a 10-second read: visuals first; each decision or finding is one line plus a short why (points); a one-line summary; no file:line, SHAs, logs or tool names at the top, those go in text or doc proof under Details (a PR review: a verdicts block for every PR, the recommended decisions, then 2-4 findings; proof that something works: screenshots or video of it happening, checks; a root cause: rca, a screenshot of the failure, a diagram of where it sits). Never message ${o.name} any other way. ${o.Name} may write to you directly from the Projects tab (a direct message, kind owner.message): answer it only with orch_ack(id, outcome, note), at once even for long work; the note is what ${o.name} reads on the row ("done" means taken, so say whether it is finished) and the CoS gets a copy. For 48 h it wins on its point over a CoS instruction, earlier or later; only ${o.name}'s own later word changes it. If the CoS says ${o.name} changed their mind, file one card with both instructions as options; say in your note what you set aside, and tell the CoS. orch_inbox lists those still in force. A direct message is never an approval: a merge, a production change or a public push still needs its own card citing the message id, and it can't be acked with pr and when. On deliverable.changes: fix it, then orch_deliver(revises=<id>). On deliverable.next: do what ${o.name} asked, then ack it with an outcome and a note saying what you did; the note shows on the deliverable. orch_output only records a file (for example one you then give as proof); it never reaches ${o.name}. Publish orch_status (goal, numbered steps with the current one, what you wait on, blockers) when you start, at each step change and whenever what you wait on changes: it is your project page's step bar, and stale after 2 h. When a thread finishes and at each milestone, include update (working_on: 1-3 bullets, at, needs) in orch_status: it is the Lead status card on your project and replaces the last one. Write it for ${o.name}, in plain words, about the task and what is done: 1-3 short bullets of at most 12 words each; no SHAs, run ids, file paths, flag internals or tool names unless ${o.name} needs them to act. Good: 'Search fix merged; preview ready for Robin to test'. Bad: 'Rebased 4087 onto main at 3f2a1c9, CI run 88123 green'.`,
+  lead: `You are a project lead in ${o.name}'s orchestrator. Your threads' questions come to you as decision.new: settle with orch_answer (citing a standing rule that covers it, or with a note as your own call), else orch_forward to file it up. Answers to your decisions come only to you: relay to the thread with orch_send(ref=<decision id>) unless you withhold it, and ack. An answer to carry out only once a PR gets somewhere ("merge when approved"): ack it with pr and when, and the orchestrator brings it back to you then and reminds you daily; arm no watcher of your own. Use orch_ask for your own questions (2-4 options, recommended first; it never blocks). While your project is scoping (orch_inbox says so), your cards and deliverables go only to ${o.name}'s Scope tab: ask ${o.name} there, start no build threads (read-only investigation is fine), and end it with orch_ask(scoping_done={summary, project_md}) once the goal, constraints and first plan are in PROJECT.md. To scope only part of a project, open a scoping task (orch_scope_task), start its scoping thread with orch_spawn_thread(scope_task) and file its cards with scope_task (${o.name} sees who plans each task: you, or its scoping thread); orch_ask(scoping_done={summary, doc, task}) proposes closing it, and ${o.name}'s yes closes only that task. Threads start only from a plan card ${o.name} approved: orch_ask(kind=plan, threads=<n>, options with the go option first) lists each thread (title, goal, model, done criteria); once the answer is its go, start each with orch_spawn_thread(plan=<id>). Threads you start any other way are flagged. Put each of ${o.name}'s standing practices in your recovery view that applies into your plan cards' done criteria and your threads' briefs, and check your threads' reports against it.Resolve a finished thread with orch_resolve: it retires the role and archives the thread once its worktree is clean (nothing uncommitted, its branch in its base branch or pushed) and its PR is merged, its branch is merged into its base, its PR was closed unmerged after its report, or ${o.name} has read its final report, or pass handed_off {pr, owner} when its open PR now belongs to someone else; a dirty worktree is refused with the reason. To swap a thread to another provider, have it write handoff-<UTC date>.md in its worktree, then orch_handoff. ${o.Name} sees only your deliverables and your questions: orch_deliver (finished work with proof) and orch_ask. Bundle your threads' work into deliverables that prove the result (screenshots, video, test output, PR), not into narration. Write them for a 10-second read: visuals first; each decision or finding is one line plus a short why (points); a one-line summary; no file:line, SHAs, logs or tool names at the top, those go in text or doc proof under Details (a PR review: a verdicts block for every PR, the recommended decisions, then 2-4 findings; proof that something works: screenshots or video of it happening, checks; a root cause: rca, a screenshot of the failure, a diagram of where it sits). Never message ${o.name} any other way. ${o.Name} may write to you directly from the Projects tab (a direct message, kind owner.message): answer it only with orch_ack(id, outcome, note), at once even for long work; the note is what ${o.name} reads on the row ("done" means taken, so say whether it is finished) and the CoS gets a copy. For 48 h it wins on its point over a CoS instruction, earlier or later; only ${o.name}'s own later word changes it. If the CoS says ${o.name} changed their mind, file one card with both instructions as options; say in your note what you set aside, and tell the CoS. orch_inbox lists those still in force. A direct message is never an approval: a merge, a production change or a public push still needs its own card citing the message id, and it can't be acked with pr and when. On deliverable.changes: fix it, then orch_deliver(revises=<id>). On deliverable.next: do what ${o.name} asked, then ack it with an outcome and a note saying what you did; the note shows on the deliverable. orch_output only records a file (for example one you then give as proof); it never reaches ${o.name}. Publish orch_status (goal, numbered steps with the current one, what you wait on, blockers) when you start, at each step change and whenever what you wait on changes: it is your project page's step bar, and stale after 2 h. Each step is a task on the work board: send every step back with the id (t-…) the last reply gave it, also when you reword it, and name the task (task=) on plan cards, orch_ask and orch_deliver. A step that is stuck takes a one-line blocker (steps[].blocker). When a thread finishes and at each milestone, include update (working_on: 1-3 bullets, at, needs) in orch_status: it is the Lead status card on your project and replaces the last one. Write it for ${o.name}, in plain words, about the task and what is done: 1-3 short bullets of at most 12 words each; no SHAs, run ids, file paths, flag internals or tool names unless ${o.name} needs them to act. Good: 'Search fix merged; preview ready for Robin to test'. Bad: 'Rebased 4087 onto main at 3f2a1c9, CI run 88123 green'.`,
   thread: `You are a worker thread in ${o.name}'s orchestrator. Ask your lead with orch_ask (2-4 options, recommended first); it returns at once with an id, so carry on or end your turn: the answer comes as a message. Message only your lead (orch_send). When an answer or message is handled, close it with orch_ack(id, outcome); replying to its sender with ref=<its id> closes it as replied, and an ack after that still records the real outcome. Report finished work with orch_report (with the PR URL when there is one). Follow each of ${o.name}'s standing practices in your recovery view that applies to your work, and say in your report what you did for it. Use orch_output to record a finished artefact (a doc, video, image, report or link) so your lead can put it in a deliverable as proof; ${o.name} sees only what your lead delivers.`,
 });
 
 function errText(e: unknown): string {
   if (e instanceof EngineError) return `${e.kind}: ${e.message}`;
   return String(e instanceof Error ? e.message : e);
+}
+
+/** 0 is off, so no `|| default`. */
+function gapMs(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? Math.min(30 * 60_000, Math.max(0, v)) : 120_000;
 }
 
 function ok(text: string) {
@@ -155,6 +161,7 @@ export default async function plugin(bb: BbPluginApi) {
     escalateMinutes: { type: "number", label: "Untriaged decisions go to you after (minutes)", default: 5 },
     batchInbox: { type: "boolean", label: "Batched inbox: one debounced wake per recipient instead of each message into a turn (on, the default; off: per-message delivery)", default: true },
     inboxDebounceMs: { type: "number", label: "Inbox wake debounce (milliseconds)", default: 2000 },
+    inboxGapMs: { type: "number", label: "Lead wake gap: least time between two inbox wakes of the same lead; the owner's items and overdue items skip it (milliseconds, 0 = off)", default: 120000 },
     resendMinutes: { type: "number", label: "Unacked items are re-sent after the recipient idles (minutes)", default: 10 },
     diskPct: { type: "number", label: "Disk alarm (%)", default: 85 },
     swapPct: { type: "number", label: "Swap alarm (%)", default: 50 },
@@ -164,35 +171,28 @@ export default async function plugin(bb: BbPluginApi) {
     sampleSeconds: { type: "number", label: "Host sample every (seconds)", default: 60 },
     diskPath: { type: "string", label: "Disk to watch", default: "/" },
     cosCompactTokens: { type: "number", label: "Compact the CoS's context above (tokens) when idle: off by default; Claude Code compacts on its own", description: "Off by default (0): Claude Code compacts on its own, and the plugin never clears an agent's context. Set a token count (say 300000) to also have the plugin ask Claude Code to /compact the idle CoS above it. A retired cosClearTokens is never carried over: it is only unset, so an upgrade never switches this on.", default: 0 },
-    // projects: one folder each, with PROJECT.md and a project record
     projectsDir: { type: "string", label: "Projects folder: one folder per project, with PROJECT.md and a project record (empty: projects/ in the plugin's data folder)", default: "" },
     projectRecord: { type: "string", label: "Project record file in each project folder (JSON; archived_at set hides the project)", default: "project.json" },
-    // memory (opt-in)
     memoryConfig: { type: "string", label: "Memory config file (JSON with a memory block). Empty: memory is off and the orchestrator runs no memory tool", default: "" },
     memoryConfigEnv: { type: "string", label: "Environment variable that passes the memory config's path to the memory tools (empty: not passed)", default: "MEMORY_CONFIG" },
     memorySearch: { type: "string", label: "memory-search command (empty: the config's memory.search)", default: "" },
     prPollMinutes: { type: "number", label: "Check PRs every (minutes); 0 = never", default: 5 },
-    // Requested 2026-11-17: opt-in retention (core/retention.ts), once a day and with `bb orchestrator prune`. 0 keeps everything.
     retentionDays: { type: "number", label: "Delete finished mail, settled cards, closed PR waits, Board rows and Steward alarms older than (days); 0 = keep forever", description: "Only what is finished goes: open cards and mail, and anything they still point at, stay whatever their age. Agents, projects, deliverables, outputs, rules and pins are never deleted.", default: 0 },
     activityRetentionDays: { type: "number", label: "Delete activity-log entries (the project pages' history) older than (days); 0 = keep forever", default: 0 },
     linearWorkspace: { type: "string", label: "Linear workspace (the slug in linear.app/<slug>): Linear ids in the Projects tab link to their issues. Empty: they stay plain text", default: "" },
     linearTeams: { type: "string", label: "Linear team keys that link, comma-separated (empty: every key). Ids of other teams, and look-alikes such as model names, stay plain text", default: "" },
-    // Requested 2026-11-17: hide tabs the owner doesn't use, by id or label. Empty (the default) shows every tab.
     hiddenTabs: { type: "string", label: "Pages to hide, comma-separated (ids or labels, e.g. gameboy, rules, activity). Empty: show every page. Scope still shows while something waits in it or you're on it. Multiplayer and CodeRabbit hide their section in Reviews. needs-you and deliverables do nothing: Home's Needs you and Delivered filters never hide", default: "" },
-    // 2026-11-20 (the owner's card): Game Boy and Cloud are Tools, off until turned on
     showGameBoy: { type: "boolean", label: "Tools: Game Boy", default: false },
     showCloud: { type: "boolean", label: "Tools: Cloud", default: false },
     pokemon: { type: "boolean", label: "Pokémon", description: "Give each agent a Pokémon that evolves as it levels: sprites in the app and the sidebar, its name in its brief, evolutions on the board. Each project gets a Pokémon type: its lead and threads share it, and its colour is the project's accent. Sprites load from PokeAPI's public sprite repo at runtime. Pokémon is a trademark of Nintendo, Creatures and GAME FREAK; this plugin is not affiliated with them.", default: false },
     personaPack: { type: "string", label: "Personas pack (with Pokémon on): the absolute path of a JSON pack", description: "Optional, empty by default. A pack gives the CoS, the Steward and each lead a persona (a name, a title and an image) in place of a Pokémon of their own; threads stay Pokémon and draw from their lead's persona's lines first. The plugin ships no pack. It is read when this is saved and when the plugin loads; a pack that fails its checks is ignored, with the problems in the log. Check one with: node personas-check.ts <path>.", default: "" },
     pushNeedsYou: { type: "boolean", label: "Desktop/web push when a card enters Needs you (never sent while mobile push is on)", default: true },
     notifyOnlyOrchestrator: { type: "boolean", label: "Orchestrator notifications only", description: "bb notifies you only for the orchestrator: Needs-you cards, deliveries and the CoS thread. Mutes every other thread by setting push-notifications' defaultLevel and childLevel to muted; switching it off restores them. Card and delivery pushes still need pushNeedsYou on and mobile push off.", default: false },
-    // dreams
     dreamsEnabled: { type: "boolean", label: "Nightly dream batch and daily memory check (needs a memory config with memory.dreamDir)", default: false },
     dreamDailyAt: { type: "string", label: "Dream time HH:MM, used only when the memory config has no memory.dailyAt", default: "" },
     dreamZone: { type: "string", label: "Time zone of the dream time", default: "UTC" },
     memoryUnits: { type: "string", label: "Memory check: systemd user unit patterns to watch for failures, space-separated (empty: none)", default: "" },
     memoryTimers: { type: "string", label: "Memory check: <unit>.timer=<minutes> pairs; a timer that hasn't run for that long is stale (empty: none)", default: "" },
-    // The owner's Start buttons (Projects tab)
     integrationRoutes: { type: "string", label: "External mail source → allowed recipient addresses (JSON; empty disables imports)", default: "{}" },
     leadProvider: { type: "string", label: "Provider of the lead started from the Projects tab", default: START_DEFAULTS.lead.provider },
     leadModel: { type: "string", label: "Model of a lead started from the Projects tab", default: START_DEFAULTS.lead.model },
@@ -204,19 +204,15 @@ export default async function plugin(bb: BbPluginApi) {
     stewardModel: { type: "string", label: "Model of the Steward started from the Projects tab", default: START_DEFAULTS.steward.model },
     stewardReasoning: { type: "string", label: "Reasoning of the Steward started from the Projects tab", default: START_DEFAULTS.steward.reasoning },
     homeProjectId: { type: "string", label: "bb project of the CoS and the Steward (empty: the bb project of the mirror folder, created when missing)", default: "" },
-    // the Cloud tab (cloud/)
     cloudConfigPath: { type: "string", label: "Cloud tab config file", description: "On the machine (~/ is its home): which AWS accounts and GCP projects are dev or prod, and their PIM groups. See cloud/config.example.json. Without it the Cloud tab says what to set up.", default: DEFAULT_CLOUD_CONFIG },
     gcpLoginConfig: { type: "string", label: "Cloud tab: GCP login config", description: "Full path of the workforce login config (gcp-login-config.json) on the machine. Empty: look in the usual places.", default: "" },
-    // the Open PRs tab (open-prs/): all empty by default; the tab says what to set
     githubLogin: { type: "string", label: "Open PRs: your GitHub login", description: "The tab lists every open PR this login authored, through the machine's own gh login (read-only). Empty: the tab says to set it.", default: "" },
     reviewChannel: { type: "string", label: "Open PRs: code-review channel", description: "A Slack channel name (team-reviews), its ID, or an https link to it. With slackToken set, Post sends the review text here after a preview and a confirm; without it, Post copies the text and opens this channel.", default: "" },
     reviewExcludedProjects: { type: "string", label: "Open PRs: projects left out of Post", description: "Project slugs, separated by commas or spaces. Their PRs start unticked in the Post preview.", default: "" },
     slackHandleMap: { type: "string", label: "Open PRs: GitHub login to Slack handle", description: "A JSON object, e.g. {\"some-login\": \"slackname\"}. Only mapped logins are tagged @handle; anyone else is shown by plain name, never guessed.", default: "", experimental_multiline: true },
-    // 2026-11-17, the owner: "Post as me". A secret: kept by bb in a 0600 file, read only by the server, never sent to the page.
-    // 2026-11-18: the CodeRabbit review queue posts nothing while this is on. Going live is the owner's own choice.
+    // A secret: kept by bb in a 0600 file, read only by the server, never sent to the page.
     reviewQueueDryRun: { type: "boolean", label: "Review queue: dry-run (nothing is posted to GitHub)", description: "On: the queue checks and picks a PR and shows what it would post, and posts nothing. Keep it on while another CodeRabbit scheduler runs; turn it off only once you've decided the queue should post \"@coderabbitai review\" for you.", default: true },
     slackToken: { type: "string", secret: true, label: "Open PRs: Slack token for Post", description: "Empty: Post copies the text and opens reviewChannel. Set: Post sends it to reviewChannel after a preview and a confirm. To post as yourself, use a user token: create a Slack app (api.slack.com/apps), add the User Token Scopes chat:write, channels:read, groups:read (for a private channel) and users:read (to turn @handles into mentions), install it to your workspace, and paste its User OAuth Token (xoxp-…). A bot token (xoxb-…) with the same scopes works too; invite the bot to the channel." },
-    // the Game Boy tab's AI player (gameboy/core/player.ts): off until an endpoint and a key are set
     aiPlayerEndpoint: { type: "string", label: "Game Boy AI player: decision API endpoint", description: "The full URL the server POSTs each turn to: the game screen (a PNG) and a compact game state, with one typed choice question for the next input. See gameboy/README.md for what it must accept. Empty: the AI player is off and its toggle hidden.", default: "" },
     aiPlayerModel: { type: "string", label: "Game Boy AI player: model", description: "Sent as the request's model. Empty: no model field.", default: "" },
     aiPlayerKeyFile: { type: "string", label: "Game Boy AI player: key file (a dotenv file on this machine)", description: "The path of a dotenv file that holds the API key (~/ is the home folder). It is read by the server on each turn; the key never goes to the page or a log.", default: "" },
@@ -229,14 +225,11 @@ export default async function plugin(bb: BbPluginApi) {
     aiPlayerDayCalls: { type: "number", label: "Game Boy AI player: calls per day (UTC)", default: 500 },
     linearApiKey: { type: "string", secret: true, label: "Pathways: Linear personal API key" },
   });
-  // The retired name of cosCompactTokens: never carried over, only unset (retireClearSetting).
   const retired = bb.settings.define({
     cosClearTokens: { type: "number", label: "Retired: replaced by cosCompactTokens, never carried over (unset at load; leave unset)" },
   });
   await retireClearSetting(retired, (m) => bb.log.warn(m));
   let cfg = await settings.get();
-  // The personas hook (personas.ts): the pack is read at load and on each settings save; an unchanged pack is the same
-  // object, so the engine settles nothing for it. One that fails its checks is ignored, with its problems in the log.
   let lastPack: { text: string; pack: Settings["personas"] } = { text: "null", pack: null };
   const loadPack = (path: string): Settings["personas"] => {
     let pack: Settings["personas"] = null;
@@ -252,32 +245,38 @@ export default async function plugin(bb: BbPluginApi) {
     if (text !== lastPack.text) lastPack = { text, pack };
     return lastPack.pack;
   };
-  /** The owner in tool descriptions, as at load: a changed ownerName reaches them on the next plugin reload. */
   const O = ownerWords(cfg.ownerName);
   registerCloud(bb, () => cfg);
   const dataDir = dirname(bb.storage.database().name);
   registerGameboy(bb, join(dataDir, "gameboy"), () => cfg);
-  /** The state folder: the setting, else state/ beside the plugin's database. */
   const stateDir = () => cfg.stateDir.trim() || join(dataDir, "state");
-  /** The projects folder: the setting (`~` is the home folder), else projects/ beside the plugin's database. */
   const projectsDir = () => memoryConfigPath(cfg.projectsDir) ?? join(dataDir, "projects");
   const projectRecord = () => cfg.projectRecord.trim() || PROJECT_RECORD;
   const loadedAt = Date.now();
-  /** When each timed job last ran (the Watchers list, core/watchers.ts JOBS ids); in memory, so empty after a reload. */
   const ran: Record<string, number> = {};
   const mark = (job: string) => void (ran[job] = Date.now());
-  const db = bb.storage.database() as unknown as Db;
+  const notices = new ChangeTables(KNOWN_TABLES);
+  const reads = new ReadCache(5_000, Date.now);
+  const loop = loopDelay();
+  const raw = bb.storage.database() as unknown as Db;
+  tuneConnection(raw); // before the migrations: PRAGMA synchronous can't change inside a transaction
+  const db = recordWrites(raw, (tables) => {
+    notices.wrote(tables);
+    reads.bump();
+  });
 
-  // ---------------------------------------------------------------- engine ports
-  // The page's change notice waits for the services: bb starts them only once activation succeeded, so a timer is
-  // never left running by an activation that throws (bb then runs no dispose hook). They announce once on start.
+  // Services start only after a successful activation, so a throwing activation leaves no timer running.
   let announcing = false;
   let changeTimer: ReturnType<typeof setTimeout> | null = null;
-  const changed = () => {
+  let derived: DerivedTables | null = null;
+  const EVERYTHING = ["*"];
+  const changed = (tables?: readonly string[]) => {
+    notices.call(tables);
     if (!announcing || changeTimer) return;
     changeTimer = setTimeout(() => {
       changeTimer = null;
-      bb.realtime.publish(CHANGED_CHANNEL, {});
+      const tables = notices.take();
+      bb.realtime.publish(CHANGED_CHANNEL, { tables: derived ? derived.add(tables) : tables } satisfies ChangeNotice);
     }, 150);
   };
 
@@ -293,8 +292,6 @@ export default async function plugin(bb: BbPluginApi) {
     }
   };
 
-  // A send with the owner's images as bb's image inputs (2026-11-17). If bb refuses those inputs, the text goes alone:
-  // it already names each image's path, which the reader opens with its file reader. Logged without any bytes.
   async function sendWithImages(req: { threadId: string; mode: "queue-if-active" | "steer-if-active"; senderThreadId?: string }, text: string, images: Pick<DirectImage, "path" | "sourceProject">[], what: string) {
     const textOnly = () => bb.sdk.threads.send({ ...req, input: [{ type: "text", text, mentions: [] }] });
     if (!images.length) return textOnly();
@@ -312,16 +309,11 @@ export default async function plugin(bb: BbPluginApi) {
     const t = await bb.sdk.threads.get({ threadId });
     if ((t as { archivedAt?: number | null }).archivedAt) return { delivery: "held", why: "archived" };
     const sender = engine.agentByAddress(item.sender);
-    // 2026-11-13: queued behind a running turn, mail waited 15-60+ min on threads that stay busy (median 25 s queued vs
-    // 0.08 s direct). Steering adds it to the running turn, so the agent reads it at its next tool boundary; where
-    // nothing can be steered bb starts a turn, or queues it (a provider that can't steer).
-    // the owner's screenshots (2026-11-17) go as bb's own image inputs too, beside their paths in the text
     const images = item.id && (item.kind === "owner.message" || item.kind === "owner.cos") ? engine.directImagesOf(item.id) : [];
-    // the owner's message to the CoS waits for its turn to end, as the CoS bar's always has: the feed shows it queued
     const wake = !!item.id?.startsWith("wake:");
     const queue = wake || item.kind === "owner.cos";
     const req = { threadId, mode: queue ? ("queue-if-active" as const) : ("steer-if-active" as const), ...(sender ? { senderThreadId: sender.threadId } : {}) };
-    // a wake bb will queue behind a running turn goes bare: its digest would be stale by the time it is read
+    // A wake bb queues behind a running turn goes bare: its digest would be stale by the time it is read.
     const busy = !["idle", "error"].includes(String((t as { status?: string }).status ?? "idle"));
     const res = await sendWithImages(req, wake && busy && item.body ? item.body : text, images, item.id ?? "");
     if (res.delivery === "queued") return { delivery: "queued", queuedMessageId: res.queuedMessage.id };
@@ -339,10 +331,16 @@ export default async function plugin(bb: BbPluginApi) {
       try { allowImport(effectiveRoutes(), source, to); return true; }
       catch { return false; }
     }, deliver, mirror, changed, log: (m) => bb.log.warn(m), cardUp: (d) => void pushCard(d), delivered: (d) => void pushDelivered(d), files: () => ({ dir: join(stateDir(), "deliverables"), kept: join(stateDir(), "threads") }) },
-    { escalateMs: cfg.escalateMinutes * 60_000, resendMs: cfg.resendMinutes * 60_000, owner: cfg.ownerName, pokemon: cfg.pokemon, batchInbox: cfg.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, cfg.inboxDebounceMs || 2000)), personas: loadPack(cfg.personaPack) },
+    { escalateMs: cfg.escalateMinutes * 60_000, resendMs: cfg.resendMinutes * 60_000, owner: cfg.ownerName, pokemon: cfg.pokemon, batchInbox: cfg.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, cfg.inboxDebounceMs || 2000)), inboxGapMs: gapMs(cfg.inboxGapMs), personas: loadPack(cfg.personaPack) },
   );
   const openPrs = registerOpenPrs(bb, engine, () => cfg);
-  // after the engine, whose migrations made its tables; dry-run unless the setting is exactly false
+  const boardSince = registerBoardSince(bb, { db, engine, login: () => cfg.githubLogin, mark, sleep });
+  const VIEW_PREFS = "viewPrefs";
+  const viewPrefs = async (): Promise<ViewPrefs> => {
+    const kept = viewPrefsSchema.safeParse(await bb.storage.kv.get<unknown>(VIEW_PREFS));
+    return kept.success ? kept.data : { projectsView: null, boardFolds: {}, rev: 0 };
+  };
+  // After the engine, whose migrations made its tables.
   const reviewQueue = registerReviewQueue(bb, { db, dryRun: () => cfg.reviewQueueDryRun !== false });
   const multiplayer = registerMultiplayer(bb, { db, engine, dir: join(dataDir, "multiplayer"), settings: () => cfg, routes: effectiveRoutes });
   slackWatch = registerSlackWatch(bb, {
@@ -353,7 +351,6 @@ export default async function plugin(bb: BbPluginApi) {
     heartbeat: (source, everyMs) => multiplayer.heartbeat(source, everyMs),
     audit: action => { engine.boardAdd("notice", "orchestrator", null, `CLI: ${action}`, "Operator changed a Slack watcher. Credentials and arguments are omitted.", null); },
   });
-  // ---------------------------------------------------------------- notifyOnlyOrchestrator (core/notify-only.ts)
   const PN = "push-notifications";
   const notifyOnly = serialReconcile(
     () => cfg.notifyOnlyOrchestrator === true,
@@ -372,7 +369,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
     (m) => bb.log.info(m),
   );
-  // Started as a service, never during activation: a failed reconcile must not fail the plugin, and it retries each minute.
+  // A service, never activation: a failed reconcile must not fail the plugin, and it retries each minute.
   bb.background.service("notify-only", {
     async start(signal) {
       while (!signal.aborted) {
@@ -384,18 +381,19 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   settings.onChange((next) => {
-    if (next.pushNeedsYou && !cfg.pushNeedsYou) void resumePush(); // the push was switched back on: lift a pause
+    if (next.pushNeedsYou && !cfg.pushNeedsYou) void resumePush();
     const notifyFlip = next.notifyOnlyOrchestrator !== cfg.notifyOnlyOrchestrator;
     cfg = next;
-    reviewQueue.changed(); // the queue page re-reads dry-run
-    changed(); // the page re-reads its config (owner name, CoS title) and the agents (Pokémon on or off)
-    engine.settings = { escalateMs: next.escalateMinutes * 60_000, resendMs: next.resendMinutes * 60_000, owner: next.ownerName, pokemon: next.pokemon, batchInbox: next.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, next.inboxDebounceMs || 2000)), personas: loadPack(next.personaPack) };
+    reviewQueue.changed();
+    changed(EVERYTHING);
+    const before = engine.settings;
+    engine.settings = { escalateMs: next.escalateMinutes * 60_000, resendMs: next.resendMinutes * 60_000, owner: next.ownerName, pokemon: next.pokemon, batchInbox: next.batchInbox, inboxDebounceMs: Math.min(60000, Math.max(0, next.inboxDebounceMs || 2000)), inboxGapMs: gapMs(next.inboxGapMs), personas: loadPack(next.personaPack) };
+    if (engine.settings.inboxGapMs !== before.inboxGapMs) void flush();
     reloadMemory();
     if (notifyFlip) void notifyOnly();
   });
 
-  // ---------------------------------------------------------------- the memory engine (docs/memory-port.md)
-  // Read outside configure, which must stay synchronous and fast; read again each minute for new projects.
+  // Read outside configure, which must stay synchronous and fast.
   let memory: MemoryLocal | null = null;
   let memoryProjectsNow: ReadonlyMap<string, string> = new Map();
   let memoryState = "";
@@ -403,23 +401,23 @@ export default async function plugin(bb: BbPluginApi) {
     const { local, why } = loadMemory(memoryConfigPath(cfg.memoryConfig), cfg.memorySearch);
     memory = local;
     memoryProjectsNow = local ? memoryProjects(local) : new Map();
-    // a live project folder gets its row in Projects (and its Start lead button) without waiting for a lead
     for (const slug of liveProjects(projectsDir(), projectRecord())) engine.ensureProject(slug, null);
     const now = local ? `${memoryProjectsNow.size} projects, config ${local.configPath}, search ${local.search}` : `off: ${why}`;
     if (now !== memoryState) bb.log.info(`memory: ${now}`);
     memoryState = now;
   }
   reloadMemory();
-  /** Where a recorded file may lie outside the caller's own folder: the state folder, and the vault when memory is on. */
   const sharedRoots = () => [stateDir(), ...(memory?.vault ? [memory.vault] : [])];
-  // Read again each minute from a service, never a setInterval here: an interval outlived a failed reload and threw
-  // "The database connection is not open" every minute (2026-11-14), since bb runs no dispose hook for it.
+  // A service, never setInterval: bb runs no dispose hook, so an interval outlives a failed reload.
   bb.background.service("memory", {
     async start(signal) {
+      derived = new DerivedTables(engine.changePrints(), (name, e) => bb.log.warn(`change print ${name}: ${String(e)}`));
       announcing = true;
-      changed();
+      loop.start();
+      changed(EVERYTHING);
       signal.addEventListener("abort", () => {
         announcing = false;
+        loop.stop();
         if (changeTimer) clearTimeout(changeTimer);
         changeTimer = null;
       }, { once: true });
@@ -443,7 +441,6 @@ export default async function plugin(bb: BbPluginApi) {
       void runGroup(l.search, argv, { timeoutMs, maxBuffer: 4 << 20, env: configEnv ? { ...process.env, [configEnv]: l.configPath } : process.env }).then((r) =>
         resolve({ exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr }));
     });
-  // A thread's folder in memory-search's worktree map, once per folder: its sessions then count for its project.
   const mapped = new Set<string>();
   function recordFolder(folder: string, project: string): void {
     const key = `${folder}\t${project}`;
@@ -453,7 +450,7 @@ export default async function plugin(bb: BbPluginApi) {
       const outcome = mapOutcome(r.exitCode);
       const why = (r.stderr.trim() || r.stdout.trim()).split("\n").pop();
       if (outcome === "retry") {
-        mapped.delete(key); // asked again at the thread's next turn
+        mapped.delete(key);
         return bb.log.warn(`memory: worktree map for ${folder}: ${why}`);
       }
       bb.log.info(`memory: worktree map: ${outcome}: ${why}`);
@@ -461,9 +458,7 @@ export default async function plugin(bb: BbPluginApi) {
   }
 
   let flushing: Promise<void> | null = null;
-  // A flush asked for while one is in flight runs once more after it (2026-11-18, speed): the one in flight read its
-  // recipients before that call's mail existed, and waits on each delivery, so the new mail would wait for the next
-  // tool call or clock pass.
+  // A flush asked for while one is in flight runs again after it: the one in flight read its recipients before the new mail existed.
   let flushAgain = false;
   const flush = (): Promise<void> => {
     if (flushing) {
@@ -479,35 +474,31 @@ export default async function plugin(bb: BbPluginApi) {
     });
     return flushing;
   };
-  // A batched wake comes due inboxDebounceMs after its mail (2026-11-18, speed). A timer runs the flush that sends it,
-  // so it doesn't wait for the next tool call or clock pass: the clock's pass waits behind pr-watch, xp and layout, and
-  // live wakes went up to 112 s late. Armed only while the clock service runs (bb starts it after a good activation;
-  // its abort clears the timer), for the earliest wake still to come due; one that is due already waits on its
-  // recipient (busy, held), whose turn ending flushes.
+  const MAX_TIMER_MS = 2_147_483_647; // setTimeout's largest delay; a longer one fires after 1 ms
   let wakeTimers = false;
   let wakeTimer: ReturnType<typeof setTimeout> | null = null;
   let wakeAt = Infinity;
   function armWake(): void {
     if (!wakeTimers || !engine.settings.batchInbox) return;
     const now = Date.now();
-    const next = engine.batch.wakes().find((w) => w.state === "pending" && w.due_at > now);
-    if (!next || (wakeTimer && wakeAt <= next.due_at)) return;
+    const again = engine.flushAgain;
+    const next = again ? now : engine.nextWakeAt();
+    if (next === null || (!again && next <= now) || (wakeTimer && wakeAt <= next)) return;
     if (wakeTimer) clearTimeout(wakeTimer);
-    wakeAt = next.due_at;
+    const delay = again ? 0 : Math.min(next - now + 20, MAX_TIMER_MS);
+    wakeAt = now + delay;
     wakeTimer = setTimeout(() => {
       wakeTimer = null;
       wakeAt = Infinity;
       void flush();
-    }, next.due_at - now + 20);
+    }, delay);
   }
 
-  // ---------------------------------------------------------------- agent tools
   const caller = (threadId: string | undefined | null): Agent => {
     const a = threadId ? engine.agentByThread(threadId) : null;
     if (!a) throw new EngineError("forbidden", "this thread has no orchestrator role");
     return a;
   };
-  /** A module's plain Error as the engine's "invalid", so tools, writes and the CLI word it alike. */
   const guard = <T>(f: () => T): T => {
     try {
       return f();
@@ -525,8 +516,6 @@ export default async function plugin(bb: BbPluginApi) {
     }
   };
   const optionsSchema = z.array(z.object({ label: z.string().min(1).max(80), detail: z.string().max(300).optional() })).min(2).max(4);
-  // "Scoping done?" (1.11.0): an object, or its JSON in a string (an agent on an older schema); the PROJECT.md must exist.
-  // With task (1.12.0): a scoping task's, and its doc (or project_md) must exist.
   const SCOPING_DONE = z.preprocess(fromJson, z.object({ summary: z.string().optional(), project_md: z.string().optional(), doc: z.string().optional(), task: z.string().optional() }).or(z.string()));
   const scopingDoneIn = (v: unknown): { summary: string; projectMd: string; doc?: string; task?: string } => {
     const o = typeof v === "string" ? fromJson(v) : v;
@@ -538,9 +527,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (f && isAbsolute(f) && !existsSync(f)) throw new EngineError("not_found", `scoping_done.${what} ${f} doesn't exist: write ${typeof task === "string" && task.trim() ? "the task's findings" : "the goal, constraints and first plan"} there first`);
     return { summary: typeof summary === "string" ? summary : "", projectMd: md, ...(file ? { doc: file } : {}), ...(typeof task === "string" && task.trim() ? { task: task.trim() } : {}) };
   };
-  // a scoping task (1.12.0): its id or an open task's name; a quoted JSON string works too
   const SCOPE_TASK = z.preprocess((v) => (typeof v === "string" && /^\s*"/.test(v) ? (() => { try { return JSON.parse(v); } catch { return v; } })() : v), z.string().max(80));
-  /** Where a Scope pane card went, for the tool's reply: its task, else its project scoping. */
   const scopeWhere = (project: string | null, task: string | null | undefined) => {
     const t = task ? engine.task(task) : null;
     return t ? `scoping task ${t.id} ${JSON.stringify(t.name)}` : `${project} is scoping`;
@@ -572,13 +559,13 @@ export default async function plugin(bb: BbPluginApi) {
       ),
       revises: z.string().optional().describe(`The id of your own unanswered card to replace with this title, question, context and options (same id, same place on ${O.name}'s Needs you; an answer to the old version is refused). A plan keeps exactly one go; threads may change`),
       why: z.string().max(300).optional().describe("With revises: one line on what made the card stale (the CoS reads it)"),
+      task: z.string().max(80).optional().describe("The work-board task it is about: its id (t-…, from orch_status) or an open step's title. On a plan card, the threads it starts work on that task. Default: your thread's task"),
     }),
     execute: (p, { threadId }) =>
       run(threadId, (a) => {
-        // a revision may keep the merge card's blocks by leaving them out: the engine checks its result keeps a pr block
         if (p.merge && !p.revises && !p.blocks?.some((b) => b.kind === "pr")) throw new EngineError("invalid", "a merge card needs a pr block (the PR's URL, and a one-line verdict as its note)");
         const done = p.scoping_done === undefined ? null : scopingDoneIn(p.scoping_done);
-        const d = engine.ask(a, { title: p.title, question: p.question, context: p.context, options: p.options, kind: p.kind, threads: p.threads, action: p.merge ? "merge" : null, key: p.key ?? null, blocks: p.blocks, scopingDone: done, scopeTask: p.scope_task ?? null, revises: p.revises ?? null, why: p.why ?? null });
+        const d = engine.ask(a, { title: p.title, question: p.question, context: p.context, options: p.options, kind: p.kind, threads: p.threads, action: p.merge ? "merge" : null, key: p.key ?? null, blocks: p.blocks, scopingDone: done, scopeTask: p.scope_task ?? null, revises: p.revises ?? null, why: p.why ?? null, task: p.task ?? null });
         if (p.revises) return `Revised ${d.id} (revision ${d.orchestrator.revised?.count ?? 1}) in place${d.state === "asked" ? `: ${O.name} sees the new version` : ""}. The answer will come as a message; don't wait on it.`;
         if (d.orchestrator.scope) return `Filed ${d.id} in ${O.name}'s Scope pane (${scopeWhere(a.project, d.orchestrator.scope_task)}: no CoS triage, no standing rule; the CoS gets a read-only copy). The answer will come as a message; don't wait on it.`;
         return `Filed ${d.id} (${d.orchestrator.at_level === "lead" ? `with ${`lead:${a.project}`}` : "with the CoS"}). The answer will come as a message; don't wait on it.`;
@@ -690,7 +677,6 @@ export default async function plugin(bb: BbPluginApi) {
       }),
   });
 
-  // The CoS's (and the Steward's) view of the owner's Needs you (2026-11-15): the same rows the app shows, as text.
   const cosOrSteward = (a: Agent) => {
     if (a.role !== "cos" && a.role !== "steward") throw new EngineError("forbidden", "CoS and Steward only");
   };
@@ -788,6 +774,22 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   bb.agents.registerTool({
+    name: "orch_board_tidy",
+    description: `CoS only: read and tidy the work board. action=list (default): per project, the tasks dropped with attachments, the Unfiled threads, PRs, deliverables and cards, the open tasks, and the newest Shipped tasks with a count of the rest (ids t-…). merge(task, into): fold task into into, a task of the same project; its threads, deliverables and cards move, and its id redirects to into. restore(task): a dropped task opens again, with what its drop moved to Unfiled; its lead is told to send it back in its steps. file(kind, ref, task): attach an Unfiled thread (address or bb thread id), PR (URL; it files the thread that holds it, or, when no thread holds it, the PR itself: its state is unknown until the next PR pass reads it from GitHub), deliverable (dl-…) or card (d-…) to a task of its project. confirm(task): accept a drop; it leaves the dropped list and its things stay Unfiled. Each change is logged on the board as yours and its lead gets a notice.`,
+    presentation: { label: { pending: "Tidying the board", completed: "Tidied the board" } },
+    parameters: z.object({
+      action: z.enum(TIDY_ACTIONS).optional(),
+      task: z.string().max(80).optional().describe("merge: the task to fold in; restore/confirm: the dropped task; file: the task to file under (t-…)"),
+      into: z.string().max(80).optional().describe("merge: the task that keeps going (t-…)"),
+      kind: z.enum(FILE_KINDS).optional().describe("file: what ref is"),
+      ref: z.string().max(400).optional().describe("file: a thread address or bb thread id, a PR URL, a deliverable id or a card id"),
+      project: z.string().max(40).optional().describe("list: only this project"),
+    }),
+    // A PR filed with no thread holding it is read by the wait pass, never here: no GitHub on the request path.
+    execute: (p, { threadId }) => run(threadId, (a) => engine.boardTidy(a, { ...p, action: p.action ?? "list" })),
+  });
+
+  bb.agents.registerTool({
     name: "orch_moot",
     description: `CoS only: take an open card off ${O.name}'s Needs you because it no longer needs an answer (its PR merged, the asker found out). It is withdrawn, never answered; the asker gets a notice with your reason, cards merged into it go too, and an answer ${O.name} sends later is refused.`,
     presentation: { label: { pending: "Marking a card moot", completed: "Marked a card moot" } },
@@ -820,7 +822,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (!p.id || !p.outcome) throw new EngineError("invalid", "give through, or id and outcome");
         if (!!p.pr !== !!p.when) throw new EngineError("invalid", "give pr and when together");
         const r = engine.ack(a, p.id, p.outcome, p.note ?? null, p.pr && p.when ? { pr: p.pr, when: p.when } : null);
-        if (/^d-[\w-]+$/.test(p.id)) rmSync(join(stateDir(), "secrets", `${p.id}.txt`), { force: true }); // a pasted code goes once handled
+        if (/^d-[\w-]+$/.test(p.id)) rmSync(join(stateDir(), "secrets", `${p.id}.txt`), { force: true });
         return r;
       }),
   });
@@ -879,22 +881,14 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-
-  // ---------------------------------------------------------------- phase 2: plans → threads, PRs, resolve, handoff
   type ThreadInfo = { id: string; projectId: string; environmentId: string | null; title: string | null; lastReadAt: number | null; latestAttentionAt: number | null; status: string };
   const threadInfo = async (threadId: string) => (await bb.sdk.threads.get({ threadId })) as unknown as ThreadInfo;
 
-  /** bb's PR status per environment (bb--github-pr-status). Read-only; one call for many environments. */
   async function prFetch(envIds: string[]): Promise<Record<string, PrResult>> {
     if (envIds.length === 0) return {};
     return (await bb.sdk.plugins.callRpc({ pluginId: "bb--github-pr-status", method: "pullRequests", input: { keys: envIds.slice(0, 200) }, outputSchema: z.record(z.string(), z.any()) })) as Record<string, PrResult>;
   }
 
-  /**
-   * One pr-watch pass. `fake` (address → reading) is the proof hook: injected readings, labelled on the Board. `seen`
-   * collects a real pass's readings, so the PR waits they cover keep bb's reading (waitPass); `byEnv`, the same by
-   * environment (linkPass).
-   */
   async function prPass(fake: Record<string, PrResult> | null, signal?: AbortSignal, seen?: PrResult[], byEnv?: Map<string, PrResult>): Promise<string> {
     const live = engine.agents().filter((a) => a.role === "thread" || a.role === "lead");
     for (const a of live) {
@@ -920,12 +914,6 @@ export default async function plugin(bb: BbPluginApi) {
     return `${changedFor.length ? `changed: ${changedFor.join(", ")}` : "no change"} (${summary || "no agents with an environment"})`;
   }
 
-  /**
-   * After a real pr-watch pass: the PRs of live environments bb's readings (`bb`, by environment) didn't show, read by
-   * URL with gh (core/pr-links.ts): an environment's other PRs until merged or closed, and a PR a thread reported once
-   * its head commit is the environment's HEAD (bb git's status). Its gh readings join `covered`, so waitPass doesn't
-   * read them again.
-   */
   const prChecked = new Map<string, string>();
   let lastNoHead = "";
   async function linkPass(bbReadings: Map<string, PrResult>, covered: PrResult[], signal?: AbortSignal): Promise<void> {
@@ -938,7 +926,6 @@ export default async function plugin(bb: BbPluginApi) {
     }, prChecked, signal);
     if (r.linked.length) bb.log.info(`pr-links: linked ${r.linked.join(", ")}`);
     if (r.failed) bb.log.warn(`pr-links: ${r.failed} gh read(s) failed`);
-    // nothing that leaves a report unlinked stays silent (2026-11-19); a missing HEAD is logged when the list changes
     if (r.headsError) bb.log.warn(`pr-links: bb git status failed, no reported PR was compared: ${r.headsError}`);
     const noHead = r.noHead.join(", ");
     if (noHead && noHead !== lastNoHead) bb.log.info(`pr-links: no HEAD from bb git for ${noHead}; their reported PRs wait for one`);
@@ -948,12 +935,8 @@ export default async function plugin(bb: BbPluginApi) {
     if (r.read) await flush();
   }
 
-  /**
-   * After a real pr-watch pass: each open PR wait whose PR no available bb reading covered reads its own PR by URL with
-   * gh (open-prs/host.ts, on a connected machine), so a wait on anyone's PR can fire. A failed read writes nothing.
-   */
   async function waitPass(covered: PrResult[], signal?: AbortSignal): Promise<string> {
-    const urls = uncoveredWaitUrls(engine.openWaitUrls(), covered);
+    const urls = uncoveredWaitUrls([...engine.openWaitUrls(), ...engine.linkedPrsToRead()], covered);
     let closed = 0;
     let failed = 0;
     for (const url of urls) {
@@ -973,7 +956,6 @@ export default async function plugin(bb: BbPluginApi) {
     return `${urls.length} read with gh${failed ? ` (${failed} failed)` : ""}, ${closed} closed`;
   }
 
-  // ---------------------------------------------------------------- the Watchers list (core/watchers.ts, 2026-11-17)
   const watchersView = (): Watchers => ({ waits: engine.watchList(), jobs: jobsView(cfg, { ...ran, ...engine.watchRuns() }), conditions: [...WAIT_WHEN] });
 
   bb.agents.registerTool({
@@ -993,7 +975,6 @@ export default async function plugin(bb: BbPluginApi) {
         if (a.role !== "cos") throw new EngineError("forbidden", "CoS only");
         const action = p.action ?? "list";
         if (action === "list") return watchText(engine.watchList(), jobsView(cfg, { ...ran, ...engine.watchRuns() }), Date.now());
-        // a job's id where a wait's goes: a job's interval is the owner's, never the CoS's
         if (p.id && JOB_IDS.has(p.id)) throw new EngineError("forbidden", jobRefusal(p.id, cfg));
         if (action === "add") {
           if (!p.to || !p.pr || !p.when || !p.note) throw new EngineError("invalid", "add needs to, pr, when and note");
@@ -1031,7 +1012,6 @@ export default async function plugin(bb: BbPluginApi) {
         token = engine.reserveSpawn(a, p.plan, task?.id ?? null);
         const lead = await threadInfo(a.threadId);
         engine.ensureProject(a.project!, lead.projectId);
-        // a new worktree on the lead's own machine (bb needs the host for a managed worktree)
         const leadEnv = lead.environmentId ? ((await bb.sdk.environments.get({ environmentId: lead.environmentId })) as unknown as { hostId?: string | null }) : null;
         if (!leadEnv?.hostId) throw new EngineError("bad_state", "can't tell which machine the lead runs on");
         const selection = await spawnSelection(bb.sdk.providers, { hostId: leadEnv.hostId, projectId: lead.projectId }, p, { defaults: {}, warn: (m) => bb.log.warn(m) });
@@ -1042,7 +1022,6 @@ export default async function plugin(bb: BbPluginApi) {
           title: p.title,
           ...selection,
           parentThreadId: a.threadId,
-          // bb wakes the lead only when the thread fails; reports, asks, prompts and failures wake it through us
           parentNotifications: "stuck",
           pluginMetadata: { role: "thread", project: a.project, plan: p.plan, ...(task ? { scope_task: task.id } : {}) },
         } as Parameters<typeof bb.sdk.threads.spawn>[0]);
@@ -1056,7 +1035,6 @@ export default async function plugin(bb: BbPluginApi) {
         return ok(`Started ${reg.address} (${t.id}${reg.mon ? `, ${reg.mon}` : ""}) from ${p.plan}${task ? `, the scoping thread for task ${task.id} ${JSON.stringify(task.name)}` : ""}. It reports to you; a report, a question, a failure or a prompt it waits on wakes you, and each finished turn is an INFO line in your next digest.`);
       } catch (e) {
         if (token) {
-          // bb may have created the thread before the call failed (a timeout): then it takes the slot, not a stray flag
           const child = await spawnedAnyway(threadId, p.plan, p.title).catch(() => null);
           if (child) {
             engine.confirmSpawn(token, child);
@@ -1069,7 +1047,6 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  /** A child of the lead that this plugin spawned for `plan` with `title` and that holds no slot yet, or null. */
   async function spawnedAnyway(leadThreadId: string | undefined, plan: string, title: string): Promise<string | null> {
     if (!leadThreadId) return null;
     const kids = (await bb.sdk.threads.list({ parentThreadId: leadThreadId, originPluginId: bb.pluginId, limit: 200 })).filter((t) => t.title === title);
@@ -1079,11 +1056,9 @@ export default async function plugin(bb: BbPluginApi) {
     return ids.find((id) => !engine.hasSpawn(id)) ?? null;
   }
 
-  /** bb--git's view of a thread's worktree, read fresh: is anything there that archiving would lose? */
   const gitCall = (method: string, input: Record<string, string | number>) => bb.sdk.plugins.callRpc({ pluginId: "bb--git", method, input, outputSchema: z.any() });
   async function worktreeOf(environmentId: string | null, archivedAt: number | null = null): Promise<Verdict> {
-    // nothing to lose: no worktree, or bb already archived the thread (its worktree is bb's to keep or remove). A refusal
-    // here could never clear, and the role would stay live for good.
+    // Nothing to lose when there is no worktree or bb already archived the thread; a refusal here could never clear.
     if (!environmentId) return { clean: true, inBase: false, why: "it has no worktree" };
     if (archivedAt) return { clean: true, inBase: false, why: "bb already archived it" };
     try {
@@ -1093,12 +1068,11 @@ export default async function plugin(bb: BbPluginApi) {
       if (base.outcome === "available" && "workspace" in base && !base.workspace.mergeBase) {
         base = (await gitCall("workspaceStatus", { environmentId, mergeBaseBranch: base.workspace.branch.defaultBranch })) as WorkspaceRead;
       }
-      // bb lists at most 1000 remote branches (a large monorepo has more): the base's and the branch's copies are looked up by name
+      // bb lists at most 1000 remote branches, so the base's and the branch's copies are looked up by name.
       const listed = async (query?: string) => ((await gitCall("branches", { environmentId, limit: 1000, ...(query ? { query } : {}) })) as { remoteBranches?: string[] }).remoteBranches ?? [];
       const baseName = baseBranchOf(base);
       let remotes = [...new Set([...(await listed()), ...(baseName ? await listed(baseName) : [])])];
-      // against origin's base, never a stale local one. No fetch: it would write refs in a checkout other agents share,
-      // and a stale origin/<base> can only refuse a clean worktree (retry after a fetch), never pass a dirty one.
+      // Against origin's base, never a stale local one; no fetch, which would write refs in a checkout other agents share.
       const upstream = remoteBase(base, remotes);
       if (upstream) base = (await gitCall("workspaceStatus", { environmentId, mergeBaseBranch: upstream })) as WorkspaceRead;
       const branch = base.outcome === "available" && "workspace" in base && base.workspace.checkout.kind === "branch" ? (base.workspace.checkout.branchName ?? null) : null;
@@ -1111,14 +1085,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /**
-   * Before bb archives a thread (and, once no thread holds it, removes its worktree): copy the notes the clean check lets
-   * stay uncommitted (handoff-*.md, report.md at the root) and the files of outputs recorded inside the worktree to
-   * <stateDir>/threads/<id>/, and point those outputs at the copies so the Deliverables tab still opens them. Says what was
-   * kept, or "" when nothing was. A failed copy throws: the archive waits rather than lose them.
-   * 2026-11-17: when its lead delivered the thread's work (engine.deliverableForThread), they go into that newest
-   * deliverable's own folder instead, with every output the thread recorded, so the deliverable holds all its markdown.
-   */
+  /** A failed copy throws: the archive waits rather than lose the notes. */
   function keepFiles(threadId: string, worktree: string | null): string {
     if (!worktree || !existsSync(worktree)) return "";
     const root = realpathSync(worktree);
@@ -1132,18 +1099,17 @@ export default async function plugin(bb: BbPluginApi) {
     }
     let moved = 0;
     for (const o of into ? engine.threadOutputs(threadId, root) : engine.outputsUnder(root)) {
-      if (!existsSync(o.path!)) continue; // already gone: nothing left to keep
+      if (!existsSync(o.path!)) continue;
       const inWorktree = o.path!.startsWith(root + sep);
       if (into) {
         const k = engine.keepInDeliverable(into.id, o.path!);
         if (k.stored === "copied") {
-          // the worktree goes once archived: an output in it now opens its copy
           if (inWorktree) engine.repointOutput(o.id, k.path);
           moved++;
           continue;
         }
       }
-      if (!inWorktree) continue; // not copied (over the cap) and not going away: it stays where it is
+      if (!inWorktree) continue;
       const to = join(dir, "outputs", relative(root, o.path!));
       mkdirSync(dirname(to), { recursive: true });
       cpSync(o.path!, to, { recursive: true });
@@ -1154,7 +1120,6 @@ export default async function plugin(bb: BbPluginApi) {
     return what.length ? ` Kept ${what.join(", ")} in ${into ? `${into.id}'s folder ${into.folder}` : dir}.` : "";
   }
 
-  /** bb archives these threads in order (handoff predecessors first); each gets its Board row, a failure a notice. Skips what bb already archived. */
   async function archiveThreads(ids: string[], project: string | null): Promise<{ archived: string[]; failed: string[] }> {
     const archived: string[] = [];
     const failed: string[] = [];
@@ -1175,7 +1140,7 @@ export default async function plugin(bb: BbPluginApi) {
     return { archived, failed };
   }
 
-  // an object, or the JSON-string form agents on an older schema send; parsed again in execute (idempotent) so both reach the engine as one
+  // An object, or the JSON string older-schema agents send; parsed again in execute so both reach the engine alike.
   const HANDED_OFF = z.preprocess(fromJson, z.object({ pr: z.string().min(1).max(500).describe("The open PR's https link"), owner: z.string().min(1).max(40).describe("Who has the PR now"), note: z.string().max(200).optional() }));
   const RESOLVE_UPDATE = "Post an update with orch_status (update: working_on 1-3 bullets, at, needs): it is the Lead status card on your project. Plain words about the task and what is done; no SHAs, run ids or tool names.";
   bb.agents.registerTool({
@@ -1190,7 +1155,6 @@ export default async function plugin(bb: BbPluginApi) {
       try {
         const a = caller(threadId);
         const t = engine.agentByAddress(p.to);
-        // a retired address: the engine says whether it was already resolved (no PR lookup needed)
         if (!t) return ok(engine.resolve(a, p.to, { prMerged: false, lastReadAt: null }));
         if (t.role !== "thread" || t.project !== a.project) throw new EngineError("forbidden", "resolve only your own threads");
         const th = await threadInfo(t.threadId);
@@ -1204,14 +1168,13 @@ export default async function plugin(bb: BbPluginApi) {
             closed = r.outcome === "available" && r.pullRequest.state === "closed";
           }
         }
-        // only predecessors in the same bb environment: the link is the takeover's instant, the worktree must match too
         const before: string[] = [];
         for (const id of engine.predecessors(t.threadId)) {
           const pt = await threadInfo(id).catch(() => null);
           if (pt && pt.environmentId === th.environmentId) before.push(id);
         }
         const out = engine.resolve(a, p.to, { prMerged: merged || engine.prFor(th.environmentId)?.state === "merged", prClosed: closed || engine.prFor(th.environmentId)?.state === "closed", lastReadAt: th.lastReadAt, worktree: await worktreeOf(th.environmentId, (th as { archivedAt?: number | null }).archivedAt ?? null), handedOff: p.handed_off === undefined ? null : HANDED_OFF.parse(p.handed_off) });
-        // predecessors first: they share the worktree, so it goes (if ever) only with the last of them
+        // Predecessors first: they share the worktree, so it goes only with the last of them.
         const { archived, failed } = await archiveThreads([...before, t.threadId], a.project);
         void flush();
         const said = [archived.length ? `Archived ${archived.join(", ")}.` : "", failed.length ? `Not archived: ${failed.join(", ")}.` : ""].filter(Boolean);
@@ -1247,10 +1210,9 @@ export default async function plugin(bb: BbPluginApi) {
         const root = realpathSync(env.path);
         const file = handoffFile(root, p.file);
         const selection = await spawnSelection(bb.sdk.providers, { environmentId: th.environmentId }, p);
-        // a scoping thread's successor is told what a fresh one is (1.13.0): read before takeOver moves its spawn row
         const task = engine.scopingTaskOfThread(t.threadId);
         const takeover = `You take over ${p.to} (from thread ${t.threadId}) in this worktree. Read ${file} first: it says what is done, how to test, and what to do next. You are ${p.to} in ${ownerWords(cfg.ownerName).name}'s orchestrator; your lead is lead:${a.project}.`;
-        // spawned without a parent, so the auto-register for a lead's new child doesn't take it; the parent is set below
+        // Spawned without a parent so the auto-register for a lead's new child doesn't take it; the parent is set below.
         const n = await bb.sdk.threads.spawn({
           projectId: th.projectId,
           environment: { type: "reuse", environmentId: th.environmentId },
@@ -1263,14 +1225,13 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           succ = engine.takeOver(t.threadId, n.id, `${p.provider}${p.model ? ` ${p.model}` : ""}; ${file}`, { from: (th as { providerId?: string }).providerId ?? null, to: p.provider });
         } catch (e) {
-          // no role for it: stop the successor rather than leave it working as an orphan in the same worktree
           await bb.sdk.threads.stop({ threadId: n.id }).catch((x: unknown) => bb.log.warn(`handoff: stop orphan ${n.id}: ${errText(x)}`));
           throw new Error(`${errText(e)} (the new thread ${n.id} was stopped; ${p.to} is unchanged)`);
         }
-        await bb.sdk.threads.update({ threadId: n.id, parentThreadId: a.threadId, parentNotifications: "auto" } as Parameters<typeof bb.sdk.threads.update>[0]);
+        await bb.sdk.threads.update({ threadId: n.id, parentThreadId: a.threadId, parentNotifications: "stuck" } as Parameters<typeof bb.sdk.threads.update>[0]);
         await bb.sdk.threads.updatePluginMetadata({ threadId: n.id, set: { address: succ.address, role: succ.role } });
         await bb.sdk.threads.stop({ threadId: t.threadId }).catch((e: unknown) => bb.log.warn(`handoff: stop ${t.threadId}: ${errText(e)}`));
-        // hidden at once, not archived: it shares the successor's worktree, and resolving the successor archives both
+        // Hidden at once, not archived: it shares the successor's worktree, and resolving the successor archives both.
         const hidden = await bb.sdk.threads
           .update({ threadId: t.threadId, visibility: "hidden" } as Parameters<typeof bb.sdk.threads.update>[0])
           .then(() => true)
@@ -1283,10 +1244,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  // ---------------------------------------------------------------- push: a card entered Needs you (desktop/web only)
-  // A push that reached a phone pauses it across reloads (a reload must not buy one more phone notification). With
-  // mobile push on, nothing is sent anyway: that pause is re-found on every card. Switching pushNeedsYou off and on lifts
-  // either.
+  // A push that reached a phone pauses it across reloads, so a reload can't buy another phone notification.
   const PUSH_PAUSED = "pushPaused";
   let pushBlocked = false;
   try {
@@ -1305,10 +1263,7 @@ export default async function plugin(bb: BbPluginApi) {
     await Promise.resolve().then(() => bb.storage.kv.delete(PUSH_PAUSED)).catch((e: unknown) => bb.log.warn(`push: lift the pause: ${errText(e)}`));
     engine.boardAdd("notice", "orchestrator", null, "Needs-you push resumed", "pushNeedsYou was switched back on. It pauses again if mobile push is on.", null);
   }
-  /**
-   * notifications.send, which thread levels never mute (so notifyOnlyOrchestrator keeps these). With threadId a click
-   * opens that thread; a thread bb no longer has is refused before anything is sent, so that one goes again without it.
-   */
+  /** A thread bb no longer has is refused before anything is sent, so that one goes again without it. */
   async function sendPush(input: { title: string; body: string }, threadId: string | null): Promise<{ channels: string[] }> {
     const send = (withThread: boolean) =>
       bb.sdk.plugins.callRpc({
@@ -1345,8 +1300,6 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  // ---------------------------------------------------------------- push: a lead delivered (desktop/web only)
-  // pushCard's guard, for a deliverable. TODO after the p-fixes/p-lead merge: fold the shared guard into one helper.
   async function pushDelivered(d: Deliverable): Promise<void> {
     if (!cfg.pushNeedsYou || pushBlocked) return bb.log.info(`push ${d.id}: off (${pushBlocked ? "paused" : "setting"})`);
     try {
@@ -1370,8 +1323,6 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  // ---------------------------------------------------------------- deliverables: the lead's finished work, with proof, for the owner
-  /** The folders a lead's proof may come from: its own environment, its threads' environments, the shared folders. */
   async function deliverPlace(lead: Agent): Promise<DeliverPlace> {
     const envOf = async (a: Agent) => {
       const envId = a.environmentId ?? (await threadInfo(a.threadId).catch(() => null))?.environmentId ?? null;
@@ -1387,19 +1338,14 @@ export default async function plugin(bb: BbPluginApi) {
     return { roots };
   }
 
-  /**
-   * Where a project's file pins may come from, whoever pins: its lead's proof folders (deliverPlace, unchanged), on the
-   * lead's host. No lead: the shared folders only, and no host, so a file pin is refused (a link or deliverable is fine).
-   */
   async function pinPlace(slug: string): Promise<OutputPlace> {
     const lead = engine.agentByAddress(`lead:${slug}`);
     if (!lead) return { roots: sharedRoots(), hostId: null };
     const { roots } = await deliverPlace(lead);
-    // each root keeps its own host: a file opens on the machine of the folder it is in (engine.pin, hostOfPath)
     return { roots: roots.map((r) => r.path), hostId: roots.find((r) => r.hostId)?.hostId ?? null, hosts: roots };
   }
 
-  // an object, or the JSON-string form agents on an older schema send; parsed again in execute, where the host may pass it raw
+  // An object, or the JSON string older-schema agents send; parsed again in execute, where the host may pass it raw.
   const DELIVER_BOARD = z.preprocess(fromJson, z.object({ id: z.string().trim().min(1).max(500), record: z.string().trim().max(40).optional(), flag: z.string().trim().max(160).optional() }).strict());
   const boardIn = (a: Agent, raw: unknown): { id: string; record?: string; flag?: string } | null => {
     if (raw === undefined || raw === null || raw === "") return null;
@@ -1449,6 +1395,7 @@ export default async function plugin(bb: BbPluginApi) {
         .max(20),
       revises: z.string().optional().describe(`The id of your deliverable ${O.name} sent back with changes, or one still in review that this one replaces (same id, rev + 1)`),
       scope_task: SCOPE_TASK.optional().describe(`An open scoping task's id or name: ${O.name} reviews it in the Scope tab under that task, not on Deliverables; the CoS gets a read-only copy. A revision stays in its task while the task is open`),
+      task: z.string().max(80).optional().describe("The work-board task it delivers: its id (t-…, from orch_status) or an open step's title. A revision keeps the last one"),
       board: DELIVER_BOARD.optional().describe(
         `A review a Multiplayer board triggered: {id: the board (mb-…, its channel id or link), record: your review record (rr-…), flag: one line when it needs ${O.name} (couldn't verify, interview pending)}. ${O.Name} reviews it on that board, never on Deliverables; a flag also files a Needs you card. A revision keeps its board`,
       ),
@@ -1467,7 +1414,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (tooLong) throw new EngineError("invalid", tooLong);
         const board = boardIn(a, p.board);
         const place = p.proof.some((x) => x.path) ? await deliverPlace(a) : { roots: [] };
-        const d = engine.deliver(a, { title: p.title, summary: p.summary, points: p.points, proof: p.proof as ProofInput[], revises: p.revises ?? null, blocks: p.blocks, scopeTask: p.scope_task ?? null, board }, place);
+        const d = engine.deliver(a, { title: p.title, summary: p.summary, points: p.points, proof: p.proof as ProofInput[], revises: p.revises ?? null, blocks: p.blocks, scopeTask: p.scope_task ?? null, board, task: p.task ?? null }, place);
         if (d.board?.record) multiplayer.store.linkDeliverable(d.board.record, a.address, d.id);
         if (d.board) multiplayer.changed();
         void flush();
@@ -1498,7 +1445,6 @@ export default async function plugin(bb: BbPluginApi) {
     execute: (p, { threadId }) =>
       run(threadId, (a) => {
         if (a.role !== "lead") throw new EngineError("forbidden", "only a lead files review records");
-        // parsed again: JSON-string arguments must decode even where the host passed them raw
         const parsed = recordParams.safeParse(p);
         if (!parsed.success) throw new EngineError("invalid", parsed.error.issues.map((i) => `${i.path.join(".") || "record"}: ${i.message}`).join("; "));
         const { record: r, created } = guard(() => multiplayer.file({ address: a.address, project: a.project }, parsed.data));
@@ -1516,17 +1462,16 @@ export default async function plugin(bb: BbPluginApi) {
     parameters: statusParams,
     execute: (p, { threadId }) =>
       run(threadId, (a) => {
-        // parsed again (it is idempotent): JSON-string arguments must decode even where the host passed them raw
         const parsed = statusParams.safeParse(p);
         if (!parsed.success) throw new EngineError("invalid", parsed.error.issues.map((i) => `${i.path.join(".") || "status"}: ${i.message}`).join("; "));
         const s = engine.publishStatus(a, parsed.data);
         const ignored = ignoredTopLevelUpdate(parsed.data);
         const note = ignored.length ? ` Ignored top-level ${ignored.join(", ")}: update was given and wins; put them inside update.` : "";
-        return `Published: ${statusLine(s, ownerWords(cfg.ownerName).name) || s.goal}.${note}`;
+        const ids = s.steps.length ? ` Task ids: ${s.steps.map((x) => `${x.id} ${JSON.stringify(x.title)}`).join("; ")}. Send each step back with its id (steps[].id), also when you reword it.` : "";
+        return `Published: ${statusLine(s, ownerWords(cfg.ownerName).name) || s.goal}.${ids}${note}`;
       }),
   });
 
-  // ---------------------------------------------------------------- outputs (phase 3): finished artefacts for the owner
   bb.agents.registerTool({
     name: "orch_output",
     description:
@@ -1549,7 +1494,6 @@ export default async function plugin(bb: BbPluginApi) {
         const roots = sharedRoots();
         let hostId: string | null = null;
         if (p.path) {
-          // the caller's own folder and the host it is on, as orch_handoff finds a thread's worktree
           const th = await threadInfo(a.threadId);
           if (th.environmentId) {
             const env = (await bb.sdk.environments.get({ environmentId: th.environmentId })) as unknown as { path?: string | null; hostId?: string | null };
@@ -1559,7 +1503,6 @@ export default async function plugin(bb: BbPluginApi) {
           if (!hostId) throw new EngineError("bad_state", `your thread has no environment on a bb host, so ${ownerWords(cfg.ownerName).name} couldn't open the file`);
         }
         const { output, created } = engine.addOutput(a, { title: p.title, kind: p.kind, path: p.path ?? null, url: p.url ?? null, note: p.note ?? null }, { roots, hostId });
-        // the output's own path already passed the proof check against these roots; a repeat output still pins
         const pinned = p.pin ? engine.pin(a.project!, output.path ?? output.url!, { title: p.title, by: a }, { roots, hostId: output.hostId ?? hostId }) : null;
         const pinNote = pinned ? (pinned.created ? ` Pinned as ${pinned.pin.id}.` : ` Already pinned as ${pinned.pin.id}.`) : "";
         return ok((created ? `Recorded ${output.id}: on ${ownerWords(cfg.ownerName).name}'s Deliverables tab (Files until a deliverable uses it as proof) and the Board.` : `Already recorded as ${output.id}.`) + pinNote);
@@ -1581,7 +1524,6 @@ export default async function plugin(bb: BbPluginApi) {
       }),
   });
 
-  // The Steward's own actions (2026-11-13): fixed argv, nothing else.
   const CLEANUPS: Record<string, string[]> = {
     "bb-plugin-prune": [process.env.BB_CLI || "bb", "plugin", "prune"],
     "npm-cache-verify": ["npm", "cache", "verify"],
@@ -1609,8 +1551,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  // The memory tools: leads and threads of a known memory project (memorySetup). Read-only.
-  // Read-only, listed only for threads of a memory project (memorySetup); the CoS and the Steward never get them.
+  // Listed only for threads of a memory project; the CoS and the Steward never get them.
   const memoryCaller = (threadId: string | undefined) => {
     const a = threadId ? engine.agentByThread(threadId) : null;
     if (a && (a.role === "cos" || a.role === "steward")) throw new EngineError("forbidden", "not for the CoS or the Steward");
@@ -1655,15 +1596,12 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  // Tools per role, from the store (the authority; thread metadata is only a mirror any agent could write).
-  // A thread spawned by `bb orchestrator spawn` carries its role in seeded metadata, so its first session already
-  // lists its tools; every tool call still checks the store.
+  // Tools per role come from the store, the authority: thread metadata is only a mirror any agent could write.
   bb.agents.configure((context) => {
     const a = engine.agentByThread(context.thread.id);
     const seeded = (context.pluginMetadata as { role?: unknown }).role;
     const role = a?.role ?? (context.origin.pluginId === bb.pluginId && ROLES.includes(seeded as Role) ? (seeded as Role) : null);
     if (!role) {
-      // a thread without a role: only the memory tools, when its bb project is a memory project
       const mem = memorySetup({ role: null, project: null }, context.project.name, context.environment.path, memory, memoryProjectsNow, cfg.ownerName);
       if (mem.map) recordFolder(mem.map.folder, mem.map.project);
       return mem.tools.length ? { tools: mem.tools, skills: ["memory"], instructions: mem.instructions } : { tools: [], skills: [] };
@@ -1678,7 +1616,24 @@ export default async function plugin(bb: BbPluginApi) {
     };
   });
 
-  // The live recovery view, rebuilt whenever bb resolves the thread's config (a start, a turn, after a compaction).
+  bb.background.service("role-tools", {
+    async start() {
+      try {
+        const kept = await bb.storage.kv.get<unknown>(ROLE_TOOLS_KEY);
+        const { baseline, changes } = roleToolsChanges(kept, TOOLS_BY_ROLE);
+        if (changes.length) {
+          const told = engine.roleToolsChanged(changes);
+          bb.log.info(`role tools: ${changes.map((c) => c.role).join(", ")} changed; told ${told.join(", ") || "no running agent"}`);
+          void flush();
+        }
+        // after the notices: a crash in between replays the same keys, which tell nobody twice
+        if (JSON.stringify(baseline) !== JSON.stringify(kept)) await bb.storage.kv.set(ROLE_TOOLS_KEY, baseline);
+      } catch (e) {
+        bb.log.warn(`role tools: ${errText(e)}`);
+      }
+    },
+  });
+
   bb.agents.contributeInstructions(({ threadId }) => {
     const a = threadId ? engine.agentByThread(threadId) : null;
     if (!a) return null;
@@ -1687,7 +1642,6 @@ export default async function plugin(bb: BbPluginApi) {
     return `[orchestrator] ${delivery}Your current recovery view (not a digest read; as of ${new Date().toISOString()}):\n${engine.inbox(a).text}`;
   });
 
-  // ---------------------------------------------------------------- events
   bb.events.on("thread.created", async ({ thread }) => {
     const parent = (thread as { parentThreadId?: string | null }).parentThreadId ?? null;
     if (!parent || engine.agentByThread(thread.id)) return;
@@ -1703,6 +1657,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
   });
   bb.events.on("thread.active", ({ thread }) => {
+    reads.forget(thread.id);
     if (!engine.agentByThread(thread.id)) return;
     engine.setStatus(thread.id, "active");
     void flush();
@@ -1710,6 +1665,7 @@ export default async function plugin(bb: BbPluginApi) {
   const bbParent = (t: unknown) => (t as { parentThreadId?: string | null }).parentThreadId ?? null;
   const bbNotify = (t: unknown) => (t as { parentNotifications?: string }).parentNotifications;
   bb.events.on("thread.idle", ({ thread, lastAssistantText }) => {
+    reads.forget(thread.id);
     const a = engine.agentByThread(thread.id);
     if (!a) return;
     engine.setStatus(thread.id, "idle");
@@ -1719,6 +1675,7 @@ export default async function plugin(bb: BbPluginApi) {
     void flush();
   });
   bb.events.on("thread.failed", ({ thread, error }) => {
+    reads.forget(thread.id);
     const a = engine.agentByThread(thread.id);
     if (!a) return;
     engine.setStatus(thread.id, "error");
@@ -1734,17 +1691,21 @@ export default async function plugin(bb: BbPluginApi) {
     void flush();
   });
   bb.events.on("thread.archived", ({ thread }) => {
+    reads.forget(thread.id);
     if (engine.agentByThread(thread.id)) engine.setStatus(thread.id, "archived");
   });
+  bb.events.on("thread.unarchived", ({ thread }) => reads.forget(thread.id));
+  bb.events.on("thread.deleted", ({ thread }) => reads.forget(thread.id));
+  bb.events.on("experimental_thread.read", ({ thread }) => reads.forget(thread.id));
   bb.events.on("interaction.pending", ({ thread, interaction }) => {
+    reads.forget(thread.id);
     const a = engine.agentByThread(thread.id);
     if (!a) return;
-    // a thread bb doesn't report on every turn (spawned "stuck") can sit blocked on a prompt: its lead is woken once
     if (a.role === "thread" && !engine.bbTellsSupervisor(a, bbParent(thread), bbNotify(thread), "turn")) {
       engine.notifySupervisor(a, "is waiting on a prompt in its bb thread (a permission or a question); it can't go on until it is answered.", true, `pending:${interaction.id}`);
       void flush();
     }
-    changed();
+    changed([BB]);
   });
   bb.events.on("message.dispatched", ({ entry }) => engine.dispatched(entry.id));
   bb.events.on("message.cancelled", ({ entry }) => engine.cancelled(entry.id));
@@ -1759,9 +1720,6 @@ export default async function plugin(bb: BbPluginApi) {
     await flush();
   }
 
-  // ---------------------------------------------------------------- the clock, the CoS's context, the host
-  // Claude Code's own /compact (bb's threads.compact), never a clear: the CoS keeps a summary of its conversation in the
-  // same session (2026-11-16). Its open items also come back on every turn through its instructions and orch_inbox.
   let lastCompact: { capturedAt: string | null; at: number } | null = null;
   async function compactCos(force: boolean): Promise<string> {
     const cos = engine.agentByAddress("cos");
@@ -1774,7 +1732,7 @@ export default async function plugin(bb: BbPluginApi) {
     const capturedAt = ctx.usage?.snapshot?.capturedAt ?? null;
     if (!force) {
       if (used < cfg.cosCompactTokens) return `CoS at ${used} tokens; under the threshold`;
-      // the reading can lag the compaction: wait for a new one, and at least COMPACT_COOLDOWN_MS, before asking again
+      // The reading can lag the compaction: wait for a new one, and at least COMPACT_COOLDOWN_MS, before asking again.
       if (lastCompact && (lastCompact.capturedAt === capturedAt || Date.now() - lastCompact.at < COMPACT_COOLDOWN_MS))
         return `CoS at ${used} tokens; a compaction was requested at ${new Date(lastCompact.at).toISOString()}, waiting for a new reading`;
     }
@@ -1788,9 +1746,7 @@ export default async function plugin(bb: BbPluginApi) {
     return `requested compaction of the CoS's context at ${used} tokens`;
   }
 
-  // ---------------------------------------------------------------- the sidebar: one section per project (2026-11-13)
-  // Each lead and its threads sit in a bb thread section named after the project; the CoS and the Steward in
-  // "Orchestrator". Only threads with no section are placed, so a thread the owner moves by hand stays where they put it.
+  // Only threads with no section are placed, so a thread the owner moves by hand stays where they put it.
   const placed = new Set<string>();
   let placing: Promise<void> | null = null;
   const placeSections = (): Promise<void> =>
@@ -1825,7 +1781,6 @@ export default async function plugin(bb: BbPluginApi) {
       }
     })());
 
-  // An archived project's section goes (2026-11-16); see core/sections.ts. Runs at load, after an archive and on the clock.
   let pruning: Promise<void> | null = null;
   let lastKept = "";
   const pruneProjectSections = (): Promise<void> =>
@@ -1840,7 +1795,7 @@ export default async function plugin(bb: BbPluginApi) {
           engine.projects(),
         );
         if (r.removed.length) bb.log.info(`sections: removed ${r.removed.join(", ")} (archived project${r.removed.length === 1 ? "" : "s"})`);
-        const kept = r.kept.join(", "); // once per change: this runs every 30 s
+        const kept = r.kept.join(", ");
         if (kept !== lastKept) {
           lastKept = kept;
           if (kept) bb.log.info(`sections: kept ${kept}`);
@@ -1852,13 +1807,9 @@ export default async function plugin(bb: BbPluginApi) {
       }
     })());
 
-  // ---------------------------------------------------------------- levels: XP from each turn's token usage
-  // bb logs a thread/tokenUsage/updated event per turn; its `last.totalTokens` is that turn's tokens (cache reads
-  // included). Counted after the thread's cursor, so each turn counts once, and from the start for a new agent.
   const levelInfo = (a: Agent) => {
     const { tokens, level } = engine.xpOf(a.address);
     const form = formAt(a.mon, level, a.monPin);
-    // formDex: the browser's mons.ts doesn't know a pack's lines, so the sprite's number comes with the form
     return { level, xp: tokens, xpThis: tokensForLevel(level), xpNext: tokensForLevel(level + 1), form: form?.name ?? a.mon, formDex: form?.dex ?? null };
   };
   const xpBusy = new Set<string>();
@@ -1886,33 +1837,27 @@ export default async function plugin(bb: BbPluginApi) {
     }
   };
 
-  /** Retention (core/retention.ts): delete, drop the deleted cards' mirrors, then give the space back to the disk. */
   const runPrune = (dryRun: boolean): string => {
     const { counts, decisions } = prune(db, Date.now(), cfg, dryRun);
     if (dryRun) return `would delete: ${pruneSummary(counts)}`;
     for (const id of decisions) rmSync(join(stateDir(), "decisions", `${id}.json`), { force: true });
-    // VACUUM can't run inside a transaction; prune has committed by now
+    // VACUUM can't run inside a transaction.
     if (Object.values(counts).some((n) => n > 0)) db.exec("VACUUM");
     return `deleted: ${pruneSummary(counts)}`;
   };
 
   bb.background.service("clock", {
     async start(signal) {
-      // 2026-11-17: deliverables filed before they kept their own files get their folders (idempotent: a no-op once done)
       try {
         const b = engine.backfillFiles();
         if (b.deliverables) bb.log.info(`deliverable files: ${b.deliverables} folder(s), ${b.copied} copied, ${b.reused} reused, ${b.tooBig} over the cap, ${b.failed} failed, ${b.missing.length} missing`);
       } catch (e) {
         bb.log.warn(`deliverable files: ${errText(e)}`);
       }
-      // bb waits 5 s for a stopped service, then fails the reload ("service clock did not stop", 2026-11-14, during a
-      // pr-watch pass). So the clock stops waiting on a pass once it is stopped (a slow call's result is dropped), and
-      // a pass checks the signal between steps and threads, so little of it runs on after that.
+      // bb waits 5 s for a stopped service, then fails the reload: a stopped clock stops waiting on a pass and drops a slow call's result.
       const reconcile = async () => {
-        // reservations an earlier instance left mid-spawn (never confirmed or released) give their slots back
         const stale = engine.sweepStaleSpawns(loadedAt);
         if (stale) bb.log.info(`spawns: released ${stale} stale reservation(s)`);
-        // after a restart: queued rows that went while we were away count as delivered
         try {
           for (const it of engine.queuedItems()) {
             if (signal.aborted) return;
@@ -1928,18 +1873,25 @@ export default async function plugin(bb: BbPluginApi) {
             const rows = await bb.sdk.threads.queuedMessages.list({ threadId: to.threadId });
             if (!rows.some((r) => r.id === wake.queued_id)) engine.batch.missingQueue(wake.queued_id);
           }
-          // every agent, stopped ones too: a thread bb no longer has is noted here, and retired on the next not-found (core/gone.ts)
           const threads = await lookThreads(engine, engine.agents(), (threadId) => bb.sdk.threads.get({ threadId }), signal);
           for (const a of engine.agents()) {
             if (signal.aborted) return;
             const t = threads.get(a.threadId);
             if (!t) continue;
-            // bb reports an archived thread's last status (e.g. idle); keep it archived, so a Start can replace it
+            // bb reports an archived thread's last status (e.g. idle); keep it archived, so a Start can replace it.
             const archived = !!(t as { archivedAt?: number | null }).archivedAt;
-            // a stopped agent stays stopped until it runs again; only bb's archive ends it
             if (a.status === "stopped" && !archived) continue;
             engine.setStatus(a.threadId, archived ? "archived" : t.status);
             if (!a.environmentId) engine.setEnvironment(a.threadId, (t as unknown as ThreadInfo).environmentId ?? null);
+          }
+          for (const { agent, leadThreadId } of autoUnderLead(engine, threads as unknown as Map<string, BbNotify>)) {
+            if (signal.aborted) return;
+            try {
+              await bb.sdk.threads.update({ threadId: agent.threadId, parentThreadId: leadThreadId, parentNotifications: "stuck" } as Parameters<typeof bb.sdk.threads.update>[0]);
+              bb.log.info(`notify level: ${agent.address} (${agent.threadId}) auto -> stuck under its lead ${leadThreadId}, as orch_spawn_thread sets`);
+            } catch (e) {
+              bb.log.warn(`notify level: ${agent.address} (${agent.threadId}): ${errText(e)}`);
+            }
           }
         } catch (e) {
           bb.log.warn(`reconcile: ${errText(e)}`);
@@ -1950,7 +1902,7 @@ export default async function plugin(bb: BbPluginApi) {
       let lastPlace = 0;
       let lastXp = 0;
       let lastPrune = 0;
-      let lastThreads = Date.now(); // the reconcile below looks first
+      let lastThreads = Date.now();
       const pass = async () => {
         try {
           engine.tick();
@@ -1986,7 +1938,6 @@ export default async function plugin(bb: BbPluginApi) {
           if (signal.aborted) return;
           if (Date.now() - lastThreads > GONE_CHECK_MS) {
             lastThreads = Date.now();
-            // a second not-found, apart from the first, retires the agent (core/gone.ts)
             await lookThreads(engine, engine.agents(), (threadId) => bb.sdk.threads.get({ threadId }), signal);
             await flush();
           }
@@ -2026,7 +1977,6 @@ export default async function plugin(bb: BbPluginApi) {
   let lastSnapshot: Snapshot | null = null;
   bb.background.service("steward-sampler", {
     async start(signal) {
-      // a restart must not re-fire the level the Steward already heard
       alarms.restore(engine.lastAlarmLevel(), Date.now(), thresholds().sustainMs);
       while (!signal.aborted) {
         try {
@@ -2048,7 +1998,6 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  // ---------------------------------------------------------------- dreams (phase 3, gap 5): nightly batch, memory check
   const dreamConfig = () => (memory ? loadDreamConfig(memory.configPath).config : null);
   const dreamOpts = (): DreamOptions => {
     const dc = dreamConfig();
@@ -2080,7 +2029,7 @@ export default async function plugin(bb: BbPluginApi) {
   bb.background.service("dreams", {
     async start(signal) {
       while (!signal.aborted) {
-        // stopped mid-step, it stops waiting (bb gives a stopped service 5 s; a step's systemctl and git calls may take 30 s)
+        // A stopped service stops waiting: bb gives it 5 s, and a step's systemctl and git calls may take 30 s.
         await unlessAborted(dreams.step().catch((e) => bb.log.warn(`dreams: ${errText(e)}`)), signal);
         mark("dreams");
         await sleep(60_000, signal);
@@ -2088,7 +2037,6 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  // ---------------------------------------------------------------- reads (RPC)
   const card = (d: Decision, held: readonly Decision[] = []): Card => ({
     id: d.id,
     rev: d.rev,
@@ -2113,7 +2061,6 @@ export default async function plugin(bb: BbPluginApi) {
       const pr = engine.prByUrl(b.url);
       return pr ? [{ ...pr, url: b.url }] : [];
     }),
-    // the file the summary is in: the project's PROJECT.md, or a scoping task's doc (1.12.0)
     scopingDone: d.orchestrator.scoping_done ? { summary: d.orchestrator.scoping_done.summary, projectMd: d.orchestrator.scoping_done.project_md ?? d.orchestrator.scoping_done.doc ?? "" } : null,
     scopeTask: d.orchestrator.scope_task ?? null,
     revised: d.orchestrator.revised?.count ?? 0,
@@ -2139,7 +2086,17 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
   let feedPrompts: FeedPrompt[] = [];
-  bb.rpc.register(rpcContract, {
+  type ThreadRead = ThreadInfo & { environment?: { branchName?: string | null } | null };
+  const threadRead = (threadId: string) =>
+    reads.thread(threadId, "get", () => (bb.sdk.threads.get({ threadId, include: "environment" } as Parameters<typeof bb.sdk.threads.get>[0]) as Promise<unknown> as Promise<ThreadRead>).catch(() => null));
+  const contextRead = (threadId: string) => reads.thread(threadId, "context", () => bb.sdk.threads.context({ threadId }).catch(() => null));
+  const interactionsRead = (threadId: string) =>
+    reads.thread(threadId, "interactions", () => (bb.sdk.threads.interactions.list({ threadId }) as Promise<unknown> as Promise<RawInteraction[]>).catch(() => null));
+  const onSlowRead = (name: string, ms: number) => {
+    const d = loop.take();
+    bb.log.warn(`slow read ${name}: ${Math.round(ms)} ms (event loop delay since the last slow read: ${d ? `p99 ${d.p99} ms, max ${d.max} ms` : "no new samples"})`);
+  };
+  bb.rpc.register(rpcContract, timeReads(shareReads(reads, ["needsYou", "agents", "scope"], {
     async howItWorks() {
       return { markdown: readFileSync(join(import.meta.dirname, "USAGE.md"), "utf8") };
     },
@@ -2155,25 +2112,19 @@ export default async function plugin(bb: BbPluginApi) {
     },
     async needsYou({ zone }) {
       const v = engine.needsYou();
-      // every agent's pending interactions, asked of bb 8 at a time (2026-11-18, speed): one after another, the nav
-      // badge's read took a bb round trip per live agent on every change notice. All at once (58 together) was no faster
-      // in the isolated bb (one call p50 ~380 ms against ~209 ms at 8, four rounds out of four), and live bb was timing
-      // out at 75 s under load. In agent order, as before.
+      // Asked of bb 8 at a time: one by one costs a round trip per agent, and all at once times out under load.
       const list = engine.agents();
       const perAgent: NeedsYou["interactions"][] = new Array(list.length);
       let next = 0;
       const one = async (a: (typeof list)[number]): Promise<NeedsYou["interactions"]> => {
-        try {
-          const rows = ((await bb.sdk.threads.interactions.list({ threadId: a.threadId })) as unknown as RawInteraction[]).filter((r) => (r.status ?? "pending") === "pending");
-          if (!rows.length) return [];
-          const t = await bb.sdk.threads.get({ threadId: a.threadId });
-          return rows.map((r) => {
-            const kind = r.kind ?? r.payload?.kind ?? "prompt";
-            return { id: r.id, threadId: a.threadId, address: a.address, title: t.title ?? a.address, kind, since: r.createdAt ? new Date(r.createdAt).toISOString() : null, questions: kind === "user_question" ? toQuestions(r.payload) : [] };
-          });
-        } catch {
-          return []; // a thread that is gone has nothing pending
-        }
+        const rows = ((await interactionsRead(a.threadId)) ?? []).filter((r) => (r.status ?? "pending") === "pending");
+        if (!rows.length) return [];
+        const t = await threadRead(a.threadId);
+        if (!t) return [];
+        return rows.map((r) => {
+          const kind = r.kind ?? r.payload?.kind ?? "prompt";
+          return { id: r.id, threadId: a.threadId, address: a.address, title: t.title ?? a.address, kind, since: r.createdAt ? new Date(r.createdAt).toISOString() : null, questions: kind === "user_question" ? toQuestions(r.payload) : [] };
+        });
       };
       await Promise.all(
         Array.from({ length: Math.min(8, list.length) }, async () => {
@@ -2184,8 +2135,10 @@ export default async function plugin(bb: BbPluginApi) {
         }),
       );
       const interactions: NeedsYou["interactions"] = perAgent.flat();
-      // the feed reuses this read's prompts (the CoS's, the Steward's and the leads'), never asking bb again itself
+      const was = feedPrompts.map((p) => p.id).join();
       feedPrompts = interactions.filter((i) => !i.address.startsWith("thread:")).map((i) => ({ id: i.id, threadId: i.threadId, address: i.address, title: i.title, since: i.since }));
+      // A prompt answered in bb itself reaches the page as a status flip, which refetches this read but not the feed.
+      if (feedPrompts.map((p) => p.id).join() !== was) changed([BB]);
       return {
         cards: v.cards.map((d) => card(d, v.held)),
         deferred: v.deferred.map((d) => card(d)),
@@ -2202,7 +2155,7 @@ export default async function plugin(bb: BbPluginApi) {
         watchers: watchersView(),
         directUnread: [...engine.directLines()].filter(([, d]) => d.unread).map(([slug]) => slug),
         dead: engine.deadLetters({ board: true }).map((i) => ({ id: i.id, recipient: i.recipient, sender: i.sender, kind: i.kind, body: i.body, note: i.note, createdAt: i.createdAt })),
-        agents: engine.agents().map((a) => ({ threadId: a.threadId, address: a.address, role: a.role, project: a.project, status: a.status, mon: a.mon, monType: engine.accentType(a.project), ...engine.faceOf(a, assigned) })), // dex and persona: 2026-11-18
+        agents: engine.agents().map((a) => ({ threadId: a.threadId, address: a.address, role: a.role, project: a.project, status: a.status, mon: a.mon, monType: engine.accentType(a.project), ...engine.faceOf(a, assigned) })),
         rules: engine.rules().map((r) => ({ id: r.id, text: r.text, project: r.project, kinds: r.kinds, expiresAt: r.expiresAt, source: r.source, createdAt: r.createdAt, revokedAt: r.revokedAt })),
         decisions: engine.decisions(50).map((d) => ({
           id: d.id,
@@ -2231,9 +2184,10 @@ export default async function plugin(bb: BbPluginApi) {
           priority: p.priority,
           heldAt: p.heldAt,
           archivedAt: p.archivedAt,
+          createdAt: p.createdAt,
           mode: p.mode,
           lead: lead ? { address: lead.address, threadId: lead.threadId, status: lead.status, mon: lead.mon, persona: engine.personaOf(lead, assigned) } : null,
-          monType: engine.accentType(p.slug), // the project accent: none with the setting off
+          monType: engine.accentType(p.slug),
           threads: agents.filter((a) => a.role === "thread" && a.project === p.slug).length,
           openPlans: engine.openPlans(p.slug),
           status: engine.leadStatus(p.slug),
@@ -2249,14 +2203,12 @@ export default async function plugin(bb: BbPluginApi) {
       const assigned = engine.personaAssignments();
       return Promise.all(
         engine.agents().map(async (a) => {
-          const t = (await bb.sdk.threads.get({ threadId: a.threadId, include: "environment" } as Parameters<typeof bb.sdk.threads.get>[0]).catch(() => null)) as
-            | (ThreadInfo & { environment?: { branchName?: string | null } | null })
-            | null;
-          const ctx = await bb.sdk.threads.context({ threadId: a.threadId }).catch(() => null);
+          const t = await threadRead(a.threadId);
+          const ctx = await contextRead(a.threadId);
           const pr = engine.prFor(a.environmentId);
           const proj = a.project ? engine.project(a.project) : null;
           return {
-            monType: engine.accentType(a.project), // the project accent for the sidebar: none with the setting off
+            monType: engine.accentType(a.project),
             threadId: a.threadId,
             address: a.address,
             role: a.role,
@@ -2270,7 +2222,7 @@ export default async function plugin(bb: BbPluginApi) {
             lastReport: engine.lastReport(a.address),
             provider: (t as { providerId?: string } | null)?.providerId ?? null,
             mon: a.mon,
-            persona: engine.personaOf(a, assigned), // null with the pokemon setting off or no pack
+            persona: engine.personaOf(a, assigned),
             ...levelInfo(a),
             model: ctx?.usage?.snapshot?.model ?? null,
             usedTokens: ctx?.usage?.usedTokens ?? null,
@@ -2288,12 +2240,10 @@ export default async function plugin(bb: BbPluginApi) {
       return engine.projectBook(slug, dayStart);
     },
     async scope() {
-      // each open task's planner (1.13.0): its live scoping thread, by bb's title for it (the address when bb can't say);
-      // with since when it is idle and its last report (2026-11-17), what the entry's status card says it is on
       const planner = async (taskId: string) => {
         const a = engine.taskPlanner(taskId);
         if (!a) return null;
-        const t = (await bb.sdk.threads.get({ threadId: a.threadId }).catch(() => null)) as { title?: string | null } | null;
+        const t = await threadRead(a.threadId);
         const at = engine.lastReportAt(a.address);
         const text = at === null ? null : engine.lastReport(a.address);
         return { address: a.address, threadId: a.threadId, title: t?.title?.trim() || null, status: a.status, idleAt: a.idleAt, report: text !== null && at !== null ? { text, at } : null };
@@ -2348,7 +2298,7 @@ export default async function plugin(bb: BbPluginApi) {
               prUrls: pr?.url ? [pr.url] : [],
             };
           });
-          const decisions = engine.decisions(5000).filter((decision) => decision.project === slug);
+          const decisions = engine.projectDecisions(slug);
           const prs = engine.knownPrs().filter((p) => p.project === slug);
           const deliverables = engine.deliverables().filter((deliverable) => deliverable.project === slug);
           const waits = engine.openWaits();
@@ -2420,7 +2370,7 @@ export default async function plugin(bb: BbPluginApi) {
         const issues = await mapPathwaysLimited(ids, 8, async (id) => (await request<{ issue: PathwaysIssue | null }>(detailQuery, id)).issue);
         if (issues.some((issue) => !issue)) return failure("Pathways Linear issue details were missing. Try Refresh.");
         const map = pathwaysMap(issues[0]!, issues.slice(1) as PathwaysIssue[]);
-        const decisions = engine.decisions(5000).filter((decision) => decision.project === slug);
+        const decisions = engine.projectDecisions(slug);
         linkPathwaysDecisions(map, issues.slice(1) as PathwaysIssue[], decisions.map((decision) => ({ id: decision.id, state: decision.state, title: decision.request.title, context: decision.request.context, project: decision.project, prUrls: (decision.request.blocks ?? []).flatMap((block) => block.kind === "pr" ? [block.url] : []) })));
         for (const ticket of map.tickets) if (ticket.readiness.state === "needs decision" || ticket.displayState === "blocked") ticket.decisionDraft = draftPathwaysDecision(ticket);
         const deliverables = engine.deliverables().filter((deliverable) => deliverable.project === slug);
@@ -2477,6 +2427,9 @@ export default async function plugin(bb: BbPluginApi) {
     feed({ cursor, filter }) {
       return engine.feed({ cursor, filter }, feedPrompts);
     },
+    feedLeftOut({ since }) {
+      return engine.feedLeftOut(since);
+    },
     feedThread({ about, before }) {
       return engine.feedThread(about, before);
     },
@@ -2489,24 +2442,27 @@ export default async function plugin(bb: BbPluginApi) {
     searchCards({ q }) {
       return engine.searchAnswered(q);
     },
+    workBoard({ since, project }) {
+      return engine.workBoard({ since: since ?? null, project: project ?? null });
+    },
+    async boardSince(input) {
+      return sinceRead(db, engine, await boardSince.cache(), cfg.githubLogin, input);
+    },
+    async viewPrefs() {
+      return viewPrefs();
+    },
     async projectHistory({ slug }) {
       const ids = engine.projectThreadIds(slug);
-      // bb's provider per thread, asked once per thread for the plugin's life (it never changes)
       await Promise.all(
         ids
           .filter((id) => !providerOf.has(id))
           .map(async (id) => {
             const t = (await bb.sdk.threads.get({ threadId: id }).catch(() => null)) as { providerId?: string } | null;
-            // a failed lookup is kept too (as unknown): it must not cost a bb call on every refetch
             providerOf.set(id, t?.providerId ?? null);
           }),
       );
       return engine.projectHistory(slug, providerOf);
     },
-    /**
-     * For the Deliverables tree: every project in the order the sidebar places new sections in, with its accent. The page
-     * reorders it by the viewer's own section order (core/project-order.ts), which only the viewer's bb client can read.
-     */
     projectOrder(): ProjectOrder {
       return engine.projects().map((p) => ({ slug: p.slug, monType: engine.accentType(p.slug) }));
     },
@@ -2516,69 +2472,29 @@ export default async function plugin(bb: BbPluginApi) {
     deliverableFolders(): DeliverableFolders {
       return engine.deliverableFolders();
     },
-    deliverables(): Deliverables {
-      const assigned = engine.personaAssignments();
-      const leadOf = (address: string) => {
-        const a = engine.agentByAddress(address);
-        return a ? engine.personaOf(a, assigned) : null;
-      };
-      // each its own 200, so a busy board never pushes past deliverables off the Deliverables tab
-      const all = [...engine.deliverables(200, false), ...engine.deliverables(200, true)].sort((a, b) => b.updatedAt - a.updatedAt || (a.id < b.id ? 1 : -1));
-      return all.map((d) => ({
-        id: d.id,
-        project: d.project,
-        lead: d.lead,
-        leadMon: engine.agentByAddress(d.lead)?.mon ?? null,
-        leadPersona: leadOf(d.lead), // 2026-11-18: the lead's person
-        title: d.title,
-        summary: d.summary,
-        state: d.state,
-        rev: d.rev,
-        createdAt: d.createdAt,
-        updatedAt: d.updatedAt,
-        revisions: d.revisions.map((r) => ({
-          rev: r.rev,
-          summary: r.summary,
-          at: r.at,
-          blocks: r.blocks ?? [],
-          points: r.points ?? [],
-          prs: (r.blocks ?? []).flatMap((b) => {
-            if (b.kind !== "pr") return [];
-            const pr = engine.prByUrl(b.url);
-            return pr ? [{ ...pr, url: b.url }] : [];
-          }),
-          proof: r.proof.map((x) => {
-            const pr = x.kind === "pr" && x.url ? engine.prByUrl(x.url) : null;
-            return { ...x, pr: pr ? { url: pr.url, number: pr.number, state: pr.state, attention: pr.attention, checks: pr.checks } : null };
-          }),
-        })),
-        feedback: d.feedback,
-        withdrawn: d.withdrawn,
-        next: engine.deliverableNext(d),
-        ...(d.scope ? { scope: true } : {}),
-        ...(d.scope_task ? { scopeTask: d.scope_task } : {}),
-        ...(d.folder ? { folder: d.folder } : {}),
-        ...(d.board ? { board: { id: d.board.id, record: d.board.record ?? null, flag: d.board.flag ?? null } } : {}),
-      }));
+    deliverables(): DeliverableRows {
+      return deliverableRows(engine);
     },
-  });
+    deliverable({ id }) {
+      return deliverableWhole(engine, id);
+    },
+    deliverableIndex() {
+      return deliverableIndex(engine);
+    },
+  }), onSlowRead));
 
-  // ---------------------------------------------------------------- the owner's writes (HTTP, browser Origin required)
-  // bb's "local" auth already refuses a foreign Origin but lets a request with none through; this also wants the page's
-  // own origin and a same-origin fetch. Headers can be forged by any local process: see docs/security-notes.md.
+  // bb's "local" auth lets a request with no Origin through; this also wants the page's own origin and a same-origin fetch.
   const appUrls = (): string[] => {
     const urls: (string | null)[] = [];
     try {
-      urls.push(bb.server.experimental_appUrl); // BB_APP_URL, e.g. a TLS proxy's public URL
+      urls.push(bb.server.experimental_appUrl);
       urls.push(bb.server.loopbackBaseUrl);
     } catch {
-      // not bound yet, or an older bb: the request's own host still counts
     }
     return urls.filter((u): u is string => !!u);
   };
   const notFromScreens = (c: { req: { url: string; header(name: string): string | undefined } }) =>
     writeOriginProblem({ origin: c.req.header("origin"), secFetchSite: c.req.header("sec-fetch-site"), requestUrl: c.req.url, appUrls: appUrls() });
-  // voice mode (voice/README.md): off by default, and while off nothing is registered; its socket has the writes' guard
   await registerVoice(bb, { engine, ownerName: () => cfg.ownerName, originProblem: (h) => writeOriginProblem({ ...h, appUrls: appUrls() }) });
   const write = <S extends z.ZodTypeAny>(path: string, schema: S, fn: (body: z.infer<S>) => unknown) =>
     bb.http.route("POST", path, async (c) => {
@@ -2600,7 +2516,7 @@ export default async function plugin(bb: BbPluginApi) {
       }
     });
 
-  // A code the owner pastes: written to a 0600 file, never into the decision (personSecret)
+  // A code the owner pastes: written to a 0600 file, never into the decision.
   const keepSecret = (id: string, rev: number, value: string, via: "desktop" | "phone" | "voice", typed: boolean) => {
     const dir = join(stateDir(), "secrets");
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -2614,7 +2530,6 @@ export default async function plugin(bb: BbPluginApi) {
       throw e;
     }
   };
-  // a code typed into "Other" goes the masked field's way (looksLikeCode)
   write(WRITES.pathwaysDecision, pathwaysDecisionSubmitBody, (b) => {
     const lead = engine.agentByAddress(`lead:${b.slug}`);
     if (!lead || lead.role !== "lead" || lead.project !== b.slug) throw new EngineError("not_found", "Live project lead not found");
@@ -2636,7 +2551,6 @@ export default async function plugin(bb: BbPluginApi) {
   write(WRITES.answer, answerBody, (b) =>
     b.option === null && looksLikeCode(b.text) ? keepSecret(b.id, b.rev, b.text!, b.via, true) : engine.personAnswer(b.id, b.rev, b.option, b.text, b.via).rev,
   );
-  // a login block's masked field
   write(WRITES.secret, secretBody, (b) => keepSecret(b.id, b.rev, b.value, b.via, false));
   write(WRITES.defer, deferBody, (b) => {
     const p = presets(b.zone, Date.now()).find((x) => x.id === b.preset);
@@ -2648,22 +2562,32 @@ export default async function plugin(bb: BbPluginApi) {
     engine.addRule({ text: b.text, project: b.project || null, kinds: b.kinds, expiresAt: b.expiresInDays ? Date.now() + b.expiresInDays * 86_400_000 : null, source: b.source }).id,
   );
   write(WRITES.ruleRevoke, ruleRevokeBody, (b) => engine.revokeRule(b.id));
-  write(OPEN_PRS_POST, openPrsPostBody, (b) => openPrs.post(b.key)); // Open PRs' Post: the prepared message, once
-  write(OPEN_PRS_COPIED, openPrsCopiedBody, (b) => openPrs.copied(b)); // Open PRs' Copy: that section's baseline (2026-11-18)
-  write(REVIEW_QUEUE_WRITE, queueActionSchema, (b) => reviewQueue.act(b)); // the review queue's actions: the owner's only
+  write(OPEN_PRS_POST, openPrsPostBody, (b) => openPrs.post(b.key));
+  write(OPEN_PRS_COPIED, openPrsCopiedBody, (b) => openPrs.copied(b));
+  write(REVIEW_QUEUE_WRITE, queueActionSchema, (b) => reviewQueue.act(b));
   write(MULTIPLAYER_WRITES.add, boardAddBody, (b) => guard(() => multiplayer.addBoard(b)));
   write(MULTIPLAYER_WRITES.remove, boardRemoveBody, (b) => guard(() => multiplayer.removeBoard(b.id)));
   write(WRITES.resend, resendBody, (b) => engine.resend(b.id).id);
   write(WRITES.priority, priorityBody, (b) => engine.setPriority(b.slug, b.priority));
   write(WRITES.hold, holdBody, (b) => engine.setHold(b.slug, b.held));
-  // the owner's direct line to a lead (PLAN 3): an item, never a push; the CoS gets a copy
-  write(WRITES.directMessage, directMessageBody, (b) => engine.ownerMessage(b.slug, b.text, b.followUp ?? null, b.images ?? [], b.about ?? null).id);
+  write(WRITES.boardMove, boardMoveBody, (b) => engine.boardMove(b.task, b.to));
+  // One save at a time, in order: each reads the kept choices and writes them back whole, so two at once would lose one.
+  let prefSaves: Promise<unknown> = Promise.resolve();
+  write(WRITES.viewPref, viewPrefBody, (b) => {
+    const save = prefSaves.then(async () => {
+      const was = await viewPrefs();
+      const rev = was.rev + 1;
+      const next: ViewPrefs = "projectsView" in b ? { ...was, projectsView: b.projectsView, rev } : { ...was, boardFolds: { ...was.boardFolds, [b.board]: b.folded }, rev };
+      await bb.storage.kv.set(VIEW_PREFS, next);
+      return { rev };
+    });
+    prefSaves = save.catch(() => undefined);
+    return save;
+  });
+  write(WRITES.directMessage, directMessageBody, (b) => engine.ownerMessage(b.slug, b.text, b.followUp ?? null, b.images ?? [], b.about ?? null, b.task ?? null).id);
   write(WRITES.feedSeen, feedSeenBody, (b) => engine.markFeedSeen(b.upTo));
   write(WRITES.feedResend, feedResendBody, (b) => engine.resendOwner(b.id).id);
-  // a screenshot for a message to a lead (2026-11-17), one per write: checked by its bytes, then kept where the lead can
-  // open it. bb's own attachments first (the lead's bb project, so the lead's thread takes it as an image input); else
-  // the plugin's own folder. Only the branch and the size are logged, never the bytes.
-  // shared with the CoS bar's images (cosImage): checked, then kept for the thread `threadId`, which will be sent them
+  // Only the branch and the size are logged, never the bytes.
   const keepImage = async (to: string, threadId: string, b: { name: string; data: string }) => {
     const bytes = Buffer.from(b.data, "base64");
     if (bytes.length > MAX_IMAGE_BYTES) throw new EngineError("invalid", `an image is at most ${MAX_IMAGE_BYTES / 1024 / 1024} MB`);
@@ -2698,7 +2622,6 @@ export default async function plugin(bb: BbPluginApi) {
     if (!lead) throw new EngineError("bad_state", `${b.slug} has no live lead: start it first`);
     return engine.addDirectImage(b.slug, await keepImage(b.slug, lead.threadId, b));
   });
-  // the images for the owner's next message to the CoS: kept with the tracked message, so a resend carries them too
   write(WRITES.cosImage, cosImageBody, async (b) => {
     const cos = engine.liveAt("cos");
     if (!cos) throw new EngineError("not_found", "No Chief of Staff is running: start it from the Projects tab");
@@ -2706,24 +2629,18 @@ export default async function plugin(bb: BbPluginApi) {
   });
   write(WRITES.directSeen, directSeenBody, (b) => engine.markDirectSeen(b.slug, b.upTo));
   write(WRITES.outputRemove, outputRemoveBody, (b) => engine.removeOutput(b.id));
-  // pinned documents: the owner pins a pasted path or URL, or a deliverable (core/pins.ts); paths get the proof check
   write(WRITES.pin, pinBody, async (b) => engine.pin(b.slug, b.target, { title: b.title ?? null, by: "owner" }, await pinPlace(b.slug)).pin.id);
   write(WRITES.unpin, unpinBody, (b) => engine.unpinDoc(b.id, { by: "owner" }).id);
   write(WRITES.approve, approveBody, (b) => engine.personApprove(b.id, b.rev, b.note, b.next ?? null).rev);
   write(WRITES.requestChanges, requestChangesBody, (b) => engine.personRequestChanges(b.id, b.rev, b.text).rev);
-  // the owner's scoping switches (1.13.0), straight from the Projects view with no card: a project's mode through
-  // orch_project_mode's own setMode (by the owner), and one thread made a task's scoping thread, or stopped
   write(WRITES.projectMode, projectModeBody, (b) => engine.setMode(b.slug, b.mode, "person").mode);
-  // the owner's PR-wait changes from the Watchers list (intervals aren't written from the page: see core/watchers.ts)
   write(WRITES.watchAdd, watchAddBody, (b) => engine.watchAdd(null, b));
   write(WRITES.watchRetarget, watchRetargetBody, (b) => engine.watchRetarget(null, b.id, { pr: b.pr ?? null, when: b.when ?? null }));
   write(WRITES.watchMove, watchMoveBody, (b) => engine.watchMove(null, b.id, b.to));
   write(WRITES.watchDrop, watchDropBody, (b) => engine.watchDrop(null, b.id));
   write(WRITES.scopeThread, scopeThreadBody, (b) => engine.ownerScopeThread(b.threadId, { task: b.task ?? null, name: b.name ?? null }).task.id);
   write(WRITES.unscopeThread, unscopeThreadBody, (b) => engine.ownerUnscopeThread(b.threadId)?.id ?? null);
-  // A registered proof file's bytes, by proof id only (engine.proofFile decides), or (2026-11-17) a recorded output's,
-  // by ?output=<output id> (engine.outputFile, the same rules). Read-only, so bb's "local" auth is the guard: a
-  // same-origin <img>/<video> sends no Origin header. Never HTML or SVG; nothing sniffed, nothing run.
+  // Read-only, so bb's "local" auth guards it (a same-origin <img>/<video> sends no Origin); never HTML or SVG, nothing sniffed or run.
   bb.http.route("GET", PROOF_ROUTE, async (c) => {
     let f: ReturnType<typeof engine.proofFile>;
     try {
@@ -2740,7 +2657,6 @@ export default async function plugin(bb: BbPluginApi) {
     };
     try {
       if (f.maxBytes !== null) {
-        // text: at most the cap, read as such (never the whole file then a slice)
         const fd = openSync(f.path, "r");
         try {
           const buf = Buffer.alloc(Math.min(statSync(f.path).size, f.maxBytes));
@@ -2750,7 +2666,6 @@ export default async function plugin(bb: BbPluginApi) {
           closeSync(fd);
         }
       }
-      // image/video: streamed; one byte range (a video's seek) answered with 206
       const size = statSync(f.path).size;
       headers["accept-ranges"] = "bytes";
       const m = /^bytes=(\d*)-(\d*)$/.exec((c.req.header("range") ?? "").trim());
@@ -2776,7 +2691,6 @@ export default async function plugin(bb: BbPluginApi) {
     }
   });
   bb.http.route("POST", WRITES.archive, async (c) => {
-    // The owner's Archive click on a resolved thread. Async (bb's archive), so not through write().
     const why = notFromScreens(c);
     if (why) return c.json({ ok: false, error: { kind: "forbidden", message: `writes come only from the app's screens (${why})` } }, 403);
     try {
@@ -2791,21 +2705,15 @@ export default async function plugin(bb: BbPluginApi) {
     }
   });
 
-  // ---------------------------------------------------------------- the owner's Start buttons: a lead, the CoS, the Steward
-  // A lead runs in its project's notes folder (PROJECT.md, library/, memory/) as an unmanaged workspace, inside the bb
-  // project of the repo PROJECT.md names, so orch_spawn_thread gives its threads that repo's worktrees. The CoS and the
-  // Steward run in <stateDir>/<role>/ in the home project. Every check runs before the spawn; starts go one at a time.
   const BRIEF_DIR = join(import.meta.dirname, "briefs");
   type BbProject = { id: string; name: string; sources?: { hostId: string; path: string; isDefault?: boolean }[] };
 
-  /** The one connected host, for a new bb project. */
   async function onlyHost(): Promise<string> {
     const hosts = (await bb.sdk.hosts.list()).filter((h) => h.status === "connected" && h.lifecycle.phase === "active");
     if (hosts.length !== 1) throw new EngineError("bad_state", `can't tell which machine to create the bb project on: ${hosts.length} connected hosts`);
     return hosts[0]!.id;
   }
 
-  /** The bb project whose source folder is `path`, with that source's host; created when there is none. */
   async function bbProjectFor(path: string): Promise<{ projectId: string; hostId: string }> {
     for (const p of (await bb.sdk.projects.list()) as unknown as BbProject[]) {
       const src = p.sources?.find((s) => samePath(s.path, path));
@@ -2821,7 +2729,6 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  /** The CoS's and the Steward's bb project: the homeProjectId setting, else the bb project of the mirror folder. */
   async function homeProject(): Promise<{ projectId: string; hostId: string }> {
     const id = cfg.homeProjectId.trim();
     if (!id) return bbProjectFor(stateDir());
@@ -2831,10 +2738,6 @@ export default async function plugin(bb: BbPluginApi) {
     return { projectId: p.id, hostId: src.hostId };
   }
 
-  /**
-   * Spawn and register one agent the owner (or, for a lead, the CoS) started. A failure after the spawn names the
-   * thread, which then exists.
-   */
   async function spawnStarted(p: { role: Role; project: string | null; projectId: string; hostId: string; folder: string; prompt: string; title: string; provider: string; model: string; reasoning: string; by: StartedBy }): Promise<Agent> {
     const selection = await spawnSelection(bb.sdk.providers, { hostId: p.hostId, projectId: p.projectId }, p, { defaults: p.role === "thread" ? undefined : START_DEFAULTS[p.role], warn: (m) => bb.log.warn(m) });
     const t = await bb.sdk.threads.spawn({
@@ -2866,7 +2769,6 @@ export default async function plugin(bb: BbPluginApi) {
   };
   const startRoute = <S extends z.ZodTypeAny>(path: string, schema: S, fn: (body: z.infer<S>) => Promise<unknown>) =>
     bb.http.route("POST", path, async (c) => {
-      // async (bb's spawn), so not through write(); the same Origin guard
       const why = notFromScreens(c);
       if (why) return c.json({ ok: false, error: { kind: "forbidden", message: `writes come only from the app's screens (${why})` } }, 403);
       let body: z.infer<S>;
@@ -2885,14 +2787,11 @@ export default async function plugin(bb: BbPluginApi) {
       }
     });
 
-  // The owner's message to the CoS (D3): a tracked item the flush delivers, answered with orch_reply_owner.
   write(WRITES.cosMessage, cosMessageBody, ({ text, images = [], about }) => {
     const it = engine.ownerCosMessage(text, images, about ?? null);
     return { id: it.id, threadId: engine.liveAt("cos")?.threadId ?? null };
   });
 
-  // The owner answers an agent's own question (AskUserQuestion) from its card: checked against what was asked, then sent
-  // back through bb exactly as the thread's prompt would send it.
   startRoute(WRITES.interactionAnswer, interactionAnswerBody, async ({ threadId, interactionId, answers }) => {
     if (!engine.agents().some((a) => a.threadId === threadId)) throw new EngineError("not_found", "That thread isn't one of the orchestrator's agents");
     let ix: RawInteraction;
@@ -2905,12 +2804,10 @@ export default async function plugin(bb: BbPluginApi) {
     if ((ix.kind ?? ix.payload?.kind) !== "user_question") throw new EngineError("bad_state", "Only questions can be answered here: open the thread");
     const checked = checkAnswers(toQuestions(ix.payload), answers);
     await bb.sdk.threads.interactions.resolve({ threadId, interactionId, resolution: { kind: "user_answer", answers: checked } });
+    reads.forget(threadId); // answered: the page's refetch must not find it still pending
     return { threadId };
   });
 
-  // Requested 2026-11-13: "release projects to the wild from their leads": archive a finished project. The engine retires
-  // its agents, closes their waiting mail and withdraws their open cards in one step; then bb archives the threads
-  // (threads first, the lead last). A thread bb can't archive is reported, never retried behind his back.
   startRoute(WRITES.archiveProject, archiveProjectBody, async ({ slug }) => {
     const all = engine.agents();
     const { threadIds } = engine.archiveProject(slug);
@@ -2926,8 +2823,6 @@ export default async function plugin(bb: BbPluginApi) {
     return { slug, threads: threadIds.length, failed };
   });
 
-  // One Start lead path (core/start.ts startLead) for the owner's button and the CoS's orch_start_lead; only who
-  // started it differs, recorded on the spawn event and the board notice.
   const leadStart = (by: StartedBy): LeadStartPorts => ({
     engine,
     projectsDir: projectsDir(),
@@ -2994,7 +2889,7 @@ export default async function plugin(bb: BbPluginApi) {
         if (a.role !== "cos") throw new EngineError("forbidden", "CoS only");
         if (!p.brief || typeof p.brief !== "object") throw new EngineError("invalid", "give brief: {slug, title, repo, goal, repo_url?, base?, constraints?, priority?, mode?}");
         const r = await oneAtATime(async () =>
-          newProject({ engine, root: projectsDir(), record: projectRecord(), memoryFolder: (slug) => memoryProjectsNow.get(slug), now: Date.now(), by: "cos" }, p.brief!),
+          newProject({ engine, root: projectsDir(), record: projectRecord(), memoryFolder: (slug) => memoryProjectsNow.get(slug), now: Date.now(), by: "cos", log: (m) => bb.log.warn(m) }, p.brief!),
         );
         void flush();
         return ok(`Created ${r.slug} (priority ${r.priority}${r.mode === "scoping" ? ", scoping mode" : ""}) in ${r.folder}: ${r.files.map((f) => basename(f)).join(", ")}. No lead yet: start it with orch_start_lead(slug="${r.slug}").`);
@@ -3049,7 +2944,6 @@ export default async function plugin(bb: BbPluginApi) {
     return { threadId: a.threadId, address: a.address, mon: a.mon };
   });
 
-  // ---------------------------------------------------------------- CLI
   const usage = [
     "bb orchestrator status",
     "bb orchestrator integration import <json-file> | integration receipts <source> [after-sequence] [limit] | integration heartbeat <source> [--every <minutes>]",
@@ -3081,15 +2975,13 @@ export default async function plugin(bb: BbPluginApi) {
       const out = (s: string, code = 0) => ({ exitCode: code, stdout: s.endsWith("\n") ? s : `${s}\n` });
       try {
         const [cmd, ...rest] = argv;
-        // ctx.threadId is the caller's BB_THREAD_ID, unverified: an agent can drop it (docs/security-notes.md). So the
-        // `self` checks stop an agent's honest mistakes, and every privileged command leaves a line on the owner's Board.
+        // ctx.threadId is the caller's BB_THREAD_ID, unverified: the `self` checks stop honest mistakes, and privileged commands leave a Board line.
         const self = ctx.threadId ? engine.agentByThread(ctx.threadId) : null;
         if (privileged(cmd, rest))
           engine.boardAdd("notice", "orchestrator", null, `CLI: bb orchestrator ${argv.join(" ")}`.slice(0, 200), `Run from ${self ? self.address : ctx.threadId ? `thread ${ctx.threadId}` : "no bb thread (a terminal, or a caller that dropped BB_THREAD_ID)"}${ctx.cwd ? ` in ${ctx.cwd}` : ""}.`, null);
         switch (cmd) {
           case "pin":
           case "unpin": {
-            // the owner from a terminal, or the project's own lead; a file gets the same proof check as from the page
             const [slug, target] = rest;
             if (!slug || !target || target.startsWith("--")) throw new EngineError("invalid", cmd === "pin" ? "pin <project> <path|url|deliverable> [--title T]" : "unpin <project> <path|url|deliverable|pin id>");
             const by = self ?? "owner";
@@ -3135,7 +3027,7 @@ export default async function plugin(bb: BbPluginApi) {
               engine,
               get: async (id) => await bb.sdk.threads.get({ threadId: id }) as unknown as AdoptThread,
               queued: async (id) => (await bb.sdk.threads.queuedMessages.list({ threadId: id })).length > 0,
-              parent: async (id, parentThreadId) => { await bb.sdk.threads.update({ threadId: id, parentThreadId, parentNotifications: "auto" }); },
+              parent: async (id, parentThreadId, notify) => { await bb.sdk.threads.update({ threadId: id, parentThreadId, parentNotifications: notify }); },
               mirror: async (id, address, role) => { await bb.sdk.threads.updatePluginMetadata({ threadId: id, set: { address, role } }); },
             }, { threadId, role: role as Role, project: flag("project"), parentThreadId: flag("parent"), approval: flag("approval") ?? "" }));
             return out(`${a.threadId} is ${a.address}; parent=${a.parentThreadId ?? "none"}`);
@@ -3158,7 +3050,6 @@ export default async function plugin(bb: BbPluginApi) {
             return out(`${threadId} is ${a.address}`);
           }
           case "spawn": {
-            // bb orchestrator spawn <role> [<project>] --project-id <proj_…> --title T --prompt-file F [--parent <threadId>] [--provider P] [--model M] [--reasoning L]
             if (self) throw new EngineError("forbidden", "agents don't spawn role threads");
             const flag = (n: string) => {
               const i = rest.indexOf(`--${n}`);
@@ -3193,7 +3084,6 @@ export default async function plugin(bb: BbPluginApi) {
             if (rest[0] !== "sidebar") throw new EngineError("invalid", "setup sidebar");
             if (self) throw new EngineError("forbidden", "agents don't change the sidebar layout");
             const pins = engine.agents().filter((a) => a.role === "cos" || a.role === "steward").map((a) => ({ label: a.role === "cos" ? "Chief of Staff" : "Steward", threadId: a.threadId }));
-            // the bb this plugin runs in, never the CLI's default address
             const run = cliRun(process.env.BB_CLI || "bb", bb.server.loopbackBaseUrl);
             return out((await setupSidebar(run, pins)).join("\n"));
           }
@@ -3254,10 +3144,7 @@ export default async function plugin(bb: BbPluginApi) {
             }
             return out(JSON.stringify(engine.project(slug)));
           }
-          // dreams
           case "sweep": {
-            // One-time cleanup (2026-11-14): retired threads bb still lists. The listing marks each clean or dirty;
-            // --apply hides the handoff predecessors and archives only the clean ones. The owner approves the list first.
             if (self) throw new EngineError("forbidden", "agents don't sweep threads");
             const apply = rest.includes("--apply");
             const lines: string[] = [];
@@ -3313,34 +3200,22 @@ export default async function plugin(bb: BbPluginApi) {
   });
 }
 
-/**
- * Why `bb orchestrator prune` is refused to this caller, or null. The owner (no agent) runs either. The Steward may run
- * the dry run, which only counts (2026-11-19, for its prune pass). A real prune never comes from an agent: it deletes
- * the owner's record, and it already runs once a day under the owner's retention settings.
- */
+/** A real prune never comes from an agent: it deletes the owner's record. */
 export function pruneRefusal(self: Agent | null, dryRun: boolean): string | null {
   if (!self || (dryRun && self.role === "steward")) return null;
   const rule = "only the Steward may run `bb orchestrator prune --dry-run` (it counts, and deletes nothing); the real prune runs once a day under the owner's retention settings, or from the owner's terminal";
   return self.role === "steward" ? `the Steward may run only \`bb orchestrator prune --dry-run\`: ${rule}` : rule;
 }
 
-/** An agent reads a decision it asked or started; a lead also its project's; the CoS every one (it triages them). */
 export function mayRead(a: Agent, d: Decision): boolean {
   if (a.role === "cos") return true;
   if (a.address === d.orchestrator.asker || a.address === d.orchestrator.origin) return true;
   return a.role === "lead" && d.project === a.project;
 }
 
-/** After the orchestrator asked for a CoS compaction, the clock waits at least this long before asking again. */
 const COMPACT_COOLDOWN_MS = 10 * 60_000;
 
-/**
- * 1.5.1 replaced cosClearTokens (a clear threshold) with cosCompactTokens. bb has no rename and reads a stored value
- * only through a descriptor, so the old key keeps one and is unset once at load. Whatever it held (150000, 0 or
- * nothing) is NOT carried over: plugin compaction is off by default (cosCompactTokens = 0) and only an explicit
- * opt-in turns it on, so an upgrade never switches it on, and an owner's stored cosCompactTokens is never touched.
- * Claude Code's own auto-compaction handles the context either way. A failure is logged and never stops the load.
- */
+/** bb reads a stored value only through a descriptor, so the old key keeps one and is unset once at load; its value is never carried over. */
 export async function retireClearSetting(
   old: { get(): Promise<{ cosClearTokens?: number }>; experimental_set?: (v: { cosClearTokens: null }) => Promise<unknown> },
   log: (m: string) => void,
@@ -3354,7 +3229,6 @@ export async function retireClearSetting(
   }
 }
 
-/** The CLI commands that change roles, threads, projects or state: each leaves an audit line on the Board. */
 export function privileged(cmd: string | undefined, rest: string[]): boolean {
   switch (cmd) {
     case "adopt":
@@ -3382,11 +3256,7 @@ export function privileged(cmd: string | undefined, rest: string[]): boolean {
   }
 }
 
-/**
- * Why a write isn't from the app's own page, or null. The Origin must be the request's own host (loopback, or the
- * tunnel, which rewrites both to loopback) or bb's configured app URL (BB_APP_URL, e.g. a TLS proxy in front of an http
- * backend, so the scheme isn't compared) or its loopback URL; a browser's Sec-Fetch-Site, when sent, must say same-origin.
- */
+/** Why a write isn't from the app's own page, or null; a tunnel rewrites both Origin and host to loopback. */
 export function writeOriginProblem(h: { origin: string | undefined; secFetchSite: string | undefined; requestUrl: string; appUrls: string[] }): string | null {
   if (!h.origin) return "no Origin";
   let host: string;
@@ -3407,7 +3277,6 @@ export function writeOriginProblem(h: { origin: string | undefined; secFetchSite
   return null;
 }
 
-/** The handoff file's realpath, inside the worktree `root` (a realpath) after symlinks, or `invalid`. */
 export function handoffFile(root: string, given: string): string {
   const inside = (f: string) => isAbsolute(f) && (f === root || f.startsWith(root + sep));
   const named = resolvePath(root, given);
@@ -3417,7 +3286,6 @@ export function handoffFile(root: string, given: string): string {
   return file;
 }
 
-/** `p`, or null once `signal` aborts: a stopping service stops waiting on a slow call and drops its result. */
 export function unlessAborted<T>(p: Promise<T>, signal?: AbortSignal): Promise<T | null> {
   if (!signal) return p;
   if (signal.aborted) {
@@ -3440,7 +3308,6 @@ export function unlessAborted<T>(p: Promise<T>, signal?: AbortSignal): Promise<T
   });
 }
 
-/** A sleep that ends early when the service is stopped (reload, disable, shutdown). */
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     if (signal.aborted) return resolve();
@@ -3454,7 +3321,6 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-// ---- defer presets, in the viewer's zone (1 hour, this evening 18:00 before 17:00, tomorrow 09:00, until brought back)
 function zonedWallTime(zone: string, now: number, dayOffset: number, hour: number): number {
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat("en-US", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", hour12: false })
@@ -3462,7 +3328,6 @@ function zonedWallTime(zone: string, now: number, dayOffset: number, hour: numbe
       .map((p) => [p.type, p.value]),
   ) as Record<string, string>;
   const guess = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day) + dayOffset, hour);
-  // shift by the zone's offset at that moment
   const asZone = (ms: number) => {
     const q = Object.fromEntries(
       new Intl.DateTimeFormat("en-US", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false })
@@ -3494,7 +3359,6 @@ export function presets(zone: string, now: number): Preset[] {
   return out;
 }
 
-/** Pasted sign-in codes older than `before` (ms) are deleted, whether or not the asker acked. */
 function sweepSecrets(dir: string, before: number): void {
   let names: string[];
   try {
@@ -3507,7 +3371,6 @@ function sweepSecrets(dir: string, before: number): void {
     try {
       if (statSync(f).mtimeMs < before) rmSync(f, { force: true });
     } catch {
-      // gone already
     }
   }
 }

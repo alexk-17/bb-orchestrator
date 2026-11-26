@@ -14,8 +14,9 @@
 // (image-attach.tsx) and the stick-bottom wiring are as they were, and nothing about what a send is changed.
 import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import type { z } from "zod";
-import { Markdown, ThreadChat, experimental_useRpcQuery, useRealtime } from "@get-bb/plugin-sdk/app";
-import { CHANGED_CHANNEL, WRITES, rpcContract, type Projects, type directSeenBody, type resendBody } from "../contract.ts";
+import { Markdown, ThreadChat, experimental_useRpcQuery } from "@get-bb/plugin-sdk/app";
+import { WRITES, rpcContract, type Projects, type directSeenBody, type resendBody } from "../contract.ts";
+import { touches } from "../change-notice.ts";
 import { chatOrder, chatPreview, directState, followUpOf, seenUpTo } from "./command-center.ts";
 import { directWrite, imageWrite, leadChatView, messageStates } from "./lead-chat.ts";
 import { admit, canSend, imageFiles } from "./lead-images.ts";
@@ -32,6 +33,7 @@ import { Checkbox } from "./ui/checkbox.tsx";
 import { Label } from "./ui/label.tsx";
 import { cn } from "./ui/utils.ts";
 import { ChevronRight, Image as ImageIcon } from "lucide-react";
+import { useChangeNotice } from "./change-listener.ts";
 
 type Project = Projects[number];
 const MAX = 4000;
@@ -221,7 +223,7 @@ function ChatPage({ project, before, now, cos, busy, refetchAll, oldest, onOlder
   again.current = q.refetch;
   const latest = before === null;
   // the newest page follows the line live (a send, the lead's ack); older pages don't change
-  useRealtime(CHANGED_CHANNEL, () => latest && void again.current());
+  useChangeNotice((n) => latest && touches(n, "directHistory") && void again.current());
   const ms = chatOrder(q.data?.messages ?? []);
   // an older page on its way holds the button's place (2026-11-17): the button leaving first, at the top of the log, would
   // shift the message being read up by its height, where no scroll can make up for it
@@ -361,17 +363,19 @@ function resend(slug: string, id: string, refetchAll: () => void) {
  * draws ("back to the same one that's there for the talk directly to lead"). The line says only what changes (the last message's state, a dead one's
  * Resend, who passes it on) and "Not an approval", whose detail holds the full rules, the 48 h one included.
  */
-export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact = false, via }: { project: Project; now: number; cos: string; busy: boolean; refetchAll: () => void; onFocus: () => void; compact?: boolean; via?: string }) {
+export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact = false, via, task = null }: { project: Project; now: number; cos: string; busy: boolean; refetchAll: () => void; onFocus: () => void; compact?: boolean; via?: string; task?: { id: string; title: string } | null }) {
   const slug = project.slug;
+  // a message about one work-board task (2026-11-23): its own draft, never a follow-up of the project's last message
+  const key = task ? `${slug}#${task.id}` : slug;
   useSyncExternalStore(subscribe, () => version);
-  const draft = drafts.get(slug) ?? null;
-  const latest = followUpOf(project.direct, now);
-  const sent = sentLast.get(slug);
+  const draft = drafts.get(key) ?? null;
+  const latest = task ? null : followUpOf(project.direct, now);
+  const sent = sentLast.get(key);
   // the message just sent, until the page's read lists it (typing before that must not fix an older target)
   const listed = !!sent && !!project.direct?.messages.some((m) => m.id === sent.id);
   useEffect(() => {
-    if (listed && sentLast.get(slug) === sent) sentLast.delete(slug);
-  }, [listed, sent, slug]);
+    if (listed && sentLast.get(key) === sent) sentLast.delete(key);
+  }, [listed, sent, key]);
   const live = sent && !listed ? sent : latest ? { id: latest.id, text: latest.text } : null;
   const followUp = draft ? draft.followUp : live;
   const follow = draft ? draft.follow : true;
@@ -379,27 +383,27 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
   const images = draft?.images ?? [];
   const update = (t: string, f = follow) => {
     const sending = draft?.sending && t.startsWith(draft.sending) ? draft.sending : null;
-    setDraft(slug, t || !f || images.length ? { text: t, followUp, follow: f, sending, images } : null);
+    setDraft(key, t || !f || images.length ? { text: t, followUp, follow: f, sending, images } : null);
   };
   // screenshots (2026-11-17): a paste, a drop or the picker adds them (lead-images.ts admit says which), the remove
   // button takes one off; either is the draft's, like its words
   const attach = (files: File[]) => {
-    const cur = drafts.get(slug) ?? null;
+    const cur = drafts.get(key) ?? null;
     const have = cur?.images ?? [];
     const { take, refused: why } = admit(have.length, files);
-    setRefused(slug, why);
+    setRefused(key, why);
     if (!take.length) return;
     const added = take.map((i) => attached(files[i]!));
-    setDraft(slug, { text: cur?.text ?? "", followUp: cur ? cur.followUp : followUp, follow: cur ? cur.follow : follow, sending: cur?.sending ?? null, images: [...have, ...added] });
+    setDraft(key, { text: cur?.text ?? "", followUp: cur ? cur.followUp : followUp, follow: cur ? cur.follow : follow, sending: cur?.sending ?? null, images: [...have, ...added] });
   };
-  const detach = (key: string) => {
-    const cur = drafts.get(slug);
+  const detach = (imageKey: string) => {
+    const cur = drafts.get(key);
     if (!cur) return;
-    const gone = cur.images.find((i) => i.key === key);
+    const gone = cur.images.find((i) => i.key === imageKey);
     if (gone) URL.revokeObjectURL(gone.url);
-    const left = cur.images.filter((i) => i.key !== key);
-    setRefused(slug, null);
-    setDraft(slug, cur.text || !cur.follow || left.length ? { ...cur, images: left } : null);
+    const left = cur.images.filter((i) => i.key !== imageKey);
+    setRefused(key, null);
+    setDraft(key, cur.text || !cur.follow || left.length ? { ...cur, images: left } : null);
     box.current?.focus();
   };
   const drop = useDrop(attach);
@@ -407,11 +411,11 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
   const send = async () => {
     const t = text.trim();
     const going = images;
-    if (!canSend(t, going.length) || staging.has(slug)) return;
-    if (draft) setDraft(slug, { ...draft, sending: text });
+    if (!canSend(t, going.length) || staging.has(key)) return;
+    if (draft) setDraft(key, { ...draft, sending: text });
     // each image first, on its own write; the message names them by the ids the server gave back
     if (going.some((i) => !i.id)) {
-      setStaging(slug, true);
+      setStaging(key, true);
       try {
         for (const img of going) {
           if (img.id) continue;
@@ -420,26 +424,26 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
             .then((w) => stage(w.path, w.body))
             .catch((e: unknown) => ({ ok: false as const, message: String(e) }));
           if (!up.ok || typeof up.result !== "string") {
-            setRefused(slug, `${img.file.name || "An image"} didn't upload: ${up.ok ? "no id came back" : up.message}`);
-            const cur = drafts.get(slug);
-            if (cur?.sending !== null && cur) setDraft(slug, { ...cur, sending: null });
+            setRefused(key, `${img.file.name || "An image"} didn't upload: ${up.ok ? "no id came back" : up.message}`);
+            const cur = drafts.get(key);
+            if (cur?.sending !== null && cur) setDraft(key, { ...cur, sending: null });
             return;
           }
           img.id = up.result;
         }
       } finally {
-        setStaging(slug, false);
+        setStaging(key, false);
       }
     }
-    const w = directWrite(slug, t, follow && followUp ? followUp.id : null, going.map((i) => i.id!));
+    const w = directWrite(slug, t, follow && followUp ? followUp.id : null, going.map((i) => i.id!), task?.id);
     const out = await write(w.path, w.body, { kind: "other", where: `lead:${slug}`, after: refetchAll });
-    const cur = drafts.get(slug);
+    const cur = drafts.get(key);
     if (!out?.ok) {
-      if (cur?.sending !== null && cur) setDraft(slug, { ...cur, sending: null });
+      if (cur?.sending !== null && cur) setDraft(key, { ...cur, sending: null });
       return;
     }
     const justSent = typeof out.result === "string" ? { id: out.result, text: t || `${going.length} image${going.length === 1 ? "" : "s"}` } : null;
-    if (justSent) sentLast.set(slug, justSent);
+    if (justSent) sentLast.set(key, justSent);
     // only the words sent go: what was added after them while the send was on its way stays, and a draft cleared or
     // rewritten meanwhile stays whole; either is a new message, following up the one just sent. Likewise only the
     // images sent go: one attached meanwhile stays.
@@ -447,8 +451,8 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
     going.forEach((i) => URL.revokeObjectURL(i.url));
     const left = (cur?.images ?? []).filter((i) => !sentKeys.has(i.key));
     const rest = !cur ? "" : cur.sending === text ? cur.text.slice(text.length).replace(/^\s+/, "") : cur.text;
-    setRefused(slug, null);
-    setDraft(slug, (rest || left.length) && cur ? { text: rest, followUp: justSent ?? cur.followUp, follow: cur.follow, sending: null, images: left } : null);
+    setRefused(key, null);
+    setDraft(key, (rest || left.length) && cur ? { text: rest, followUp: justSent ?? cur.followUp, follow: cur.follow, sending: null, images: left } : null);
     box.current?.focus(); // the Send button it was on is disabled now: back to the box, for the next message
   };
   const left = MAX - text.length;
@@ -461,8 +465,8 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
   // follow-up switch once there is a draft to follow up with
   const quiet = !compact || !!text || !!images.length || !!states?.dead.length;
   const following = !!followUp && (!compact || !!text || !!images.length);
-  const why = refused.get(slug) ?? null;
-  const uploading = staging.has(slug);
+  const why = refused.get(key) ?? null;
+  const uploading = staging.has(key);
   return (
     // a file dropped anywhere on the box attaches (2026-11-17); what isn't an image is refused under the field
     <CompactBar
@@ -471,6 +475,7 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
       data-composer={project.slug}
       className={cn("k-composer px-4 py-3", compact && "compact")}
       {...drop}
+      data-composer-task={task?.id}
       field={
         <ReplyField
           ref={box}
@@ -479,7 +484,7 @@ export function Composer({ project, now, cos, busy, refetchAll, onFocus, compact
           // one line when empty; it grows with the text (field-sizing) up to about eight lines, then scrolls
           aria-keyshortcuts="Meta+Enter Control+Enter"
           // compact (a project's head, under its name): short words that fit a phone's one line
-          placeholder={compact ? "Message the lead…" : `Message Lead · ${project.slug}…`}
+          placeholder={task ? "About this task…" : compact ? "Message the lead…" : `Message Lead · ${project.slug}…`}
           aria-label={`Message to lead:${project.slug}`}
           onFocus={onFocus}
           onChange={(e) => update(e.target.value)}

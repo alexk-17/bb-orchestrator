@@ -5,6 +5,7 @@
 // - what it waits on: the owner, CI (its PR's checks are running), a reviewer, or nothing.
 // Lanes waiting on the owner come first in a project, and projects with any come first on the page.
 import type { Agents, NeedsYou } from "../contract.ts";
+import { BUSY_STATUSES, prWait } from "../core/attach-state.ts";
 
 type Agent = Agents[number];
 export type LaneState = "waiting" | "blocked" | "released" | "working" | "idle";
@@ -46,24 +47,13 @@ function ownerWaits(needs: NeedsYou | undefined): Map<string, { cardId: string |
   return out;
 }
 
-const BUSY = new Set(["active", "pending", "starting", "stopping"]);
-
 export function laneFor(a: Agent, owner: { cardId: string | null; threadId: string | null; since: number | null } | undefined): Lane {
   const released = a.engineStatus === "stopped" || a.engineStatus === "archived";
-  const state: LaneState = owner && !released ? "waiting" : released ? "released" : a.status === "error" || a.engineStatus === "error" ? "blocked" : BUSY.has(a.status) ? "working" : "idle";
+  const state: LaneState = owner && !released ? "waiting" : released ? "released" : a.status === "error" || a.engineStatus === "error" ? "blocked" : BUSY_STATUSES.has(a.status) ? "working" : "idle";
   const since = state === "waiting" ? (owner?.since ?? null) : state === "idle" ? a.idleAt : null;
-  const pr = a.pr;
-  const live = pr && (pr.state === "open" || pr.state === "draft");
+  const pw = a.pr ? prWait(a.pr) : null;
   const wait: WaitOn =
-    state === "waiting"
-      ? { on: "owner", cardId: owner!.cardId, threadId: owner!.threadId }
-      : state === "released" || !live
-        ? null
-        : pr.checks === "pending"
-          ? { on: "ci" }
-          : pr.state === "open" && (pr.review === "review_required" || pr.review === "review_requested" || pr.attention === "review_requested")
-            ? { on: "review" }
-            : null;
+    state === "waiting" ? { on: "owner", cardId: owner!.cardId, threadId: owner!.threadId } : state === "released" ? null : pw === "ci" ? { on: "ci" } : pw === "review" ? { on: "review" } : null;
   return { agent: a, state, since, activity: a.title ?? a.lastReport, model: modelLabel(a.model, a.provider), wait };
 }
 

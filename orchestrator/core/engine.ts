@@ -3,14 +3,14 @@
 // Every write is a transaction on the store; delivery to a bb thread is a separate step (`flush`) that the server
 // runs through bb's SDK. An item is written before it is sent, so a crash between the two re-sends it, marked
 // "(again)" — never loses it. Nothing here calls a model: escalation, resends and dead letters are the `tick`.
-import { cosLine, feedPage, feedThread, type CosLineEntry, type FeedFilter, type FeedMsg, type FeedPage, type FeedPrompt, type FeedSource } from "./feed.ts";
+import { cosLine, feedPage, feedThread, leftOutCount, ownerMailPrint, type CosLineEntry, type FeedFilter, type FeedMsg, type FeedPage, type FeedPrompt, type FeedSource, type FeedThread } from "./feed.ts";
 import { BatchInbox, type MailPolicy } from "./batch-inbox.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { extname, isAbsolute, sep } from "node:path";
-import { type Db, migrate, tx } from "./db.ts";
+import { type Db, migrate, prepareHinted, tx } from "./db.ts";
 import { MON_POOLS, baseOf, builtInMon, familyThreads, formAt, levelFor, monByName, pickMon, pickPackThread, pickType, setPackLines, shownStage, specialtyLines, typeFamily, type Mon, type MonType, type PackLine } from "../mons.ts";
-import { agentPersona, assignPersonas, type AgentPersona, type PersonaPack } from "../personas.ts";
+import { agentPersona, assignPersonas, type AgentPersona, type Persona, type PersonaPack } from "../personas.ts";
 import { blocksSchema, pointsSchema, type Block, type Point } from "../blocks.ts";
 import { ownerWords, type OwnerWords } from "./owner.ts";
 import type { Verdict } from "./clean.ts";
@@ -18,10 +18,15 @@ import { externalBody, externalMailSchema, externalPreview, type ExternalMail } 
 import type { StartedBy } from "./start.ts";
 import { MOOT_MIN_SHARED, MOOT_WINDOW_MS, sharedWords } from "./moot.ts";
 import { cardRefusal } from "./caps.ts";
+import { type DerivedTable, FOLDER_FILES, LIVE, NEXT_MOVES, OWNER_MAIL } from "../change-notice.ts";
 import { type DirectImage, type ImageType, MAX_IMAGE_BYTES, MAX_IMAGES, withImages, wordsOf } from "./direct-images.ts";
 import { type BbPrReading, PR_URL_RE } from "./open-prs.ts";
 import type { WaitView } from "./watchers.ts";
 import { type LeadStatus, normalizeStatus, sameWait, type StatusParams, STATUS_STALE_MS, statusLine } from "./status.ts";
+import { addressTask, assignTasks, linkCardPrs, linkDeliverablePrs, linkPr, resolveTaskRef, taskRow, TaskError, waitTask, type TaskRow as WorkTaskRow } from "./tasks.ts";
+import { readBoard, settleColumns } from "./work-board.ts";
+import { COLUMN_LABEL, type BoardColumn, type WorkBoard } from "../contract.ts";
+import { confirmDrop, fileItem, type FileKind, markStaleFlagged, mergeTask, restoreTask, staleNotice, staleTasks, type StaleTask, type TidyAction, tidyList, TidyRefusal } from "./board-tidy.ts";
 import { backfillEvents, buildHistory, buildSummary, logEvent, logSince, SUMMARY_DONE_MS, type DecisionLite, type EventIn, type EventRow, type HistoryInput, type ProjectHistory, type ProjectSummary, type SummaryInput } from "./history.ts";
 import { waitsOf } from "./status.ts";
 import { COPY_MAX, fileProof, folderFor, keepFile, keptCopy, listFolder, type Kept, writeReadme } from "./deliverable-files.ts";
@@ -31,9 +36,8 @@ import { SUMMARY_ANSWERED_SQL, projectBook, searchAnswered, type CardHit, type P
 type HistoryAgent = HistoryInput["agents"][number];
 import { type RuleMatch, type Shape, allowFrom, matchRule, offerFor, ownerPick, shapeOf, words } from "./rules.ts";
 
-/** orch_needs_you's answered and moot lists by default: the last day, newest 20 (a week of the owner's answers ran to 121). */
+/** orch_needs_you's answered and moot lists by default: the last day, newest 20. */
 export const RECENT_DEFAULT = { ms: 24 * 3_600_000, limit: 20, maxLimit: 200 } as const;
-/** How often the CoS hears about new dead letters at most. */
 export const DLQ_WAKE_MS = 60 * 60_000;
 /** How long a PR-bound answer waits before its owner is reminded, and then between reminders. */
 export const WAIT_NUDGE_MS = 24 * 3_600_000;
@@ -46,25 +50,25 @@ export const STALE_WAKE_MS = 24 * 3_600_000;
 export const UNHELD_GRACE_MS = 24 * 3_600_000;
 /** How far apart bb's two "no such thread" answers must be before an agent is retired for it (threadNotFound). */
 export const GONE_CONFIRM_MS = 5 * 60_000;
-/** A project's direct line on the Projects row (contract.ts directLineSchema). */
 /** A feed post by its key (Engine.post): `line` is where a reply to it goes, null when it only opens. */
 export interface Post { key: string; kind: string; id: string; title: string; project: string | null; line: string | null; rev: number | null }
 export interface DirectLine {
   messages: { id: string; text: string; at: number; followUp: string | null; state: string; outcome: string | null; note: string | null; answeredAt: number | null; unread: boolean; images?: { name: string }[] }[];
   unread: boolean;
 }
-/** For this long the owner's direct word wins on its point over a CoS instruction, earlier or later (PLAN 3.6). */
+/** For this long the owner's direct word wins on its point over a CoS instruction, earlier or later. */
 export const DIRECT_IN_FORCE_MS = 48 * 3_600_000;
-/** The most of a project's direct thread the Projects row reads. */
 export const DIRECT_SHOWN = 4;
 /** An owner's message that starts a feed post of its own: its about becomes msg:<its id>. */
 export const OWN_POST = "msg:";
 /** direct_images rows staged for the owner's tracked messages to the CoS (no project). */
 export const COS_IMAGES = "@cos";
 const WHEN_WORDS: Record<WaitWhen, string> = { approved: "approved", green: "green (checks passing)", ready: "ready to merge", merged: "merged" };
-/** How far apart a handoff's retire and its successor's start may lie (two clock reads before 1.2.0). */
+/** How far apart a handoff's retire and its successor's start may lie. */
 const HANDOFF_GAP_MS = 1000;
-/** How long a pasted sign-in code stays on disk at most (personSecret). */
+const ROLE_TOOLS_NOTICE = "role-tools:";
+const roleToolsPrefix = (threadId: string) => `${ROLE_TOOLS_NOTICE}${threadId}:`;
+/** How long a pasted sign-in code stays on disk at most. */
 export const SECRET_TTL_MS = 30 * 60_000;
 import {
   type Agent,
@@ -102,17 +106,17 @@ export interface Settings {
   escalateMs: number; // an untriaged decision goes to the owner after this
   resendMs: number; // an unacked item is re-sent after its recipient has been idle this long
   owner: string; // the ownerName setting: how agents' messages name the owner ("" = "the owner")
-  // Pokémon are opt-in (requested 2026-11-13). Off: agents still get one in the database, so switching on shows it, but
-  // every Agent the engine hands out has mon null, so no name reaches a brief, a board row, the app or the sidebar.
+  // Off: agents still get a Pokémon in the database, so switching on shows it, but every Agent handed out has mon null.
   pokemon: boolean;
-  batchInbox: boolean; // on by default, in the server setting and here (2026-11-20, tokens): off is per-message delivery
+  batchInbox: boolean; // off is per-message delivery
   inboxDebounceMs: number;
-  // The personas hook (2026-11-18, personas.ts): the pack the personaPack setting names, already checked; an error when
-  // the path is set but the pack failed (nothing shows, nothing moves); null when none is set. Picks follow a loaded pack
-  // whatever the pokemon setting (so switching it moves nothing); what shows needs pokemon on too.
+  // A lead's least time between two inbox wakes; 0 is off.
+  inboxGapMs?: number;
+  // The pack the personaPack setting names, already checked; { error } when the path is set but the pack failed; null when
+  // none is set. Picks follow a loaded pack whatever the pokemon setting; what shows needs pokemon on too.
   personas?: PersonaPack | { error: string } | null;
 }
-export const DEFAULT_SETTINGS: Settings = { escalateMs: 5 * 60_000, resendMs: 10 * 60_000, owner: "", pokemon: false, batchInbox: true, inboxDebounceMs: 2000, personas: null };
+export const DEFAULT_SETTINGS: Settings = { escalateMs: 5 * 60_000, resendMs: 10 * 60_000, owner: "", pokemon: false, batchInbox: true, inboxDebounceMs: 2000, inboxGapMs: 120_000, personas: null };
 const packOf = (x: Settings["personas"]): PersonaPack | null => (x && !("error" in x) ? x : null);
 
 export type DeliverResult = { delivery: "sent" } | { delivery: "queued"; queuedMessageId: string } | { delivery: "held"; why: string };
@@ -123,13 +127,11 @@ export interface Ports {
   externalEnabled?(source: string, recipient: string): boolean;
   /** Send one item's text to a thread. "held": the thread can't take it now (stopped); try again when it starts. */
   deliver(threadId: string, text: string, item: Item): Promise<DeliverResult>;
-  /** A decision changed: mirror it for other readers. */
   mirror(d: Decision): void;
-  /** Something the screens show changed. */
-  changed(): void;
+  /** Something the screens show changed; `tables`: what it changed beyond the writes recorded (change-notice.ts). */
+  changed(tables?: readonly string[]): void;
   /** A card just entered the owner's Needs you (asked, escalated, or back from a deferral by time). */
   cardUp?(d: Decision): void;
-  /** A lead delivered (or re-delivered) a deliverable: it is in the owner's review. */
   delivered?(d: Deliverable): void;
   /** Where deliverables keep their own files (core/deliverable-files.ts); none: proof stays where the lead filed it. */
   files?(): { dir: string; maxBytes?: number; kept?: string } | null;
@@ -241,7 +243,7 @@ export interface ProjectRow {
   archivedAt: number | null;
   createdAt: number;
   monType: MonType | null; // its Pokémon type (mons.ts TYPES), whatever the setting
-  mode: ProjectMode; // scoping: its lead's cards and deliverables go only to the owner's Scope pane (1.11.0)
+  mode: ProjectMode; // scoping: its lead's cards and deliverables go only to the owner's Scope pane
 }
 
 /** One environment's PR as bb's PR status reports it (bb--github-pr-status `pullRequests`); a PR wait's gh reading too. */
@@ -255,7 +257,7 @@ export interface PrRow {
   state: string | null;
   attention: string | null;
   checks: string | null;
-  /** The review decision (approved, changes_requested, review_required, none) from a v2 signature; null before 1.3.0's format. */
+  /** The review decision (approved, changes_requested, review_required, none) from a v2 signature; null for an older format. */
   review: string | null;
   seenAt: number;
 }
@@ -293,6 +295,27 @@ const toRule = (r: RuleRow): Rule => ({
   match: r.match ? (JSON.parse(r.match) as RuleMatch) : null,
 });
 
+interface ProjectDbRow {
+  slug: string;
+  bb_project_id: string | null;
+  priority: string;
+  held_at: number | null;
+  archived_at: number | null;
+  created_at: number;
+  mon_type: string | null;
+  mode: string | null;
+}
+const toProjectRow = (r: ProjectDbRow): ProjectRow => ({
+  slug: r.slug,
+  bbProjectId: r.bb_project_id,
+  priority: r.priority as Priority,
+  heldAt: r.held_at,
+  archivedAt: r.archived_at,
+  createdAt: r.created_at,
+  monType: typeFamily(r.mon_type)?.type ?? null,
+  mode: r.mode === "scoping" ? "scoping" : "active",
+});
+
 /** An ask's blocks, checked here too (tests and the engine's own callers skip the tool's schema). */
 function parseBlocks(blocks: unknown): Block[] {
   const r = blocksSchema.safeParse(blocks ?? []);
@@ -300,7 +323,6 @@ function parseBlocks(blocks: unknown): Block[] {
   return r.data;
 }
 
-/** A deliverable's points, checked here too; none given keeps the revision in the old layout. */
 interface DirectImageRow { id: string; slug: string; item_id: string | null; n: number | null; name: string; mime: string; size: number; path: string; source_project: string | null; created_at: number }
 function imageOf(r: DirectImageRow): DirectImage {
   return { id: r.id, name: r.name, mime: r.mime as ImageType, size: r.size, path: r.path, sourceProject: r.source_project };
@@ -367,18 +389,19 @@ export interface AskInput {
   threads?: number;
   action?: "merge" | null;
   key?: string | null;
-  /** Typed parts the screens draw as components (blocks.ts). */
   blocks?: Block[];
   /**
-   * "Scoping done?" (1.11.0): a scoping project's lead proposes the end, with its summary and PROJECT.md. With task
-   * (1.12.0): it proposes closing that scoping task, with the file (doc, or projectMd) its findings are in.
+   * "Scoping done?": a scoping project's lead proposes the end, with its summary and PROJECT.md. With task: it proposes
+   * closing that scoping task, with the file (doc, or projectMd) its findings are in.
    */
   scopingDone?: { summary: string; projectMd?: string; doc?: string; task?: string | null } | null;
-  /** A lead's scoping task (1.12.0, its id or an open task's name): the card goes to the owner's Scope pane under it. */
+  /** A lead's scoping task (its id or an open task's name): the card goes to the owner's Scope pane under it. */
   scopeTask?: string | null;
   /** Revise this open card of the asker's own (its decision id) instead of filing a new one; `why` says what made it stale. */
   revises?: string | null;
   why?: string | null;
+  /** The work-board task it is about (core/tasks.ts: an id or an open task's title); else it follows its thread's. A plan card's threads get it. */
+  task?: string | null;
 }
 
 /** The "Scoping done?" card's options, fixed so the owner's yes can't be misread: option 1 makes the project active. */
@@ -386,14 +409,13 @@ export const SCOPING_DONE_OPTIONS = [
   { label: "Yes, scoping is done", detail: "The project becomes active: the normal card flow from now on" },
   { label: "Not yet", detail: "It stays scoping; say in the note what is missing" },
 ] as const;
-/** A scoping task's "Scoping done?" (1.12.0): option 1 closes only that task; the rest of the project is unchanged. */
+/** A scoping task's "Scoping done?": option 1 closes only that task; the rest of the project is unchanged. */
 export const SCOPING_TASK_DONE_OPTIONS = [
   { label: "Yes, scoping is done", detail: "The task closes; its cards go the normal way from now on" },
   { label: "Not yet", detail: "The task stays open; say in the note what is missing" },
 ] as const;
 /** The summary's cap: the goal, the constraints and the first plan, as a plan's thread list. */
 export const SCOPING_SUMMARY_MAX = 1600;
-/** A scoping task's name: a short label on the Scope tab. */
 export const SCOPING_TASK_NAME_MAX = 60;
 
 export interface BoardRow {
@@ -407,7 +429,6 @@ export interface BoardRow {
   at: number;
 }
 
-// ---------------------------------------------------------------- outputs (phase 3)
 
 export const OUTPUT_KINDS = ["doc", "video", "image", "report", "link"] as const;
 export type OutputKind = (typeof OUTPUT_KINDS)[number];
@@ -520,7 +541,6 @@ export function outputUrl(u: string): string {
   return url.href;
 }
 
-// ---------------------------------------------------------------- deliverables (docs/deliverables-plan.md)
 
 /** A file still at the realpath it was registered with (missing, or swapped for a symlink: no). */
 function registered(path: string): boolean {
@@ -531,7 +551,6 @@ function registered(path: string): boolean {
   }
 }
 
-/** A text proof is shown from small files only. */
 export const TEXT_PROOF_MAX = 256 * 1024;
 export const PROOF_MAX = 20;
 /**
@@ -564,14 +583,15 @@ export interface DeliverInput {
   summary: string;
   proof: ProofInput[];
   revises?: string | null;
-  /** Typed parts drawn as components on the deliverable (blocks.ts): checks, facts, steps, PRs, lists, commands. */
   blocks?: Block[];
   /** 2-6 decisions and findings, one line each with a short why, drawn before any prose. Absent: the old layout. */
   points?: Point[];
-  /** A scoping task (1.12.0, its id or an open task's name): reviewed in the owner's Scope pane under it. */
+  /** A scoping task (its id or an open task's name): reviewed in the owner's Scope pane under it. */
   scopeTask?: string | null;
   /** A Multiplayer board's review (its board id, resolved by the caller): reviewed on that board, never on Deliverables. */
   board?: { id: string; record?: string; flag?: string } | null;
+  /** The work-board task it belongs to (core/tasks.ts: an id or an open task's title); a revision keeps the last one. */
+  task?: string | null;
 }
 interface TaskRow {
   id: string;
@@ -623,7 +643,7 @@ interface WaitRow {
 }
 
 const awaitsApproval = (state: string | null, review: string | null) => state === "open" && (review === "review_required" || review === "review_requested");
-/** An open PR still missing its approval: GitHub reads it mergeable or BLOCKED as it recomputes, so for the owner both are one word, one notice (2026-11-17). */
+/** An open PR still missing its approval: GitHub reads it mergeable or BLOCKED as it recomputes, so for the owner both are one word, one notice. */
 const approvalWord = (state: string | null, review: string | null, merge: string | null) => (awaitsApproval(state, review) && (merge === "mergeable" || merge === "blocked") ? "needs_approval" : merge);
 
 /**
@@ -654,7 +674,6 @@ export const HOLD_MS = 10 * 60_000;
 /** How long an answered card's key stays taken: asking it again means the answer wasn't acted on. */
 export const KEY_REUSE_MS = 24 * 3_600_000;
 
-/** How far back an offer looks for cards answered the same way. */
 export const OFFER_DAYS = 14;
 
 /**
@@ -687,9 +706,11 @@ export function checkMatch(raw: unknown): RuleMatch {
   return m;
 }
 
+// the next moves' rows a deliverable shows, and their print for the notice (change-notice.ts NEXT_MOVES)
+const NEXT_MOVES_SQL = `SELECT id, state, outcome, note, closed_at FROM items WHERE kind = 'deliverable.next'`;
+
 export class Engine {
   private _settings: Settings;
-  /** The pack lines registered in mons.ts now (setPackLines). */
   private packLines: Record<string, PackLine> | null = null;
   readonly batch: BatchInbox;
   private inflight = new Set<string>();
@@ -724,28 +745,24 @@ export class Engine {
     }
   }
 
-  /** One row of the project history log (history.ts). */
   private event(e: Omit<EventIn, "at"> & { at?: number }): void {
     logEvent(this.db, { ...e, at: e.at ?? this.now() });
   }
 
-  /** The owner as agents' messages name them. */
   private get owner(): OwnerWords {
     return ownerWords(this.settings.owner);
   }
 
   /**
-   * Requested 2026-11-16, each project's Pokémon type (mons.ts TYPES), on top of 2026-11-13's rule that no two live
-   * agents share a Pokémon (a line since 2026-11-18: baseOf, so a thread never shows the Steward's Chansey). Oldest first: every live project keeps its type unless an older live project holds it, and
-   * one without a type picks one (pickType). Then every live lead and thread keeps its Pokémon when it still fits its
-   * project's family and no older live agent holds it; the rest get the next free one (pickMon). A moved agent keeps
-   * its stage (a StagePin at its current level); XP stays with its address, so its level is unchanged.
-   * With the pokemon setting on and a pack (2026-11-18, the owner: team lines, then the specialty's, then good fits),
-   * threads settle by their trainers' tiers (threadTiers), tier by tier across every project: in each, a thread already
-   * on one of its lines keeps it, then the rest, oldest first, take its first free line, never another live trainer's
-   * signature nor the CoS's or the Steward's line. A line goes to the thread that ranks it higher, even off another
-   * project's thread that holds it at a lower tier. A thread moved in a tier keeps its level and shows the new line's
-   * form at it (no StagePin). A thread past every tier keeps a free line it has, else takes the last resort (pickThread).
+   * Settle every live agent's Pokémon: no two live agents share a line (baseOf). Projects oldest first: each keeps its
+   * type unless an older live project holds it, else picks one (pickType). Leads and threads keep their Pokémon when it
+   * still fits their project's family and no older live agent holds it; the rest get the next free one (pickMon). A
+   * moved agent keeps its stage (a StagePin at its current level); XP stays with its address.
+   * With the pokemon setting on and a pack, threads settle by their trainers' tiers (threadTiers), tier by tier across
+   * every project: a thread already on one of its lines keeps it, then the rest, oldest first, take its first free line,
+   * never another live trainer's signature nor the CoS's or the Steward's line. A line goes to the thread that ranks it
+   * higher. A thread moved in a tier keeps its level and shows the new line's form at it (no StagePin). A thread past
+   * every tier keeps a free line it has, else takes the last resort (pickThread).
    * Idempotent: a second run moves nothing. Returns how many agents moved.
    */
   settleMons(): number {
@@ -762,10 +779,10 @@ export class Engine {
       const rows = this.db
         .prepare(`SELECT thread_id, address, role, project, mon, mon_stage, mon_stage_level FROM agents WHERE retired_at IS NULL ORDER BY CASE role WHEN 'cos' THEN 0 WHEN 'steward' THEN 1 WHEN 'lead' THEN 2 ELSE 3 END, created_at, thread_id`)
         .all() as { thread_id: string; address: string; role: Role; project: string | null; mon: string | null; mon_stage: number | null; mon_stage_level: number | null }[];
-      // with a pack a lead is a person: its Pokémon is kept, unseen and unmoved, and no longer holds its line (scope §3)
+      // with a pack a lead is a person: its Pokémon is kept, unseen and unmoved, and no longer holds its line
       if (pack) rows.splice(0, rows.length, ...rows.filter((r) => r.role !== "lead"));
       // first every rightful holder keeps its Pokémon, then only the rest are re-picked, so no one else's changes.
-      // `held` is by line (baseOf): the Steward's Chansey holds Happiny's line (2026-11-18, the owner saw two Chanseys)
+      // `held` is by line (baseOf): the Steward's Chansey holds Happiny's line
       const held: string[] = [];
       // the Pokémon a misfit gets: a thread's by its trainer's lines (pickThread), any other's by its pool (pickMon); it
       // keeps its stage (a StagePin at its level)
@@ -793,10 +810,7 @@ export class Engine {
       });
       for (const r of misfits) repick(r);
       if (people) {
-        // 2026-11-18, the owner: team lines, then the specialty's, then the good fits (threadTiers). Tier by tier across
-        // every project, nothing held until claimed in this run: in each tier the threads already on one of its lines
-        // keep it, then the rest, oldest first, take its first free line. So a line goes to the thread that ranks it
-        // higher, over one holding it at a lower tier, and a second run moves nothing.
+        // nothing is held until claimed in this run
         const assigned = this.personaAssignments();
         const tiers = new Map<string | null, string[][]>();
         const tiersOf = (project: string | null) => tiers.get(project) ?? tiers.set(project, this.threadTiers(project, assigned).tiers).get(project)!;
@@ -842,15 +856,14 @@ export class Engine {
     return own.includes(mon) || (own.every((n) => held.includes(n)) && MON_POOLS.thread.some((x) => x.name === mon));
   }
 
-  /** A project's stored Pokémon type (null: none yet, or no project). */
   private projectType(project: string | null): MonType | null {
     if (!project) return null;
     return ((this.db.prepare(`SELECT mon_type FROM projects WHERE slug = ?`).get(project) as { mon_type: string | null } | undefined)?.mon_type as MonType | null) ?? null;
   }
 
   /**
-   * A project's Pokémon type: its own, unless another live project holds it (it came back from the archive after its
-   * type was taken), else the one pickType gives. `assign` stores it (only on a project that has a row).
+   * A project's Pokémon type: its own, unless another live project holds it, else the one pickType gives. `assign` stores
+   * it (only on a project that has a row).
    */
   typeFor(project: string | null, assign = true): MonType | null {
     if (!project) return null;
@@ -872,17 +885,14 @@ export class Engine {
     return formAt(a.mon, level, a.monPin);
   }
 
-  // ---------------------------------------------------------------- personas (personas.ts, 2026-11-18)
 
   get settings(): Settings {
     return this._settings;
   }
   /**
    * New settings. A changed pack registers its lines and settles the Pokémon once, with the old pack's lines still
-   * readable so a thread that moves off one keeps its stage: loading a pack moves each lead's threads onto its
-   * persona's roster lines (settleMons), removing it gives the leads their Pokémon back and moves the threads on lines
-   * only the pack had. So does turning the pokemon setting on with a pack loaded. A pack that failed its checks changes
-   * nothing until it is fixed or unset.
+   * readable so a thread that moves off one keeps its stage. So does turning the pokemon setting on with a pack loaded.
+   * A pack that failed its checks changes nothing until it is fixed or unset.
    */
   set settings(next: Settings) {
     const before = this._settings.personas ?? null;
@@ -920,7 +930,7 @@ export class Engine {
     return !!x && "error" in x;
   }
 
-  /** Leads are people (scope §3): the pokemon setting is on and a pack is loaded. Their Pokémon is hidden then. */
+  /** Leads are people: the pokemon setting is on and a pack is loaded. Their Pokémon is hidden then. */
   private get leadsArePeople(): boolean {
     return this.settings.pokemon && !!this.pack;
   }
@@ -952,7 +962,7 @@ export class Engine {
   }
 
   /**
-   * A project's threads' lines while a pack is loaded (pickThread, settleMons), in tiers (2026-11-18, the owner): its lead's
+   * A project's threads' lines while a pack is loaded (pickThread, settleMons), in tiers: its lead's
    * persona's roster (signature first), then the lines of its specialty type (mons.ts specialtyLines; none for a persona
    * with no type), then its good fits. Each line once, in its first tier, by line. `skip`: every other live trainer's
    * signature (roster[0]) unless it is this one's too, left out of every tier. The last resort (the project's family,
@@ -974,16 +984,26 @@ export class Engine {
    * each live lead's. Null for threads, and whenever the pokemon setting is off or no pack is loaded.
    */
   personaOf(a: Agent, assigned: Map<string, string> | null = null): AgentPersona | null {
-    const pack = this.leadsArePeople ? this.pack : null;
-    if (!pack) return null;
-    const id = a.role === "cos" || a.role === "steward" ? pack.roles?.[a.role] : a.role === "lead" && a.project && a.status !== "archived" ? (assigned ?? this.personaAssignments()).get(a.project) : undefined;
-    const p = id ? pack.personas[id] : undefined;
+    const p = this.packPersona(a, assigned);
     if (!p) return null;
     return agentPersona(p, a.role === "lead" ? null : (this.formOf(a, this.xpOf(a.address).level)?.name ?? a.mon));
   }
 
+  /** personaOf for a lead, whose persona has no partner and so reads no XP; null for any other agent. */
+  leadPersonaOf(a: Agent, assigned: Map<string, string> | null = null): AgentPersona | null {
+    const p = a.role === "lead" ? this.packPersona(a, assigned) : undefined;
+    return p ? agentPersona(p, null) : null;
+  }
+
+  private packPersona(a: Agent, assigned: Map<string, string> | null): Persona | undefined {
+    const pack = this.leadsArePeople ? this.pack : null;
+    if (!pack) return undefined;
+    const id = a.role === "cos" || a.role === "steward" ? pack.roles?.[a.role] : a.role === "lead" && a.project && a.status !== "archived" ? (assigned ?? this.personaAssignments()).get(a.project) : undefined;
+    return id ? pack.personas[id] : undefined;
+  }
+
   /**
-   * An agent's look for the screens that don't read the agents RPC (the board's agents, the deliverable cards; 2026-11-18):
+   * An agent's look for the screens that don't read the agents RPC (the board's agents, the deliverable cards):
    * its persona (personaOf), and its Pokémon's National Dex number, which the browser's mons.ts doesn't know for a pack's
    * line. Both null with the setting off, as `mon` is.
    */
@@ -1004,14 +1024,13 @@ export class Engine {
     return this.ports.now();
   }
 
-  // ---------------------------------------------------------------- agents
 
   agentByThread(threadId: string): Agent | null {
     const r = this.db.prepare(`SELECT * FROM agents WHERE thread_id = ? AND retired_at IS NULL`).get(threadId) as AgentRow | undefined;
     return r ? this.toAgent(r) : null;
   }
 
-  /** A thread's agent, retired ones too (the newest role it had): the Open PRs tab maps a resolved thread's PR to its project. */
+  /** A thread's agent, retired ones too (the newest role it had). */
   agentByThreadEver(threadId: string): Agent | null {
     const r = this.db.prepare(`SELECT * FROM agents WHERE thread_id = ? ORDER BY created_at DESC LIMIT 1`).get(threadId) as AgentRow | undefined;
     return r ? this.toAgent(r) : null;
@@ -1041,8 +1060,7 @@ export class Engine {
       }
       const proj = role === "cos" || role === "steward" ? null : project;
       // the next number is one past the highest ever given in the project, retired ones included (items and history
-      // name them), read before this thread's own retired row goes: a count fell short once re-registering deleted rows.
-      // thread_numbers keeps that highest when its row is gone (a retired thread moved to another project or role).
+      // name them), read before this thread's own retired row goes; thread_numbers keeps that highest when its row is gone.
       let n: number | undefined;
       if (role === "thread") {
         const prefix = `thread:${proj}:`;
@@ -1068,7 +1086,6 @@ export class Engine {
         const passed = this.db.prepare(`SELECT id FROM items WHERE recipient = ? AND kind = 'owner.message' AND state IN ('queued','delivered','dead')`).all(address) as { id: string }[];
         this.db.prepare(`UPDATE items SET state = 'pending', queued_message_id = NULL, delivered_at = NULL, attempts = 0, on_board = 0 WHERE recipient = ? AND kind = 'owner.message' AND state IN ('queued','delivered','dead')`).run(address);
         for (const { id } of passed) this.batch.reroute(id, address); // batched: unread again for the new reader, even if the last lead read it in a digest
-        // a lead for an archived project brings it back (Start lead, or a role set by hand)
         if (this.project(proj!)?.archivedAt) {
           this.db.prepare(`UPDATE projects SET archived_at = NULL WHERE slug = ?`).run(proj);
           this.boardAdd("notice", startedBy ?? "person", proj, `${proj} brought back`, `${address} started.`, threadId);
@@ -1115,7 +1132,6 @@ export class Engine {
     });
   }
 
-  // ---------------------------------------------------------------- levels and evolution
   /** An address's XP (tokens processed) and level. */
   xpOf(address: string): { tokens: number; level: number } {
     const r = this.db.prepare(`SELECT tokens FROM xp WHERE address = ?`).get(address) as { tokens: number } | undefined;
@@ -1165,7 +1181,6 @@ export class Engine {
     return pickMon(role, taken, role === "lead" || role === "thread" ? this.typeFor(project, assign) : null).name;
   }
 
-  // ---------------------------------------------------------------- the owner's Start buttons: a lead, the CoS, the Steward
 
   /** The agent at an address that still counts: not retired, and its thread not archived. */
   liveAt(address: string): Agent | null {
@@ -1216,22 +1231,24 @@ export class Engine {
 
   /** Retire a thread's role. Its unacked mail becomes dead letters (the CoS resends them), never the next holder's mail. */
   retire(threadId: string, keepMail = false, at = this.now()): void {
-    const a = this.agentByThread(threadId);
-    this.db.prepare(`UPDATE agents SET retired_at = ? WHERE thread_id = ? AND retired_at IS NULL`).run(at, threadId);
-    if (a) this.event({ at, kind: "retire", project: a.project, address: a.address, threadId });
-    if (a) this.batch.handoff(a.address); // its wake can't wake the next holder, and a dead or queued one would block that holder's wakes
-    if (!keepMail) this.deadLetterOrphans();
+    tx(this.db, () => {
+      const a = this.agentByThread(threadId);
+      this.db.prepare(`UPDATE agents SET retired_at = ? WHERE thread_id = ? AND retired_at IS NULL`).run(at, threadId);
+      if (a) this.event({ at, kind: "retire", project: a.project, address: a.address, threadId });
+      if (a) this.batch.handoff(a.address); // its wake can't wake the next holder, and a dead or queued one would block that holder's wakes
+      if (a) this.dropRoleToolsNotices(a);
+      if (!keepMail) this.deadLetterOrphans();
+    });
     this.ports.changed();
   }
 
   /**
    * Mail no live agent can take is a dead letter: else it would wait forever, or reach whoever takes the address next.
    * A stopped agent still holds its address, so its mail waits for it; a new agent under an old address takes the mail.
-   * 2026-11-17: with the batched inbox on, mail to an address no agent ever held, and mail a retired holder was given
-   * but never acked, each kept a wake that never fired. So this covers every address with no live agent, delivered
-   * mail too, in both modes. Mail to a retired holder dies at once. An address with no agent row at all may just not be
-   * registered yet (a new project's lead, the first CoS), so its mail waits UNHELD_GRACE_MS for one, its wake with it,
-   * and is a dead letter only after that. (A thread that takes a new role drops its retired row: that address waits too.)
+   * This covers every address with no live agent, delivered mail too, in both modes. Mail to a retired holder dies at
+   * once. An address with no agent row at all may just not be registered yet (a new project's lead, the first CoS), so
+   * its mail waits UNHELD_GRACE_MS for one, its wake with it, and is a dead letter only after that. (A thread that takes
+   * a new role drops its retired row: that address waits too.)
    * The owner's direct message to a lead is the exception: it is to the project's lead, whoever that is, so it waits
    * for the next one (register re-sends it). So is the engine's own "orchestrator" address: a dream card's answer goes
    * there and the card's ack closes it (orchestratorAck). Nothing reads that inbox, so its unread is dropped instead.
@@ -1251,9 +1268,8 @@ export class Engine {
 
   /**
    * A thread's runtime state. "stopped" (set by the orchestrator's stop) sticks until the thread runs again. A worker
-   * thread bb archived is retired at once: archived by hand (agent-v2's threads 4, 6 and 7, 2026-11-15), its role
-   * stayed live for good, so it still counted as an open thread of its lead. `gone`: bb no longer has the thread at all
-   * (threadNotFound), which is retired the same way.
+   * thread bb archived is retired at once. `gone`: bb no longer has the thread at all (threadNotFound), which is retired
+   * the same way.
    */
   setStatus(threadId: string, status: string, gone = false): void {
     const cur = this.agentByThread(threadId);
@@ -1264,6 +1280,8 @@ export class Engine {
     this.db.prepare(`UPDATE agents SET status = ?, idle_at = ?, last_idle_at = COALESCE(?, last_idle_at) WHERE thread_id = ?`).run(status, idle, idle, threadId);
     // a change only: the startup reconcile re-reports every agent's status
     if (cur.status !== status) this.event({ kind: "status", project: cur.project, address: cur.address, threadId, value: status });
+    // live or not (liveAt): the feed's reply line and an archived lead's persona go by it, not by every status flip
+    if ((cur.status === "archived") !== (status === "archived")) this.ports.changed([LIVE]);
     if (status === "archived" && cur.role === "thread") {
       tx(this.db, () => {
         this.retire(threadId);
@@ -1274,10 +1292,10 @@ export class Engine {
   }
 
   /**
-   * bb answered "no such thread" for an agent's thread (2026-11-19: a stopped agent whose thread bb had deleted stayed
-   * live for days; bb sends no archive event for it). The first answer is only noted. Another at least GONE_CONFIRM_MS
-   * later retires it as an archived thread is (setStatus). Returns whether it was retired. Only bb's clear not-found
-   * comes here (core/gone.ts): a failed lookup is no answer, and a found thread clears the note (threadFound).
+   * bb answered "no such thread" for an agent's thread; bb sends no archive event for it. The first answer is only noted.
+   * Another at least GONE_CONFIRM_MS later retires it as an archived thread is (setStatus). Returns whether it was
+   * retired. Only bb's clear not-found comes here (core/gone.ts): a failed lookup is no answer, and a found thread
+   * clears the note (threadFound).
    */
   threadNotFound(threadId: string): boolean {
     if (!this.agentByThread(threadId)) return false;
@@ -1338,7 +1356,6 @@ export class Engine {
     }
   }
 
-  // ---------------------------------------------------------------- items
 
   /** External labels are provenance, never an internal sender or an owner approval. */
   importMail(raw: ExternalMail): Item {
@@ -1435,7 +1452,7 @@ export class Engine {
 
   /**
    * The owner's direct message as its lead reads it. It states its own rules, because a running lead keeps the role
-   * text it started with (PLAN 3.2): how to answer, the 48 h conflict rule, and that it approves nothing.
+   * text it started with: how to answer, the 48 h conflict rule, and that it approves nothing.
    */
   private renderDirect(it: Item, again: boolean): string {
     const o = this.owner;
@@ -1456,25 +1473,54 @@ export class Engine {
     return `${it.body}\n\n[orchestrator] ${o.Name}'s message ${it.id}${re ? `, re ${re}` : ""}${it.ref ? `, a follow-up of ${it.ref}` : ""}${again ? " (again)" : ""}. Answer it with orch_reply_owner(ref=${it.id}, text): your reply shows under it in ${o.name}'s feed. It approves nothing.`;
   }
 
+  /** The last flush stopped at its pass limit with a deadline crossed in its last pass: flush again at once. */
+  flushAgain = false;
+
+  /** When the wake timer must next flush (batched inbox): a pending wake or an unread deadline still to come, or null. */
+  nextWakeAt(): number | null {
+    return this.batch.nextDue(this.now(), (itemId) => this.importPaused(itemId));
+  }
+
   /** Send every pending item whose recipient can take it. Safe to call often. */
   async flush(): Promise<void> {
     if (this.settings.batchInbox) {
-      await this.batch.flush({
+      const paused = (itemId: string) => this.importPaused(itemId);
+      const pass = () => this.batch.flush({
         debounceMs: this.settings.inboxDebounceMs,
         retryMs: this.settings.resendMs,
+        gapMs: this.settings.inboxGapMs ?? 0,
         agent: (address) => this.agentByAddress(address),
         held: (a) => !!(a.project && this.project(a.project)?.heldAt),
         deliver: (a, text, token, bare) => this.ports.deliver(a.threadId, text, { id: `wake:${token}`, sender: "orchestrator", recipient: a.address, kind: "notice", body: bare } as Item),
         log: (text) => this.ports.log(text),
         dead: (recipient, _token, note) => this.wakeDead(recipient, note),
-        paused: (itemId) => this.importPaused(itemId),
+        paused,
       });
+      // A pass waits on each delivery; a deadline or a wake that came due meanwhile was judged with the time from before
+      // it, and the wake timer leaves out what is already due. So pass again at once while something came due, up to five
+      // passes. If the fifth had something come due too, flushAgain says so, and the server runs another flush at once from
+      // its wake timer, after yielding.
+      // Cleared first: a pass that throws must not leave it set, or the server's 0 ms timer would retry in a hot loop.
+      this.flushAgain = false;
+      let crossed = false;
+      for (let i = 0, since = this.now(); i < 5; i++) {
+        await pass();
+        const now = this.now();
+        crossed = this.batch.cameDue(since, now, paused);
+        if (!crossed) break;
+        since = now;
+      }
+      this.flushAgain = crossed;
       this.changedSinceFlush();
       return;
     }
     const rows = (this.db.prepare(`SELECT * FROM items WHERE state = 'pending' ORDER BY created_at`).all() as ItemRow[]).map(toItem);
     for (const it of rows) {
       if (this.inflight.has(it.id)) continue;
+      if (it.sender === "orchestrator" && it.sendKey?.startsWith(ROLE_TOOLS_NOTICE)) {
+        this.closeItems(`id = ?`, [it.id], "superseded", "role-tools notices go only with a batch wake");
+        continue;
+      }
       const external = this.db.prepare(`SELECT source, quiet, due_at FROM external_mail WHERE item_id = ?`).get(it.id) as { source: string; quiet: number; due_at: number | null } | undefined;
       if (external && this.ports.externalEnabled?.(external.source, it.recipient) === false) continue;
       if (external?.quiet && (external.due_at === null || external.due_at > this.now())) continue;
@@ -1504,10 +1550,9 @@ export class Engine {
   }
 
   /**
-   * The change notice a flush gives, only when the database changed since the last flush's (2026-11-18, speed): flush
-   * runs on every tool call, every turn start and end and every clock pass, and each notice makes every open page
-   * re-read its RPCs. A quiet flush (the clock's, every few seconds) changed nothing, so it says nothing. Any write on
-   * this connection counts, whoever made it: a status flip, a tool's write, the flush's own wake rows.
+   * The change notice a flush gives, only when the database changed since the last flush's: flush runs on every tool
+   * call, every turn start and end and every clock pass, and each notice makes every open page re-read its RPCs. Any
+   * write on this connection counts, whoever made it: a status flip, a tool's write, the flush's own wake rows.
    */
   private changedSinceFlush(): void {
     const n = (this.db.prepare(`SELECT total_changes() AS n`).get() as { n: number }).n;
@@ -1561,7 +1606,7 @@ export class Engine {
   }
 
   /**
-   * A dead letter goes to the CoS's dead letters (2026-11-15), not the owner's board: the CoS resends, re-routes, closes
+   * A dead letter goes to the CoS's dead letters, not the owner's board: the CoS resends, re-routes, closes
    * or escalates it (orch_dead_letters), and the hourly wake tells it about new ones. The supervisor still hears.
    */
   private dead(it: Item, why: string): void {
@@ -1595,7 +1640,7 @@ export class Engine {
   /** The owner resends a dead letter from the board, or the CoS from its dead letters (no board row then). */
   resend(itemId: string, by = "person"): Item {
     const it = this.mustDead(itemId);
-    // 2026-11-17: any address with no live agent, not only a retired one: the sweep would make it a dead letter again
+    // any address with no live agent, not only a retired one: the sweep would make it a dead letter again
     if (!this.agentByAddress(it.recipient))
       throw new EngineError("bad_state", `${it.recipient} has no live agent: give the address a role first${by === "person" ? "" : ", or re-route it"}`);
     this.db.prepare(`UPDATE items SET state = 'pending', attempts = 1, queued_message_id = NULL, delivered_at = NULL WHERE id = ?`).run(itemId);
@@ -1612,13 +1657,11 @@ export class Engine {
     return it;
   }
 
-  // ---------------------------------------------------------------- the CoS's dead letters (2026-11-15)
 
   private cosOnly(by: Agent): void {
     if (by.role !== "cos") throw new EngineError("forbidden", "only the CoS manages dead letters");
   }
 
-  /** Every dead letter, oldest death first, for the CoS. */
   deadLettersText(by: Agent): { text: string; count: number } {
     this.cosOnly(by);
     const t = this.now();
@@ -1651,7 +1694,7 @@ export class Engine {
       // a decision's items name the decision (d-…), which only its asker acks; a deliverable's belong to its lead
       if (it.kind.startsWith("decision.") || it.kind.startsWith("deliverable."))
         throw new EngineError("invalid", `${itemId} is a ${it.kind}: only ${it.recipient} can act on it, so resend, close or escalate it`);
-      // the owner writes to a project's lead only (PLAN 3.8): never to a thread or another project's lead
+      // the owner writes to a project's lead only: never to a thread or another project's lead
       if (it.kind === "owner.message") throw new EngineError("forbidden", `${itemId} is ${this.owner.name}'s direct message to ${it.recipient}: it can't be re-routed. Resend it, or escalate it to ${this.owner.name}'s board`);
       const why = note?.trim() ? `: ${note.trim().slice(0, 300)}` : "";
       this.db
@@ -1711,7 +1754,7 @@ export class Engine {
   }
 
   /**
-   * The hourly dead-letter wake (from tick; no model): at most once per DLQ_WAKE_MS, one info item to the CoS listing the
+   * The dead-letter wake (from tick): at most once per DLQ_WAKE_MS, one info item to the CoS listing the
    * dead letters new since the last wake, only when there are some. Without a live CoS the cursor stays, so the next
    * CoS hears them. Returns the item it sent, if any.
    */
@@ -1743,7 +1786,6 @@ export class Engine {
     });
   }
 
-  // ---------------------------------------------------------------- mail
 
   send(from: Agent, to: string, text: string, key: string | null, ref: string | null = null, policy: MailPolicy = {}): Item {
     const body = text.trim();
@@ -1774,7 +1816,7 @@ export class Engine {
   ack(by: Agent, id: string, outcome: Outcome, note: string | null, wait: { pr: string; when: string } | null = null): string {
     if (!OUTCOMES.includes(outcome)) throw new EngineError("invalid", `outcome is one of ${OUTCOMES.join(", ")}`);
     if (wait) {
-      // a direct message approves nothing (PLAN 3.7): "carry it out when the PR is green" would turn it into a merge go.
+      // a direct message approves nothing: "carry it out when the PR is green" would turn it into a merge go.
       // Nor does its CoS copy or a relay of it (an item whose ref leads back to one): the go can't be laundered.
       const direct = id.startsWith("i-") ? this.directRoot(id) : null;
       if (direct)
@@ -1836,9 +1878,8 @@ export class Engine {
   }
 
   /**
-   * A reply counts as the ack (2026-11-16: 99 replies named the message they answered, yet 15 of those messages were
-   * resent and three answered ones died as dead letters). Mail from `from` to `to` closes the one message `to` sent
-   * `from` that it answers, as "replied" (answered, not done), with the reply as its note:
+   * A reply counts as the ack. Mail from `from` to `to` closes the one message `to` sent `from` that it answers, as
+   * "replied" (answered, not done), with the reply as its note:
    * - ref=<that message's id>: always;
    * - no ref: only when it is the only message from `to` that `from` hasn't closed, it arrived since `from` last went
    *   idle (this is the same turn), and this is `from`'s first mail to `to` since. Its note says so, for audits.
@@ -1874,8 +1915,8 @@ export class Engine {
   }
 
   /**
-   * An ack's note goes back to the agent that sent the item, as an info item (2026-11-15: the CoS asked a lead to do
-   * something and never heard how it went). A note item itself never sends one back, so two agents can't bounce notes.
+   * An ack's note goes back to the agent that sent the item, as an info item. A note item itself never sends one back,
+   * so two agents can't bounce notes.
    */
   private ackNote(by: Agent, it: Item, outcome: Closed, note: string | null): void {
     if (it.kind === "owner.message") return this.directNote(by, it, outcome, note);
@@ -1909,7 +1950,6 @@ export class Engine {
     this.event({ at: t, kind: "direct-answer", project: it.recipient.slice("lead:".length), address: by.address, threadId: by.threadId, ref: it.id, value: outcome });
   }
 
-  // ---------------------------------------------------------------- the owner's direct messages (2026-11-16, PLAN 3)
 
   /** The owner's direct message an item is, or comes from through its refs (a copy, a relay, a relay of a relay). */
   private directRoot(id: string): Item | null {
@@ -1927,7 +1967,7 @@ export class Engine {
    * characters. `followUp` names an earlier direct message to the same lead. Refused without a live lead. The CoS gets
    * a read-only copy and Activity keeps a row. Never a push.
    */
-  ownerMessage(slug: string, text: string, followUp: string | null = null, images: string[] = [], about: string | null = null): Item {
+  ownerMessage(slug: string, text: string, followUp: string | null = null, images: string[] = [], about: string | null = null, task: string | null = null): Item {
     const words = text.trim();
     if (!words && !images.length) throw new EngineError("invalid", "empty message");
     if (words.length > 4000) throw new EngineError("invalid", `a message is at most 4000 characters; this is ${words.length}`);
@@ -1944,12 +1984,15 @@ export class Engine {
         const first = this.item(followUp);
         if (!first || first.kind !== "owner.message" || first.recipient !== to) throw new EngineError("invalid", `${followUp} isn't a direct message to ${to}`);
       }
-      // its images (2026-11-17): each sent for this project and on no message yet; their paths end the body
+      // its images: each sent for this project and on no message yet; their paths end the body
       const imgs = [...new Set(images)].map((id) => this.directImageRow(id));
       if (imgs.length !== images.length) throw new EngineError("invalid", "an image is named twice");
       for (const i of imgs) if (!i || i.slug !== slug || i.item_id !== null) throw new EngineError("invalid", "an image isn't one sent for this message: attach it again");
       const kept = imgs.map((i) => imageOf(i!));
-      const body = withImages(words, kept);
+      // from the work board's card panel: the task it is about, by id, heads the message
+      const onTask = task ? this.taskGuard(() => resolveTaskRef(this.db, slug, task)) : null;
+      if (onTask && onTask.id !== task) throw new EngineError("invalid", `name the task by its id, not ${JSON.stringify(task)}`);
+      const body = `${onTask ? `About task ${onTask.id} ${JSON.stringify(onTask.title)} on the work board:\n` : ""}${withImages(words, kept)}`;
       const it = this.put({ recipient: to, sender: "person", kind: "owner.message", ref: followUp, body, needsAck: true, about: thread.about });
       kept.forEach((i, n) => this.db.prepare(`UPDATE direct_images SET item_id = ?, n = ? WHERE id = ?`).run(it.id, n, i.id));
       const re = this.reLine(it.about);
@@ -1974,7 +2017,7 @@ export class Engine {
     return { about: prev?.about ?? (followUp ? `msg:${followUp}` : OWN_POST), followUp };
   }
 
-  /** A feed post by its key: what it is, its title, and the line a reply takes (D6: by its author); null if none. */
+  /** A feed post by its key: what it is, its title, and the line a reply takes; null if none. */
   post(key: string): Post | null {
     const i = key.indexOf(":");
     const kind = key.slice(0, i);
@@ -2020,7 +2063,7 @@ export class Engine {
     return `${what ? `${what} ` : ""}${p.id} ${JSON.stringify(p.title)}${p.rev ? ` (rev ${p.rev})` : ""}`;
   }
 
-  /** The owner's tracked message to the CoS (D3), answered with orch_reply_owner; `images` are addCosImage ids. */
+  /** The owner's tracked message to the CoS, answered with orch_reply_owner; `images` are addCosImage ids. */
   ownerCosMessage(text: string, images: string[] = [], about: string | null = null): Item {
     const words = text.trim();
     if (!words && !images.length) throw new EngineError("invalid", "empty message");
@@ -2074,13 +2117,12 @@ export class Engine {
     return this.item(id)!;
   }
 
-  /** The CoS's recorded answer to an owner's message, if any. */
   private cosReplyTo(id: string): Item | null {
     const r = this.db.prepare(`SELECT * FROM items WHERE ref = ? AND kind = 'cos.reply' ORDER BY created_at DESC LIMIT 1`).get(id) as ItemRow | undefined;
     return r ? toItem(r) : null;
   }
 
-  /** The owner's Resend (D6): a dead letter is resent; an unanswered one is redelivered or its recipient re-woken. */
+  /** The owner's Resend: a dead letter is resent; an unanswered one is redelivered or its recipient re-woken. */
   resendOwner(id: string): Item {
     const it = this.item(id);
     if (!it || it.sender !== "person" || (it.kind !== "owner.message" && it.kind !== "owner.cos")) throw new EngineError("invalid", `${id} isn't one of ${this.owner.name}'s messages`);
@@ -2103,16 +2145,17 @@ export class Engine {
   }
 
   private feedSource(prompts: FeedPrompt[] = []): FeedSource {
+    // a page asks once per post whether its line is live: many posts share a line, so each address is looked up once
+    const live = new Map<string, boolean>();
     return {
       db: this.db,
       now: this.now(),
       seen: this.feedSeen(),
       resendMs: this.settings.resendMs,
       batched: this.settings.batchInbox,
-      batchReadAt: (id) => this.batch.receipt(id).readAt,
       openCards: this.needsYou().cards,
       scopeCards: this.scopeView().flatMap((p) => p.cards),
-      live: (address) => !!this.liveAt(address),
+      live: (address) => live.get(address) ?? (live.set(address, !!this.liveAt(address)), live.get(address)!),
       heldProjects: new Set(this.projects().filter((p) => p.heldAt).map((p) => p.slug)),
       prompts,
     };
@@ -2123,7 +2166,10 @@ export class Engine {
     return feedPage(this.feedSource(prompts), opts);
   }
 
-  /** "You and the CoS" on the Chat tab (core/feed.ts cosLine). */
+  feedLeftOut(since: number): number {
+    return leftOutCount(this.db, since);
+  }
+
   cosLine(before: number | null, limit = 40): { entries: CosLineEntry[]; more: boolean } {
     return cosLine(this.feedSource(), before, limit, (about) => {
       const p = this.post(about);
@@ -2131,12 +2177,11 @@ export class Engine {
     });
   }
 
-  /** A post's conversation before `before`, oldest first (core/feed.ts). */
-  feedThread(about: string, before: number | null, limit = 100): { messages: FeedMsg[]; more: boolean } {
+  feedThread(about: string, before: number | null, limit = 100): FeedThread {
     return feedThread(this.feedSource(), about, before, limit);
   }
 
-  /** The feed's one seen-up-to line (D5): posts with agent activity after it are new. */
+  /** The feed's one seen-up-to line: posts with agent activity after it are new. */
   feedSeen(): number {
     return this.cursor("feed.seen") ?? 0;
   }
@@ -2150,7 +2195,7 @@ export class Engine {
   }
 
   /**
-   * An image the page sent for a message to a project's lead (2026-11-17), kept by the server at `img.path`: its id,
+   * An image the page sent for a message to a project's lead, kept by the server at `img.path`: its id,
    * which the message names. The server has checked its bytes (core/direct-images.ts sniff); the bytes never come here.
    */
   addDirectImage(slug: string, img: { name: string; mime: ImageType; size: number; path: string; sourceProject: string | null }): string {
@@ -2173,7 +2218,7 @@ export class Engine {
     return (this.db.prepare(`SELECT * FROM direct_images WHERE item_id = ? ORDER BY n`).all(itemId) as DirectImageRow[]).map(imageOf);
   }
 
-  /** The owner's direct messages to a lead still in force (PLAN 3.6): the last 48 h, newest first, whatever their state. */
+  /** The owner's direct messages to a lead still in force: the last 48 h, newest first, whatever their state. */
   directInForce(to: string): Item[] {
     return (this.db.prepare(`SELECT * FROM items WHERE recipient = ? AND kind = 'owner.message' AND created_at >= ? ORDER BY created_at DESC`).all(to, this.now() - DIRECT_IN_FORCE_MS) as ItemRow[]).map(toItem);
   }
@@ -2202,7 +2247,7 @@ export class Engine {
   }
 
   /**
-   * One project's direct messages, newest first, for the chat log (1.10.0): read only when the owner opens it, so the
+   * One project's direct messages, newest first, for the chat log: read only when the owner opens it, so the
    * Projects read stays at DIRECT_SHOWN per row. `before`: only messages created before it (the "Older" cursor).
    */
   directHistory(slug: string, before: number | null, limit: number): { messages: DirectLine["messages"]; more: boolean } {
@@ -2232,7 +2277,6 @@ export class Engine {
     this.ports.changed();
   }
 
-  // ---------------------------------------------------------------- answers that wait on a PR (2026-11-16)
 
   /** A wait's PR (its URL, or its number when exactly one PR the plugin reads has it) and condition, or `invalid`. */
   private waitInput(w: { pr: string; when: string }): { url: string; when: WaitWhen } {
@@ -2248,7 +2292,6 @@ export class Engine {
     return { url: raw, when: w.when as WaitWhen };
   }
 
-  /** What the acked item or card said, for the wake-up: the card's title and answer, or the message's text. */
   private waitAbout(id: string): string {
     const d = id.startsWith("d-") ? this.decision(id) : null;
     if (d) {
@@ -2262,6 +2305,8 @@ export class Engine {
   private bindWait(by: Agent, id: string, url: string, when: WaitWhen): string {
     const wid = `w-${hex(4)}`;
     this.db.prepare(`INSERT INTO waits (id, owner, ref, about, pr_url, cond, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(wid, by.address, id, this.waitAbout(id), url, when, this.now());
+    // the PR a wait watches belongs to the owner's task (a lead's: its card's), and stays after the wait closes
+    linkPr(this.db, url, waitTask(this.db, by.address, id), "wait", by.address, this.now());
     const shown = this.prByUrl(url);
     const woke = this.checkWaits(url);
     if (woke.includes(wid)) return `bound to ${url}: it is ${WHEN_WORDS[when]} already, so it is back in your inbox now (${wid})`;
@@ -2346,7 +2391,6 @@ export class Engine {
     return r ? { environmentId: "", threadId: "", url: r.url, number: r.number, state: r.state, attention: r.attention, checks: r.checks, review: r.sig.split("|")[4] || null, seenAt: r.seen_at } : this.prByUrl(bare);
   }
 
-  /** The PRs the open waits are on, each once. */
   openWaitUrls(): string[] {
     return (this.db.prepare(`SELECT DISTINCT pr_url FROM waits WHERE closed_at IS NULL ORDER BY pr_url`).all() as { pr_url: string }[]).map((r) => r.pr_url);
   }
@@ -2372,16 +2416,58 @@ export class Engine {
              sig = excluded.sig, seen_at = excluded.seen_at, read_at = excluded.read_at`,
         )
         .run(url, pr.number ?? null, pr.state, f.shown, f.checks, f.sig, old && old.sig === f.sig ? old.seen_at : t, t);
+      this.logSettledPr(url, pr.state, pr.number ?? null);
       return this.checkWaits(url);
     });
   }
 
-  /** Drop the gh readings no open wait names any more (a wait met, moved or dropped). Returns how many went. */
-  pruneWaitReadings(): number {
-    return Number((this.db.prepare(`DELETE FROM pr_readings WHERE url NOT IN (SELECT pr_url FROM waits WHERE closed_at IS NULL)`).run() as { changes: number | bigint }).changes);
+  /**
+   * A merge or close a PR wait's own reading saw goes in the PR log too, under the PR's holder (its bb reading's thread,
+   * else whoever the log last named), as prSeen logs a live thread's: pruneWaitReadings drops the reading once the wait
+   * is met, and the work board (core/work-board.ts) must still know a retired thread's PR merged. Once per state.
+   */
+  private logSettledPr(url: string, state: string, number: number | null): void {
+    if (state !== "merged" && state !== "closed") return;
+    const last = this.db.prepare(`SELECT value, address, project, thread_id FROM events WHERE kind = 'pr' AND ref = ? ORDER BY at DESC, seq DESC LIMIT 1`).get(url) as
+      | { value: string | null; address: string | null; project: string | null; thread_id: string | null }
+      | undefined;
+    if (last?.value === state) return;
+    const held = this.db.prepare(`SELECT a.address, a.project, a.thread_id FROM prs p JOIN agents a ON a.thread_id = p.thread_id WHERE p.url = ? ORDER BY p.seen_at DESC LIMIT 1`).get(url) as
+      | { address: string; project: string | null; thread_id: string }
+      | undefined;
+    const who = held ?? last;
+    this.event({ kind: "pr", project: who?.project ?? null, address: who?.address ?? null, threadId: who?.thread_id ?? null, value: state, ref: url, note: number != null ? String(number) : null });
   }
 
-  // ---------------------------------------------------------------- the Watchers list: PR waits for the owner and the CoS (2026-11-17)
+  /** Drop the gh readings no open wait names any more (a wait met, moved or dropped) and no PR link needs (a linked URL's state is read per URL). Returns how many went. */
+  pruneWaitReadings(): number {
+    // a tidy's read request ends once its PR is linked (filed) or after a day; its reading is kept while it lasts
+    this.db.prepare(`DELETE FROM pr_read_requests WHERE url IN (SELECT url FROM task_prs) OR at < ?`).run(this.now() - 24 * 3_600_000);
+    return Number(
+      (this.db.prepare(`DELETE FROM pr_readings WHERE url NOT IN (SELECT pr_url FROM waits WHERE closed_at IS NULL) AND url NOT IN (SELECT url FROM task_prs) AND url NOT IN (SELECT url FROM pr_read_requests)`).run() as { changes: number | bigint }).changes,
+    );
+  }
+
+  /**
+   * The linked PRs (task_prs, every path), and those a refused tidy asked for (pr_read_requests), that gh still has to read: no state yet, or a newest state (bb's reading, a
+   * gh reading or the PR log, as the board takes it) that isn't merged or closed. The wait pass reads them with the
+   * waits' PRs, so an unknown state resolves itself; a final one is not read again.
+   */
+  linkedPrsToRead(): string[] {
+    return (
+      this.db
+        .prepare(
+          `WITH s AS (
+             SELECT rtrim(trim(url), '/') AS u, state, seen_at AS at FROM prs
+             UNION ALL SELECT url, state, seen_at FROM pr_readings
+             UNION ALL SELECT rtrim(trim(ref), '/'), value, at FROM events WHERE kind = 'pr' AND ref IS NOT NULL
+           ), latest AS (SELECT u, state, MAX(at) FROM s GROUP BY u)
+           SELECT DISTINCT t.url FROM (SELECT url FROM task_prs UNION SELECT url FROM pr_read_requests) t LEFT JOIN latest l ON l.u = t.url WHERE l.state IS NULL OR l.state NOT IN ('merged', 'closed') ORDER BY t.url`,
+        )
+        .all() as { url: string }[]
+    ).map((r) => r.url);
+  }
+
   // The owner (from the Board) and the CoS (orch_watch) may list, add, retarget, move or drop any open PR wait, for any
   // recipient. Leads and threads keep only orch_ack's own-wait moves. Each change tells the wait's old and new owner in
   // one line and logs a Board row. `by` null is the owner.
@@ -2448,6 +2534,7 @@ export class Engine {
     const wid = `w-${hex(4)}`;
     return tx(this.db, () => {
       this.db.prepare(`INSERT INTO waits (id, owner, ref, about, pr_url, cond, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(wid, to.address, wid, `${who}'s note: ${JSON.stringify(note.slice(0, 600))}`, w.url, w.when, this.now());
+      linkPr(this.db, w.url, waitTask(this.db, to.address, wid), "wait", to.address, this.now());
       const line = `${who} added PR wait ${wid} for ${to.address}: until ${w.url} is ${WHEN_WORDS[w.when]}`;
       this.watchTell(to.address, `${who} added a PR wait for you (${wid}): once ${w.url} is ${WHEN_WORDS[w.when]}, carry out ${JSON.stringify(note.slice(0, 300))}. It comes back to you then.`, `watch:${wid}:add`);
       this.boardAdd("notice", from, to.project, line, note.slice(0, 600), wid);
@@ -2465,6 +2552,8 @@ export class Engine {
     if (next.url === w.pr_url && next.when === w.cond) return `${id} already waits until ${w.pr_url} is ${WHEN_WORDS[next.when]}; nothing changed`;
     return tx(this.db, () => {
       this.db.prepare(`UPDATE waits SET pr_url = ?, cond = ? WHERE id = ?`).run(next.url, next.when, id);
+      // the new PR joins the owner's task; the old one's link stays (it was on the task, and it may still be unmerged)
+      linkPr(this.db, next.url, waitTask(this.db, w.owner, w.ref), "wait", w.owner, this.now());
       const was = `${w.pr_url} ${WHEN_WORDS[w.cond as WaitWhen]}`;
       const now = `${next.url} ${WHEN_WORDS[next.when]}`;
       this.watchTell(w.owner, `${who} retargeted your PR wait ${id} (${w.ref}): now until ${now}, was ${was}.`, `watch:${id}:retarget:${this.now()}`);
@@ -2482,6 +2571,7 @@ export class Engine {
     if (to.address === w.owner) return `${id} is ${w.owner}'s already; nothing changed`;
     return tx(this.db, () => {
       this.db.prepare(`UPDATE waits SET owner = ? WHERE id = ?`).run(to.address, id);
+      linkPr(this.db, w.pr_url, waitTask(this.db, to.address, w.ref), "wait", to.address, this.now());
       const what = `${w.pr_url} ${WHEN_WORDS[w.cond as WaitWhen]}`;
       this.watchTell(w.owner, `${who} moved your PR wait ${id} (${w.ref}, until ${what}) to ${to.address}.`, `watch:${id}:move-from:${this.now()}`);
       this.watchTell(to.address, `${who} gave you PR wait ${id} from ${w.owner}: once ${what}, you get back ${w.about.replace(/\s+/g, " ").slice(0, 300)}.`, `watch:${id}:move-to:${this.now()}`);
@@ -2490,7 +2580,6 @@ export class Engine {
     });
   }
 
-  /** Stop an open wait: nothing comes back for it. */
   watchDrop(by: Agent | null, id: string): string {
     const { who, from } = this.watcher(by);
     const w = this.openWait(id);
@@ -2509,7 +2598,6 @@ export class Engine {
     return (this.db.prepare(`SELECT * FROM waits WHERE closed_at IS NULL AND (? IS NULL OR owner = ?) ORDER BY created_at`).all(owner, owner) as WaitRow[]).map((w) => ({ id: w.id, owner: w.owner, ref: w.ref, prUrl: w.pr_url, when: w.cond as WaitWhen, createdAt: w.created_at }));
   }
 
-  // ---------------------------------------------------------------- stale threads (2026-11-16)
 
   /**
    * What the daily check lists: live threads idle over STALE_WAKE_MS that wait on nothing (no open card they asked,
@@ -2550,7 +2638,7 @@ export class Engine {
   }
 
   /**
-   * The daily stale-thread item (from tick; no model): at most once per STALE_WAKE_MS, one info item to the CoS with
+   * The daily stale-thread item (from tick): at most once per STALE_WAKE_MS, one info item to the CoS with
    * staleList, only when it lists someone and differs from the last list it was sent (the same idle threads every day
    * are one item, not seven). Never to the owner.
    */
@@ -2591,7 +2679,6 @@ export class Engine {
     });
   }
 
-  // ---------------------------------------------------------------- lead status (2026-11-16, status.ts)
 
   /** orch_status: a lead publishes where its project is. Missing fields keep the last status's values. */
   publishStatus(a: Agent, p: StatusParams): LeadStatus {
@@ -2603,6 +2690,8 @@ export class Engine {
       const r = normalizeStatus(p, prev, { now: this.now(), by: a.address, ownerName: this.settings.owner ?? "", legacySince });
       if ("refusal" in r) throw new EngineError("invalid", r.refusal);
       const s = r.status;
+      // the steps are the project's work-board tasks: each gets its id, and the tasks follow (core/tasks.ts)
+      if (p.steps !== undefined) s.steps = this.taskGuard(() => assignTasks(this.db, project, s.steps, s.updatedAt));
       const json = JSON.stringify(s);
       this.db
         .prepare(
@@ -2611,6 +2700,7 @@ export class Engine {
         )
         .run(project, a.address, a.threadId, json, s.updatedAt);
       this.event({ at: s.updatedAt, kind: "lead-status", project, address: a.address, threadId: a.threadId, value: json });
+      if (p.steps !== undefined) settleColumns(this.db, s.updatedAt, { log: true, by: a.address, project });
       this.ports.changed();
       return s;
     });
@@ -2637,7 +2727,140 @@ export class Engine {
     return since;
   }
 
-  /** A project's latest status, or null before its lead published one. */
+  private taskGuard<T>(fn: () => T, unread?: (urls: string[]) => void): T {
+    try {
+      return fn();
+    } catch (e) {
+      if (e instanceof TidyRefusal) unread?.(e.readFirst);
+      if (e instanceof TaskError) throw new EngineError("invalid", e.message);
+      throw e;
+    }
+  }
+
+  /** The work-board task an agent names (orch_ask, orch_deliver: an id or an open task's title) in its project. */
+  workTask(by: Agent, ref: string): WorkTaskRow {
+    return this.taskGuard(() => resolveTaskRef(this.db, by.project, ref));
+  }
+
+  /** The work board (core/work-board.ts): read-only. */
+  workBoard(opts: { since?: number | null; project?: string | null } = {}): WorkBoard {
+    return readBoard(this.db, this.now(), opts);
+  }
+
+  /**
+   * The owner's hand move of a task on the work board. It writes only the task's hand move:
+   * the column, its time and the attachments' signature now, so it holds until something attached changes (the board's
+   * `sig`). A move to the column the attachments give clears the hand move. The project's pending changes are logged
+   * first as the engine's, so task_moves puts exactly this move down to the owner. The lead gets an INFO notice and the
+   * CoS a copy. A move never merges a PR, answers a card or approves a deliverable: moving to Shipped ships nothing, and
+   * moving out of Waiting on you leaves the card open (the notice says so).
+   */
+  boardMove(id: string, to: BoardColumn): { task: string; from: BoardColumn; to: BoardColumn; holds: boolean } {
+    return tx(this.db, () => {
+      const row = taskRow(this.db, id);
+      if (!row) throw new EngineError("not_found", `no task ${id}`);
+      if (row.state === "dropped") throw new EngineError("bad_state", `task ${id} was dropped: the CoS can restore it`);
+      const now = this.now();
+      settleColumns(this.db, now, { log: true, by: "engine", project: row.project });
+      const t = readBoard(this.db, now, { project: row.project, since: 0 }).projects[0]?.tasks.find((x) => x.id === id);
+      if (!t) throw new EngineError("not_found", `task ${id} is not on the board`);
+      if (t.column === to) return { task: id, from: t.column, to, holds: !!t.hand?.holds };
+      const back = to === t.derived;
+      if (back) this.db.prepare(`UPDATE tasks SET hand_col = NULL, hand_at = NULL, hand_sig = NULL WHERE id = ?`).run(id);
+      else this.db.prepare(`UPDATE tasks SET hand_col = ?, hand_at = ?, hand_sig = ? WHERE id = ?`).run(to, now, t.sig, id);
+      settleColumns(this.db, now, { log: true, by: "person", project: row.project });
+      const open = t.cards.filter((c) => c.ownerWaits);
+      const lead = `lead:${row.project}`;
+      const body =
+        `${this.owner.Name} moved task ${id} ${JSON.stringify(t.title)} from ${COLUMN_LABEL[t.column]} to ${COLUMN_LABEL[to]} on the work board. ` +
+        (back ? "That is where its attachments put it, so no hand move holds." : "It holds there until something attached to it changes (a thread, PR, deliverable or card).") +
+        ` The move merged, answered and approved nothing${open.length ? `; ${open.map((c) => `card ${c.id}`).join(", ")} still waits on ${this.owner.name}` : ""}.`;
+      if (this.agentByAddress(lead)) {
+        const it = this.put({ recipient: lead, sender: "orchestrator", kind: "notice", ref: null, body, needsAck: false });
+        if (this.agentByAddress("cos")) this.put({ recipient: "cos", sender: "orchestrator", kind: "copy", ref: it.id, body: `(copy of the notice ${it.id} to ${lead}) ${body}`, key: `copy:cos:${it.id}`, needsAck: false });
+      }
+      this.ports.changed();
+      return { task: id, from: t.column, to, holds: !back };
+    });
+  }
+
+  /** Log the work board's column changes since the last settle (task_moves); from the tick, once a minute. */
+  settleBoard(): number {
+    return tx(this.db, () => settleColumns(this.db, this.now(), { log: true, by: "engine" }));
+  }
+
+  /**
+   * orch_board_tidy (core/board-tidy.ts): the CoS reads and tidies the work board. CoS only. Each change is one
+   * transaction: the action's own task_moves row (by cos), the project's knock-on column changes (by cos), and an INFO
+   * notice to the project's lead.
+   */
+  boardTidy(by: Agent, p: { action: TidyAction; task?: string | null; into?: string | null; kind?: FileKind | null; ref?: string | null; project?: string | null }): string {
+    if (by.role !== "cos") throw new EngineError("forbidden", "only the CoS tidies the work board");
+    if (p.action === "list") return tidyList(this.db, this.now(), p.project || null);
+    const need = (v: string | null | undefined, what: string) => {
+      if (!v) throw new EngineError("invalid", `${p.action} needs ${what}`);
+      return v;
+    };
+    let readFirst: string[] = [];
+    try {
+      return this.tidyTx(by, p, need, (urls) => (readFirst = urls));
+    } finally {
+      // a refusal rolled its transaction back; the PRs nobody has read yet are queued for the next PR pass after it
+      // (pr_read_requests, read by linkedPrsToRead), never read here: no GitHub call on the tool's request path
+      if (readFirst.length) {
+        const at = this.now();
+        tx(this.db, () => {
+          for (const url of readFirst) this.db.prepare(`INSERT INTO pr_read_requests (url, at) VALUES (?, ?) ON CONFLICT(url) DO UPDATE SET at = excluded.at`).run(url, at);
+        });
+      }
+    }
+  }
+
+  private tidyTx(by: Agent, p: { action: TidyAction; task?: string | null; into?: string | null; kind?: FileKind | null; ref?: string | null }, need: (v: string | null | undefined, what: string) => string, unread: (urls: string[]) => void): string {
+    return tx(this.db, () => {
+      const now = this.now();
+      const r = this.taskGuard(() =>
+        p.action === "merge"
+          ? mergeTask(this.db, now, need(p.task, "task (the one to fold in)"), need(p.into, "into (the task that keeps it)"))
+          : p.action === "restore"
+            ? restoreTask(this.db, now, need(p.task, "task"))
+            : p.action === "confirm"
+              ? confirmDrop(this.db, now, need(p.task, "task"))
+              : fileItem(this.db, now, (p.kind ?? need(null, "kind (thread, pr, deliverable or card)")) as FileKind, need(p.ref, "ref (what to file)"), need(p.task, "task (where to file it)")),
+        unread,
+      );
+      if (r.project) settleColumns(this.db, now, { log: true, by: "cos", project: r.project });
+      const lead = r.project ? `lead:${r.project}` : null;
+      if (r.notice && lead && this.agentByAddress(lead)) this.put({ recipient: lead, sender: by.address, kind: "notice", ref: null, body: r.notice, needsAck: false });
+      this.ports.changed();
+      return r.text;
+    });
+  }
+
+  /**
+   * The stale-task flag (core/board-tidy.ts staleTasks), from the tick with the board settle: one notice per lead
+   * listing its tasks that look finished but have a live thread idling on them, each task at most once a day. A
+   * project with no lead is not stamped, so its lead hears once it starts.
+   */
+  flagStaleTasks(): StaleTask[] {
+    return tx(this.db, () => {
+      const now = this.now();
+      const byProject = new Map<string, StaleTask[]>();
+      for (const t of staleTasks(this.db, now)) byProject.set(t.project, [...(byProject.get(t.project) ?? []), t]);
+      const sent: StaleTask[] = [];
+      for (const [project, tasks] of byProject) {
+        const lead = `lead:${project}`;
+        if (!this.agentByAddress(lead)) continue;
+        const it = this.put({ recipient: lead, sender: "orchestrator", kind: "notice", ref: null, body: staleNotice(tasks), key: `stale-tasks:${tasks.map((t) => t.id).join(",")}:${now}`, needsAck: false });
+        if (this.settings.batchInbox) this.batch.policy(it.id, { severity: "ACTION" });
+        markStaleFlagged(this.db, now, tasks.map((t) => t.id));
+        sent.push(...tasks);
+      }
+      if (sent.length) this.ports.changed();
+      return sent;
+    });
+  }
+
   leadStatus(project: string): LeadStatus | null {
     const r = this.db.prepare(`SELECT json FROM lead_status WHERE project = ?`).get(project) as { json: string } | undefined;
     return r ? (JSON.parse(r.json) as LeadStatus) : null;
@@ -2659,11 +2882,18 @@ export class Engine {
   }
 
   /**
-   * From the tick (2026-11-16, the lead's rule: a nudge every 2 h on a day-long PR wait is noise, and each one wakes
-   * a lead): a status over STATUS_STALE_MS old is nudged only when something changed in its project since the last
+   * From the tick: a status over STATUS_STALE_MS old is nudged only when something changed in its project since the last
    * publish (projectChangedSince), at most once per change, and never twice within STATUS_STALE_MS. One info item to
    * the lead, never a card. Only a lead that published once is nudged (it has the tool); a held project isn't.
    */
+  /**
+   * Status nudges only after a real turn: a lead that no inbox wake has woken since it published can't have moved on,
+   * so a nudge would only ride along as noise. Per-message mode keeps no wake record, so there every nudge goes.
+   */
+  private hadRealTurnSince(lead: string, since: number): boolean {
+    return !this.settings.batchInbox || this.batch.wokenSince(lead, since);
+  }
+
   statusNudges(): Item[] {
     const t = this.now();
     const rows = this.db.prepare(`SELECT project, json, updated_at, nudged_at FROM lead_status WHERE updated_at < ? AND (nudged_at IS NULL OR nudged_at < ?)`).all(t - STATUS_STALE_MS, t - STATUS_STALE_MS) as {
@@ -2676,6 +2906,7 @@ export class Engine {
     for (const r of rows) {
       const lead = this.agentByAddress(`lead:${r.project}`);
       if (!lead || lead.status === "archived" || this.project(r.project)?.heldAt != null) continue;
+      if (!this.hadRealTurnSince(lead.address, r.updated_at)) continue; // checked before nudged_at moves: deferred, not lost
       const changed = this.projectChangedSince(r.project, lead.address, Math.max(r.updated_at, r.nudged_at ?? 0));
       if (changed === null) continue;
       const s = JSON.parse(r.json) as LeadStatus;
@@ -2700,10 +2931,10 @@ export class Engine {
   }
 
   /**
-   * From the tick (2026-11-16, the owner: answered and stale items drop off the row): a status a live fact contradicts
-   * (a wait it names is answered, merged or resolved, or an answer covers a blocker; buildSummary's statusOutOfDate) gets
-   * its lead one notice to republish, at most once per status (the key is the status's time), never a message to the
-   * owner. Not for a held project or one with no live lead; the row says "Status out of date" either way.
+   * From the tick: a status a live fact contradicts (a wait it names is answered, merged or resolved, or an answer
+   * covers a blocker; buildSummary's statusOutOfDate) gets its lead one notice to republish, at most once per status
+   * (the key is the status's time), never a message to the owner. Not for a held project or one with no live lead; the
+   * row says "Status out of date" either way.
    */
   statusOutOfDateNudges(): Item[] {
     const out: Item[] = [];
@@ -2712,6 +2943,7 @@ export class Engine {
       const lead = `lead:${slug}`;
       const s = this.leadStatus(slug);
       if (!s || !this.liveAt(lead)) continue;
+      if (!this.hadRealTurnSince(lead, s.updatedAt)) continue; // before the key or nudged_at is spent: deferred, not lost
       const key = `status-outdated:${slug}:${s.updatedAt}`;
       if (this.db.prepare(`SELECT 1 FROM items WHERE sender = 'orchestrator' AND send_key = ?`).get(key)) continue;
       // the stale nudge already asked for a new status within its window: one ask is enough
@@ -2734,7 +2966,6 @@ export class Engine {
     return out;
   }
 
-  // ---------------------------------------------------------------- decisions
 
   decision(id: string): Decision | null {
     const r = this.db.prepare(`SELECT json FROM decisions WHERE id = ?`).get(id) as { json: string } | undefined;
@@ -2779,6 +3010,7 @@ export class Engine {
         JSON.stringify(d),
         t,
       );
+    linkCardPrs(this.db, d, t);
     if (o.at_level !== "lead") this.ports.mirror(d);
     this.ports.changed();
     return d;
@@ -2795,8 +3027,7 @@ export class Engine {
   }
 
   /**
-   * The asker revises its own unanswered card (2026-11-20: an answer or a direct message from the owner made its options
-   * stale, and only the CoS could withdraw it). Same id; the save bumps rev, so an answer to the old rev is refused as
+   * The asker revises its own unanswered card. Same id; the save bumps rev, so an answer to the old rev is refused as
    * changed. On the owner's Needs you (or Scope pane) it is updated in place and the CoS gets a read-only copy; still
    * waiting for triage, the CoS is told to triage this version; with a thread's lead, the lead is told.
    */
@@ -2819,6 +3050,7 @@ export class Engine {
       r.context = (input.context ?? "").slice(0, 8192);
       r.options = options;
       if (input.blocks !== undefined) r.blocks = parseBlocks(input.blocks);
+      if (input.task) d.orchestrator.task = this.workTask(by, input.task).id;
       // a merge card stays one: the owner's yes is read against its PR, so a revision can't drop it
       if (d.orchestrator.action === "merge" && !(r.blocks ?? []).some((b) => b.kind === "pr")) throw new EngineError("invalid", `${id} is a merge card: its revision needs a pr block (the PR's URL, and a one-line verdict as its note)`);
       if (d.orchestrator.at_level !== "lead") this.gate(d);
@@ -2860,7 +3092,7 @@ export class Engine {
     if (input.revises) return this.revise(by, input.revises, input);
     const t = this.now();
     // a scoping project's lead, or a lead filing into one of its scoping tasks, files into the owner's Scope pane; its
-    // threads still ask it, as always
+    // threads still ask it
     const done = input.scopingDone ? this.scopingDone(by, input) : null;
     const named = input.scopeTask ? this.resolveTask(by, input.scopeTask) : null;
     if (named && done?.task && named.id !== done.task) throw new EngineError("invalid", `scope_task ${named.id} and scoping_done.task ${done.task} name different tasks: give one`);
@@ -2877,6 +3109,7 @@ export class Engine {
     } else if (options.some((o) => o.go)) throw new EngineError("invalid", "only a plan has a go option");
     const atCos = by.role !== "thread";
     const asker = by.address;
+    const workTask = input.task ? this.workTask(by, input.task).id : null;
     return tx(this.db, () => {
       if (input.key) {
         const dup = this.db.prepare(`SELECT id FROM decisions WHERE asker = ? AND json_extract(json, '$.request_key') = ? AND state IN ('open','asked')`).get(asker, input.key) as { id: string } | undefined;
@@ -2930,6 +3163,7 @@ export class Engine {
           plan,
           ...(done ? { scoping_done: done } : {}),
           ...(task ? { scope_task: task } : {}),
+          ...(workTask ? { task: workTask } : {}),
         },
       };
       if (atCos) this.gate(d);
@@ -2952,7 +3186,7 @@ export class Engine {
 
   /**
    * A "Scoping done?" card's checks: a scoping project's lead, a plain question, a summary and its PROJECT.md. With task
-   * (1.12.0): one of the lead's open scoping tasks, in a project of either mode, and the file its findings are in.
+   *: one of the lead's open scoping tasks, in a project of either mode, and the file its findings are in.
    */
   private scopingDone(by: Agent, input: AskInput): { summary: string; project_md?: string; doc?: string; task?: string } {
     const s = input.scopingDone!;
@@ -3014,7 +3248,7 @@ export class Engine {
 
   /**
    * A lead files its thread's question up to the CoS. The lead becomes the asker: the answer comes to it. With
-   * `scopeTask`, or from a thread started for a scoping task that is still open (1.12.0), it goes to the owner's Scope
+   * `scopeTask`, or from a thread started for a scoping task that is still open, it goes to the owner's Scope
    * pane under that task instead.
    */
   forward(by: Agent, id: string, note: string | null, scopeTask: string | null = null): Decision {
@@ -3105,7 +3339,7 @@ export class Engine {
 
   /**
    * A lead settles its own thread's question: from a project rule, or with no rule (null or "") as its own call, which
-   * needs a note saying why (the owner approved it, 2026-11-13: leads without standing rules still close their threads' cards).
+   * needs a note saying why.
    */
   /** `revision`: the version of the thread's question the lead answers (0 or left out: never revised); a newer one is refused. */
   leadAnswer(by: Agent, id: string, ruleId: string | null, option: string, note: string | null, revision = 0): Decision {
@@ -3133,7 +3367,7 @@ export class Engine {
   /**
    * Whether a message from `sender` to `to` about card `d` is its lead relaying its own call: an open question at lead
    * level (never forwarded, never a merge card) from that project's lead to the thread that asked it. Such a relay
-   * settles the card, else it stays open for good and the thread can't ack it (agent-v2, 2026-11-13).
+   * settles the card, else it stays open for good and the thread can't ack it.
    */
   private relaySettles(d: Decision, sender: string, to: string): boolean {
     const o = d.orchestrator;
@@ -3248,9 +3482,8 @@ export class Engine {
   }
 
   /**
-   * The owner answered a card: the CoS gets a read-only copy with the project, the card's title and what was chosen
-   * (2026-11-15: it learned the owner's choices late, from whoever acted on them). Once per card: not for the merged
-   * duplicates the answer is copied to, and not when the CoS itself is the asker.
+   * The owner answered a card: the CoS gets a read-only copy with the project, the card's title and what was chosen.
+   * Once per card: not for the merged duplicates the answer is copied to, and not when the CoS itself is the asker.
    */
   private copyAnswerToCos(d: Decision, what: string): void {
     const o = d.orchestrator;
@@ -3268,7 +3501,7 @@ export class Engine {
     });
   }
 
-  /** The answer goes to the asker (2026-11-13; the CoS gets a copy of the owner's answers); merged duplicates get a copy, each to its own asker. */
+  /** The answer goes to the asker (the CoS gets a copy of the owner's answers); merged duplicates get a copy, each to its own asker. */
   private relay(d: Decision): void {
     const a = d.answer!;
     const what = `${a.option ? `option ${a.option} ${JSON.stringify(a.label)}` : "no option"}${a.text ? `, note: ${JSON.stringify(a.text)}` : ""}`;
@@ -3321,7 +3554,6 @@ export class Engine {
     });
   }
 
-  // ---------------------------------------------------------------- batching and the quality gate (2026-11-16)
 
   /**
    * A card entering the owner's Needs you while the same lead has another card there from the same
@@ -3437,7 +3669,6 @@ export class Engine {
     });
   }
 
-  // ---------------------------------------------------------------- moot cards (2026-11-15)
 
   /**
    * The CoS takes a card off the owner's Needs you because it no longer needs an answer (the PR merged, the asker
@@ -3489,7 +3720,6 @@ export class Engine {
     if (d.withdrawn?.moot) throw new EngineError("bad_state", `${d.id} was marked moot by ${d.withdrawn.by} (${d.withdrawn.reason}); it is off Needs you and nothing was sent`);
   }
 
-  // ---------------------------------------------------------------- the owner's writes (from the screens only)
 
   personAnswer(id: string, rev: number, option: string | null, text: string | null, via: "desktop" | "phone" | "voice"): Decision {
     return tx(this.db, () => {
@@ -3515,7 +3745,7 @@ export class Engine {
       this.relay(d);
       this.copyAnswerToCos(d, `option ${opt ? `${opt.id} ${JSON.stringify(opt.label)}` : "none"}${t ? `, note: ${JSON.stringify(t)}` : ""}`);
       // "Scoping done?": only option 1 is the yes; "Not yet" or a note alone keeps scoping (the note went to the lead). A
-      // task's closes only that task (1.12.0); the project's mode and its other tasks stay as they are.
+      // task's closes only that task; the project's mode and its other tasks stay as they are.
       const sd = d.orchestrator.scoping_done;
       if (sd && d.project && opt?.id === "1") {
         if (sd.task) this.closeTask(sd.task, "done", "person", d.id, sd.summary, sd.doc ?? null);
@@ -3591,7 +3821,6 @@ export class Engine {
     });
   }
 
-  // ---------------------------------------------------------------- rules (rows come only from the owner)
 
   addRule(p: { text: string; project: string | null; kinds: string[]; expiresAt: number | null; source: string; match?: RuleMatch | null }): Rule {
     // a practice settles nothing, so it never shares a row with the kinds that settle, nor matches cards
@@ -3626,7 +3855,6 @@ export class Engine {
     return this.rules().filter((r) => r.revokedAt === null && (r.expiresAt === null || r.expiresAt > t));
   }
 
-  // ---------------------------------------------------------------- rules from answers (2026-11-16)
   // After the owner answers a card, the engine looks for earlier cards they answered the same way (rules.ts sameWay).
   // The CoS is offered a rule once per set of cards; it proposes one with triage(propose_rule), the owner gets one
   // "Make this a rule?" card, and their yes adds the rule, which then settles the cards it matches (ruleSettles).
@@ -3868,7 +4096,6 @@ export class Engine {
     });
   }
 
-  // ---------------------------------------------------------------- board, notices, reports
 
   boardAdd(kind: string, from: string | null, project: string | null, title: string, body: string, ref: string | null): void {
     this.db.prepare(`INSERT INTO board (id, kind, from_address, project, title, body, ref, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(`b-${hex(6)}`, kind, from, project, title.slice(0, 200), body.slice(0, 8000), ref, this.now());
@@ -3876,7 +4103,7 @@ export class Engine {
   }
 
   board(limit = 200): BoardRow[] {
-    return (this.db.prepare(`SELECT * FROM board ORDER BY at DESC LIMIT ?`).all(limit) as { id: string; kind: string; from_address: string | null; project: string | null; title: string; body: string; ref: string | null; at: number }[]).map((r) => ({
+    return (this.db.prepare(`SELECT * FROM board ORDER BY at DESC, rowid ASC LIMIT ?`).all(limit) as { id: string; kind: string; from_address: string | null; project: string | null; title: string; body: string; ref: string | null; at: number }[]).map((r) => ({
       id: r.id,
       kind: r.kind,
       from: r.from_address,
@@ -3899,16 +4126,17 @@ export class Engine {
     return tx(this.db, () => {
       this.boardAdd(pr ? "pr" : "report", by.address, by.project, oneLine(title, 120, "title"), body, pr);
       if (by.role !== "thread") return "On the board.";
+      // a reported PR belongs to the thread's task even if bb never reads it: unread, it keeps the task off Shipped
+      if (pr) linkPr(this.db, pr, addressTask(this.db, by.address), "report", by.address, this.now());
       const lead = `lead:${by.project}`;
       const it = this.put({ recipient: lead, sender: by.address, kind: "notice", ref: ref?.startsWith("i-") ? ref : null, body: `report: ${JSON.stringify(title)}${pr ? ` (${pr})` : ""}. It is on the board.`, needsAck: false });
-      // a report wakes its lead: new threads' turn ends no longer do (parentNotifications "stuck", 2026-11-20)
+      // a report wakes its lead: new threads' turn ends do not (parentNotifications "stuck")
       if (this.settings.batchInbox) this.batch.policy(it.id, { severity: "ACTION" });
       const closed = this.replyCloses(by, lead, ref?.trim() || null, { id: it.id, body: `report ${JSON.stringify(title)}${pr ? ` (${pr})` : ""}: ${body}` });
       return `On the board and sent to your lead.${closed ? ` It closes ${closed.id} as replied.` : ""}`;
     });
   }
 
-  /** Tell an agent's supervisor something (failures, a finished worker). */
   /** wake: an ACTION notice (a failure, a thread blocked on a prompt); a plain turn end stays INFO, for the next digest. */
   notifySupervisor(a: Agent, body: string, wake = false, key: string | null = null): void {
     const sup = this.supervisorOf(a);
@@ -3917,7 +4145,34 @@ export class Engine {
     if (wake && this.settings.batchInbox) this.batch.policy(it.id, { severity: "ACTION" });
   }
 
-  /** A host alarm for the Steward. */
+  /** Only a batch wake carries these: per-message delivery would send each one alone and could start a runtime for it. */
+  roleToolsChanged(changes: readonly { role: Role; key: string; body: string }[]): string[] {
+    if (!this.settings.batchInbox) return [];
+    return tx(this.db, () => {
+      const told: string[] = [];
+      for (const c of changes)
+        for (const a of this.agents()) {
+          // unknown: a role given to a running thread, before the clock's first status read
+          if (a.role !== c.role || !["active", "idle", "unknown"].includes(a.status)) continue;
+          this.put({ recipient: a.address, sender: "orchestrator", kind: "notice", ref: null, body: c.body, key: `${roleToolsPrefix(a.threadId)}${c.key}`, needsAck: false });
+          told.push(a.address);
+        }
+      return told;
+    });
+  }
+
+  /** A role-tools notice is about one thread's process: whoever holds the address next started with the new tools. */
+  private dropRoleToolsNotices(a: Agent): void {
+    const prefix = roleToolsPrefix(a.threadId);
+    const ids = this.db
+      .prepare(`SELECT id FROM items WHERE recipient = ? AND kind = 'notice' AND sender = 'orchestrator' AND substr(send_key, 1, ?) = ?`)
+      .all(a.address, prefix.length, prefix) as { id: string }[];
+    for (const { id } of ids) {
+      this.closeItems(`id = ?`, [id], "superseded", "its thread no longer holds the address");
+      this.batch.dropped(id);
+    }
+  }
+
   alarm(level: string, snapshot: Record<string, unknown>, summary: string): Item | null {
     const steward = this.agentByAddress("steward");
     const id = `a-${hex(4)}`;
@@ -3934,7 +4189,6 @@ export class Engine {
   }
 
 
-  // ---------------------------------------------------------------- projects (phase 2): priority and hold, from the owner
 
   ensureProject(slug: string, bbProjectId: string | null): void {
     this.db.prepare(`INSERT OR IGNORE INTO projects (slug, bb_project_id, created_at) VALUES (?, ?, ?)`).run(slug, bbProjectId, this.now());
@@ -3942,14 +4196,14 @@ export class Engine {
   }
 
   project(slug: string): ProjectRow | null {
-    const r = this.db.prepare(`SELECT * FROM projects WHERE slug = ?`).get(slug) as { slug: string; bb_project_id: string | null; priority: string; held_at: number | null; archived_at: number | null; created_at: number; mon_type: string | null; mode: string | null } | undefined;
-    return r ? { slug: r.slug, bbProjectId: r.bb_project_id, priority: r.priority as Priority, heldAt: r.held_at, archivedAt: r.archived_at, createdAt: r.created_at, monType: (typeFamily(r.mon_type)?.type ?? null), mode: r.mode === "scoping" ? "scoping" : "active" } : null;
+    const r = this.db.prepare(`SELECT * FROM projects WHERE slug = ?`).get(slug) as ProjectDbRow | undefined;
+    return r ? toProjectRow(r) : null;
   }
 
   projects(): ProjectRow[] {
     const rank = (p: string) => PRIORITIES.indexOf(p as Priority);
-    return (this.db.prepare(`SELECT slug FROM projects`).all() as { slug: string }[])
-      .map((r) => this.project(r.slug)!)
+    return (this.db.prepare(`SELECT * FROM projects`).all() as ProjectDbRow[])
+      .map(toProjectRow)
       .sort((a, b) => rank(a.priority) - rank(b.priority) || a.slug.localeCompare(b.slug));
   }
 
@@ -3969,14 +4223,12 @@ export class Engine {
     });
   }
 
-  // ---------------------------------------------------------------- scoping mode (1.11.0)
   // While a project is scoping, the owner works its scope out with its lead directly, in the Scope tab: the lead's cards
   // (questions, plans) and deliverables go only there. They skip the CoS's triage and Needs you, no standing rule settles
   // them, and the CoS gets a read-only copy of each. The lead proposes the end with a "Scoping done?" card; the owner's
   // yes (or the CoS's orch_project_mode) makes the project active, and what still waits in the pane moves to the
   // normal places then, so nothing is stranded in neither.
 
-  /** Whether the project's lead files into the Scope pane now. */
   isScoping(project: string | null): boolean {
     return !!project && this.project(project)?.mode === "scoping";
   }
@@ -3998,7 +4250,7 @@ export class Engine {
       this.event({ kind: "mode", project: slug, address: `lead:${slug}`, threadId: null, value: mode, note: by, ref: card });
       const o = this.owner;
       const who = by === "person" ? o.Name : by;
-      // what waits under a scoping task still open stays: the task is scoped on its own (1.12.0)
+      // what waits under a scoping task still open stays: the task is scoped on its own
       const moved = mode === "active" ? this.releaseScope(slug, (task) => !task || this.task(task)?.state !== "scoping", by, card, `${slug} is active now (${who} ended scoping)`) : 0;
       const what =
         mode === "scoping"
@@ -4065,7 +4317,6 @@ export class Engine {
     return moved;
   }
 
-  /** One scoping task (1.12.0), or null. */
   task(id: string): ScopingTask | null {
     const r = this.db.prepare(`SELECT * FROM scoping_tasks WHERE id = ?`).get(id) as TaskRow | undefined;
     return r ? toTask(r) : null;
@@ -4176,7 +4427,7 @@ export class Engine {
   }
 
   /**
-   * Who plans an open scoping task (1.13.0): its scoping thread (the newest live thread orch_spawn_thread started with
+   * Who plans an open scoping task: its scoping thread (the newest live thread orch_spawn_thread started with
    * the task or the owner picked for it; a handoff moves the spawn row to the successor), or null while the lead plans it itself. A stopped or
    * archived thread plans nothing. The owner's Scope tab and the lead's inbox both read this, so they say the same.
    */
@@ -4195,7 +4446,7 @@ export class Engine {
   }
 
   /**
-   * The owner makes a thread a scoping thread from the Projects view (1.13.0): of an open task of its project (`task`, its
+   * The owner makes a thread a scoping thread from the Projects view: of an open task of its project (`task`, its
    * id or name), or of a new one they open for it (`name`, through openTask's own path). Its spawn row names the task, as
    * orch_spawn_thread's scope_task does, so the cards its lead forwards from it go to the Scope pane under the task; the
    * owner's pick plans the task (taskPlanner). The thread is told to investigate read-only, the lead which thread plans
@@ -4238,7 +4489,7 @@ export class Engine {
   }
 
   /**
-   * The owner's "Stop scoping" on a thread (1.13.0): it is no longer its task's scoping thread, and the cards its lead
+   * The owner's "Stop scoping" on a thread: it is no longer its task's scoping thread, and the cards its lead
    * forwards from it go the normal way again. The task stays open, planned by the lead (or by another live scoping thread
    * of it); dropping it is the lead's. The thread, the lead and the CoS are told; a timeline event records it. A thread
    * that scopes no open task: a no-op (null).
@@ -4309,7 +4560,7 @@ export class Engine {
 
   /**
    * What waits on the owner in the Scope pane, per project: those scoping as a whole and those with open scoping tasks
-   * (1.12.0). Each has its open tasks, its open cards and its deliverables in review; each card and deliverable names its
+   * Each has its open tasks, its open cards and its deliverables in review; each card and deliverable names its
    * task (scope_task), or none for the whole project.
    */
   scopeView(): { slug: string; whole: boolean; tasks: ScopingTask[]; cards: Decision[]; deliverables: Deliverable[] }[] {
@@ -4376,6 +4627,7 @@ export class Engine {
       const agents = this.agents().filter((a) => a.project === slug && (a.role === "lead" || a.role === "thread"));
       const note = "project archived";
       for (const a of agents) {
+        this.dropRoleToolsNotices(a);
         this.closeItems(`recipient = ?`, [a.address], "superseded", note);
         this.db.prepare(`UPDATE agents SET retired_at = ? WHERE thread_id = ? AND retired_at IS NULL`).run(this.now(), a.threadId);
         this.event({ kind: "retire", project: a.project, address: a.address, threadId: a.threadId });
@@ -4416,7 +4668,7 @@ export class Engine {
     const events = this.db.prepare(`SELECT * FROM events WHERE project = ? ORDER BY at, seq`).all(slug) as unknown as EventRow[];
     const addresses = new Set([...agents.map((a) => a.address), ...events.map((e) => e.address).filter((x): x is string => !!x)]);
     const ours = (addr: string) => addresses.has(addr);
-    const decisions: DecisionLite[] = (this.db.prepare(`SELECT json FROM decisions WHERE project = ? OR asker IN (SELECT address FROM agents WHERE project = ?)`).all(slug, slug) as { json: string }[]).map((r) => {
+    const decisions: DecisionLite[] = (this.db.prepare(`SELECT json FROM decisions WHERE project = ? OR asker IN (SELECT address FROM agents WHERE project = ?) ORDER BY rowid`).all(slug, slug) as { json: string }[]).map((r) => {
       const d = JSON.parse(r.json) as Decision;
       const end = d.answer?.at ?? d.withdrawn?.at ?? (d.state === "merged" || d.state === "acked" ? d.updated_at : null);
       return {
@@ -4452,7 +4704,9 @@ export class Engine {
     const t = this.now();
     const since = t - SUMMARY_DONE_MS;
     const projects = this.db.prepare(`SELECT slug, held_at FROM projects WHERE archived_at IS NULL`).all() as { slug: string; held_at: number | null }[];
-    const agents = this.db.prepare(`SELECT thread_id, address, role, project, status, idle_at, retired_at FROM agents WHERE role IN ('lead','thread') AND project IS NOT NULL`).all() as (SummaryInput["agents"][number] & { project: string })[];
+    // every agent row once: the leads' and threads' by project, and every address for what a wait may name (refAgents)
+    const everyAgent = this.db.prepare(`SELECT thread_id, address, role, project, status, idle_at, retired_at FROM agents`).all() as (SummaryInput["agents"][number] & { project: string | null })[];
+    const agents = everyAgent.filter((a): a is SummaryInput["agents"][number] & { project: string } => (a.role === "lead" || a.role === "thread") && a.project !== null);
     const statuses = new Map((this.db.prepare(`SELECT project, json FROM lead_status`).all() as { project: string; json: string }[]).map((r) => [r.project, JSON.parse(r.json) as LeadStatus]));
     const decisions = (
       this.db
@@ -4470,16 +4724,24 @@ export class Engine {
     const waits = this.db.prepare(`SELECT id, owner, pr_url, cond, created_at FROM waits WHERE closed_at IS NULL`).all() as HistoryInput["waits"];
     const prs = this.db.prepare(`SELECT thread_id, url, number, state, checks, sig, attention, seen_at FROM prs`).all() as SummaryInput["prs"];
     const deliverables = this.db.prepare(`SELECT id, project, title, state, updated_at FROM deliverables WHERE state = 'review' OR (state = 'approved' AND updated_at >= ?)`).all(since) as { id: string; project: string | null; title: string; state: string; updated_at: number }[];
-    const merged = this.db.prepare(`SELECT project, at, ref, note FROM events WHERE kind = 'pr' AND value = 'merged' AND at >= ? AND project IS NOT NULL`).all(since) as { project: string; at: number; ref: string | null; note: string | null }[];
-    const reports = this.db.prepare(`SELECT project, title, at FROM board WHERE kind IN ('report','pr') AND at >= ? AND project IS NOT NULL AND from_address LIKE 'thread:%'`).all(since) as { project: string; title: string; at: number }[];
+    const merged = this.db.prepare(`SELECT project, at, ref, note FROM events WHERE kind = 'pr' AND value = 'merged' AND at >= ? AND project IS NOT NULL ORDER BY project, at, rowid`).all(since) as { project: string; at: number; ref: string | null; note: string | null }[];
+    const reports = this.db.prepare(`SELECT project, title, at FROM board WHERE kind IN ('report','pr') AND at >= ? AND project IS NOT NULL AND from_address LIKE 'thread:%' ORDER BY rowid`).all(since) as { project: string; title: string; at: number }[];
     // the latest finished thing at any age, for a quiet row: a report, an approved deliverable or a merged PR
     const last = new Map<string, { text: string; at: number }>();
     const later = (project: string | null, text: string, at: number) => {
       if (project && at > (last.get(project)?.at ?? 0)) last.set(project, { text, at });
     };
-    for (const r of this.db.prepare(`SELECT project, title, MAX(at) AS at FROM board WHERE kind IN ('report','pr') AND project IS NOT NULL GROUP BY project`).all() as { project: string; title: string; at: number }[]) later(r.project, r.title, r.at);
+    // INDEXED BY: without statistics the planner walks every report by kind and sorts them. Of the rows at a project's
+    // latest time, the first written (lowest rowid) is the one; so for merges, where the indexes would otherwise break
+    // ties by title or PR number.
+    for (const r of prepareHinted(
+      this.db,
+      "board_reports",
+      `SELECT m.project, (SELECT title FROM board WHERE kind IN ('report','pr') AND project = m.project AND at = m.at ORDER BY rowid LIMIT 1) AS title, m.at FROM (SELECT project, MAX(at) AS at FROM board INDEXED BY board_reports WHERE kind IN ('report','pr') AND project IS NOT NULL GROUP BY project) m`,
+    ).all() as { project: string; title: string; at: number }[])
+      later(r.project, r.title, r.at);
     for (const r of this.db.prepare(`SELECT project, title, MAX(updated_at) AS at FROM deliverables WHERE state = 'approved' GROUP BY project`).all() as { project: string | null; title: string; at: number }[]) later(r.project, `Approved: ${r.title}`, r.at);
-    for (const r of this.db.prepare(`SELECT project, note, MAX(at) AS at FROM events WHERE kind = 'pr' AND value = 'merged' AND project IS NOT NULL GROUP BY project`).all() as { project: string; note: string | null; at: number }[]) later(r.project, `PR ${r.note ? `#${r.note} ` : ""}merged`, r.at);
+    for (const r of this.db.prepare(`SELECT m.project, (SELECT note FROM events WHERE kind = 'pr' AND value = 'merged' AND project = m.project AND at = m.at ORDER BY rowid LIMIT 1) AS note, m.at FROM (SELECT project, MAX(at) AS at FROM events WHERE kind = 'pr' AND value = 'merged' AND project IS NOT NULL GROUP BY project) m`).all() as { project: string; note: string | null; at: number }[]) later(r.project, `PR ${r.note ? `#${r.note} ` : ""}merged`, r.at);
     // the cards the leads' own waits and blockers name, in any state, to drop a wait that was answered
     const active = new Set(projects.map((p) => p.slug));
     const named = [...statuses].filter(([slug]) => active.has(slug)).flatMap(([, s]) => [...waitsOf(s).filter((w) => w.kind === "owner" && w.ref?.startsWith("d-")).map((w) => w.ref!), ...s.blockers.flatMap((b) => b.match(/\bd-[0-9A-Za-z-]+/g) ?? [])]);
@@ -4504,7 +4766,7 @@ export class Engine {
     const refPrs = new Map<string, { state: string | null; seen_at: number }>();
     for (const x of prs) if (x.url && x.seen_at >= (refPrs.get(x.url)?.seen_at ?? -1)) refPrs.set(x.url, { state: x.state, seen_at: x.seen_at });
     const refAgents = new Map<string, boolean>();
-    for (const a of this.db.prepare(`SELECT address, status, retired_at FROM agents`).all() as { address: string; status: string; retired_at: number | null }[])
+    for (const a of everyAgent)
       refAgents.set(a.address, (refAgents.get(a.address) ?? false) || (a.retired_at === null && a.status !== "archived"));
     const out = new Map<string, ProjectSummary>();
     for (const p of projects) {
@@ -4543,9 +4805,7 @@ export class Engine {
     return out;
   }
 
-  // ---------------------------------------------------------------- plans and spawns (phase 2): the hard plan gate
 
-  /** Plan cards of a project still waiting for a decision. */
   openPlans(slug: string): number {
     return (this.db.prepare(`SELECT COUNT(*) AS c FROM decisions WHERE project = ? AND state IN ('open','asked') AND json_extract(json, '$.kind') = 'plan'`).get(slug) as { c: number }).c;
   }
@@ -4562,7 +4822,7 @@ export class Engine {
 
   /**
    * Reserve one of a plan's thread slots before spawning; confirm with the new thread's id, or release on failure. With
-   * `scopeTask` (1.12.0) the thread is that open task's scoping thread: its spawn row names the task.
+   * `scopeTask` the thread is that open task's scoping thread: its spawn row names the task.
    */
   reserveSpawn(lead: Agent, planId: string, scopeTask: string | null = null): string {
     if (lead.role !== "lead") throw new EngineError("forbidden", "only a lead starts threads");
@@ -4572,8 +4832,10 @@ export class Engine {
       const used = (this.db.prepare(`SELECT COUNT(*) AS c FROM spawns WHERE plan_id = ?`).get(planId) as { c: number }).c;
       if (used >= d.orchestrator.plan!.threads) throw new EngineError("bad_state", `${planId} allows ${d.orchestrator.plan!.threads} thread(s); all started`);
       const task = scopeTask ? this.resolveTask(lead, scopeTask).id : null;
+      // the plan's work-board task, while it isn't dropped: the thread is attached to it
+      const work = d.orchestrator.task ? (this.db.prepare(`SELECT id FROM tasks WHERE id = ? AND state <> 'dropped'`).get(d.orchestrator.task) as { id: string } | undefined)?.id ?? null : null;
       const token = `pending:${hex(4)}`;
-      this.db.prepare(`INSERT INTO spawns (thread_id, plan_id, via, lead, created_at, scope_task) VALUES (?, ?, 'plan', ?, ?, ?)`).run(token, planId, lead.address, this.now(), task);
+      this.db.prepare(`INSERT INTO spawns (thread_id, plan_id, via, lead, created_at, scope_task, task) VALUES (?, ?, 'plan', ?, ?, ?, ?)`).run(token, planId, lead.address, this.now(), task, work);
       return token;
     });
   }
@@ -4619,7 +4881,6 @@ export class Engine {
     return rows.length;
   }
 
-  // ---------------------------------------------------------------- environments, PRs, resolve, handoff (phase 2)
 
   setEnvironment(threadId: string, environmentId: string | null): void {
     this.db.prepare(`UPDATE agents SET environment_id = ? WHERE thread_id = ? AND retired_at IS NULL AND environment_id IS NOT ?`).run(environmentId, threadId, environmentId);
@@ -4659,8 +4920,8 @@ export class Engine {
    *
    * A change is one of state, checks, review or mergeability. GitHub reads mergeable UNKNOWN while it recomputes after
    * any push to the base, and bb then derives another attention ("review requested", "blocked", none) until the next
-   * reading flips back: PR 1100 sent 45 notices at an unchanged head (2026-11-13/14). An unknown mergeability keeps the
-   * last known one, and the notice says only what the signature holds, so two notices in a row never read the same.
+   * reading flips back, which would send a notice at an unchanged head. An unknown mergeability keeps the last known
+   * one, and the notice says only what the signature holds, so two notices in a row never read the same.
    *
    * Each PR has its own row in the environment (prFor reads the newest open one). `linking`: the first reading of a PR
    * the thread reported from another branch (core/pr-links.ts) links it quietly, with no Board row, notice or log line,
@@ -4668,20 +4929,22 @@ export class Engine {
    */
   prSeen(a: Agent, environmentId: string, res: PrResult, label = "", linking = false): boolean {
     // the environment's PRs are its live holder's: a handoff successor shares the environment, and an unchanged reading
-    // below writes nothing, so the rows kept naming the retired predecessor (2026-11-19). Quiet: the PR didn't change.
+    // below writes nothing, so the rows kept naming the retired predecessor. Quiet: the PR didn't change.
     this.db.prepare(`UPDATE prs SET thread_id = ? WHERE environment_id = ? AND thread_id <> ?`).run(a.threadId, environmentId, a.threadId);
     if (res.outcome !== "available") return false;
     const pr = res.pullRequest;
+    // the PR belongs to its holder's task for good (on every reading, so a thread filed later links on its next one)
+    linkPr(this.db, pr.url, addressTask(this.db, a.address), "bb", a.address, this.now());
     // bb reads this PR now: a PR wait's own gh reading of it is older news (bb's reading is kept when it has one)
     this.db.prepare(`DELETE FROM pr_readings WHERE url = ?`).run(pr.url.replace(/\/+$/, ""));
     const old = this.db.prepare(`SELECT url, state, checks, attention, sig FROM prs WHERE environment_id = ? AND url = ?`).get(environmentId, pr.url) as
       | { url: string | null; state: string | null; checks: string | null; attention: string | null; sig: string }
       | undefined;
-    const legacy = old !== undefined && !old.sig.startsWith("v2|"); // written before 1.3.0: url|state|attention|checks
+    const legacy = old !== undefined && !old.sig.startsWith("v2|"); // older signature: url|state|attention|checks
     const prev = !old || old.url !== pr.url ? null : legacy ? { merge: old.attention === "conflicts" ? "conflicts" : null } : { merge: old.sig.split("|")[5] || null };
     const { checks, review, merge, queued, sig, ready, shown } = prFacts(pr, prev ? prev.merge : undefined);
     if (old?.sig === sig) return false;
-    // the first reading after the upgrade only rewrites the signature: a changed format, or an old merge word for the same state, is no news
+    // a changed signature format, or an old merge word for the same state, is no news: the first reading only rewrites it
     const was = old && !legacy ? old.sig.split("|") : null;
     const reworded = !!was && [...was.slice(0, 5), approvalWord(was[2] ?? null, was[4] || null, was[5] || null) ?? "", ...was.slice(6)].join("|") === sig;
     const linked = linking && !old;
@@ -4714,7 +4977,7 @@ export class Engine {
   /**
    * The PRs of live environments that bb's readings this pass (`bb`, by environment) didn't cover, to read by URL with gh
    * (core/pr-links.ts). `linked`: an environment's other PR, not merged or closed yet, where bb answered for the
-   * environment (another PR, or none). Where bb didn't answer (a machine that's off) nothing is read, as before: the
+   * environment (another PR, or none). Where bb didn't answer (a machine that's off) nothing is read: the
    * environment's own PR must not go back and forth between bb's reading and gh's. Not linked: a PR a live thread
    * reported (orch_report pr, any holder of its address) that no row of its environment holds, and that no other live
    * environment holds either (bb read it there, on its own branch: it is that thread's PR).
@@ -4754,7 +5017,7 @@ export class Engine {
    * in its base branch or pushed), and its PR is merged, its branch is in its base branch (a local merge, no PR), its
    * PR was closed without merging and it has reported, its open PR is handed off to someone else (`handedOff`, recorded
    * for the project page), or the owner has read the thread since its last report. The role is retired; the caller then archives the thread
-   * and its handoff predecessors (requested 2026-11-14: resolve = retire + archive).
+   * and its handoff predecessors.
    */
   resolve(lead: Agent, to: string, facts: { prMerged: boolean; prClosed?: boolean; lastReadAt: number | null; worktree?: Verdict; handedOff?: HandedOffIn | null }): string {
     if (lead.role !== "lead") throw new EngineError("forbidden", "only a lead resolves threads");
@@ -4786,7 +5049,7 @@ export class Engine {
       if (this.lastReportAt(to) === null) throw new EngineError("bad_state", `${to}'s PR was closed and it has no report: it reports with orch_report first`);
       why = "its PR was closed without merging and it has reported";
     } else if (off) {
-      // the PR stays open, but it is someone else's now (2026-11-17): the project page lists it under Handed off
+      // the PR stays open, but it is someone else's now: the project page lists it under Handed off
       why = `its open PR is handed off to ${off.owner}`;
     } else {
       const rep = this.lastReportAt(to);
@@ -4801,6 +5064,8 @@ export class Engine {
         this.db
           .prepare(`INSERT INTO handed_off_prs (project, thread_address, thread_id, pr, owner, note, by_address, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
           .run(t.project, t.address, t.threadId, off.pr, off.owner, off.note, lead.address, this.now());
+      // the handed-off PR stays on the thread's task, whatever bb's last reading of it was: it blocks Shipped until it merges
+      if (off) linkPr(this.db, off.pr, addressTask(this.db, t.address), "handoff", t.address, this.now());
       this.boardAdd("resolved", lead.address, lead.project, `${to} resolved: ${why}`, `Its worktree is clean (${w.why}); the thread is archived.`, t.threadId);
     });
     return `Resolved ${to} (${why === w.why ? why : `${why}; worktree clean: ${w.why}`}).`;
@@ -4817,8 +5082,7 @@ export class Engine {
   /**
    * The handoff predecessors of a thread, oldest first: takeOver retires the old holder of the address and adds the
    * successor in one step, so a predecessor's retired_at is its successor's created_at (the first holder often has no
-   * environment recorded, so the environment can't link them). Before 1.2.0 the two came from two clock reads, so a
-   * second's gap is allowed. Resolving the successor archives these first.
+   * environment recorded, so the environment can't link them). A second's gap is allowed. Resolving the successor archives these first.
    */
   predecessors(threadId: string): string[] {
     const prev = this.db.prepare(
@@ -4883,7 +5147,6 @@ export class Engine {
     });
   }
 
-  // ---------------------------------------------------------------- outputs (phase 3): finished artefacts for the owner
 
   /**
    * A lead or thread records a finished artefact. A file must be absolute, exist, and resolve (symlinks followed)
@@ -4955,7 +5218,6 @@ export class Engine {
     this.ports.changed();
   }
 
-  // ---------------------------------------------------------------- pinned documents (core/pins.ts)
 
   /**
    * Pins a document to a project's strip. `target`: an http(s) URL (outputUrl), a deliverable id of this project, or an
@@ -4999,7 +5261,6 @@ export class Engine {
     return pinViews(this.db, project);
   }
 
-  // ---------------------------------------------------------------- deliverables: a lead's finished work, with proof, for the owner
 
   deliverable(id: string): Deliverable | null {
     const r = this.db.prepare(`SELECT id, json FROM deliverables WHERE id = ?`).get(id) as DeliverableDbRow | undefined;
@@ -5027,11 +5288,11 @@ export class Engine {
            updated_at = excluded.updated_at, json = excluded.json`,
       )
       .run(d.id, d.project, d.lead, d.title, d.summary, d.state, d.rev, d.createdAt, d.updatedAt, JSON.stringify(d));
+    linkDeliverablePrs(this.db, d, d.updatedAt);
     this.readme(d);
     this.ports.changed();
   }
 
-  // ---------------------------------------------------------------- a deliverable's own folder (2026-11-17)
 
   /** Its README follows every save (state, revision, retitle). A failed write is logged, never a failed save. */
   private readme(d: Deliverable): void {
@@ -5081,7 +5342,7 @@ export class Engine {
   }
 
   /**
-   * One-time and idempotent (run on every start): copy the surviving files of deliverables filed before 2026-11-17 into
+   * One-time and idempotent (run on every start): copy the surviving files of earlier deliverables into
    * their folders, and record the missing ones. Each proof item it files is marked, so a second run copies nothing. It
    * isn't activity: updated_at, the Board and pushes are untouched.
    */
@@ -5173,6 +5434,7 @@ export class Engine {
     const k = keepFile(d.folder, src, this.ports.files?.()?.maxBytes ?? COPY_MAX);
     if (k.stored === "failed") throw new Error(`${src} not copied into ${d.folder}: ${k.why}`);
     this.readme(d);
+    this.ports.changed([FOLDER_FILES]);
     return k;
   }
 
@@ -5216,7 +5478,7 @@ export class Engine {
 
   /**
    * A lead hands the owner a finished deliverable with proof, or (`revises`) a new revision of one the owner sent back. It goes
-   * into his review, a quiet Activity row records it, and the push hook fires.
+   * into the owner's review, a quiet Activity row records it, and the push hook fires.
    */
   deliver(by: Agent, input: DeliverInput, place: DeliverPlace): Deliverable {
     if (by.role !== "lead") throw new EngineError("forbidden", `only a lead delivers to ${this.owner.name}; threads deliver to their lead (orch_report, orch_output)`);
@@ -5230,17 +5492,18 @@ export class Engine {
     const points = parsePoints(input.points);
     return tx(this.db, () => {
       const t = this.now();
-      // scoping (1.11.0): reviewed in the owner's Scope pane, not on Deliverables; no push, a read-only copy to the CoS.
-      // A scoping task's (1.12.0) too; a revision stays in the task its earlier rev was in while that task is open.
+      // scoping: reviewed in the owner's Scope pane, not on Deliverables; no push, a read-only copy to the CoS.
+      // A scoping task's too; a revision stays in the task its earlier rev was in while that task is open.
       if (input.board && input.scopeTask) throw new EngineError("invalid", "board and scope_task route a deliverable to different places: give one");
       let task = input.scopeTask ? this.resolveTask(by, input.scopeTask).id : null;
+      const workTask = input.task ? this.workTask(by, input.task).id : null;
       let scoping = !input.board && (!!task || this.isScoping(by.project));
       let d: Deliverable;
       let board: Deliverable["board"] = input.board ? { id: input.board.id, ...(input.board.record ? { record: input.board.record } : {}), ...(input.board.flag ? { flag: input.board.flag } : {}) } : undefined;
       if (input.revises) {
         d = this.mustDeliverable(input.revises);
         if (d.lead !== by.address) throw new EngineError("forbidden", `${d.id} is ${d.lead}'s deliverable`);
-        // still in review too (2026-11-21): a newer deliverable on the same topic replaces it in place, not beside it
+        // still in review too: a newer deliverable on the same topic replaces it in place, not beside it
         if (d.state !== "changes" && d.state !== "review") throw new EngineError("bad_state", `${d.id} is ${d.state}: revise only a deliverable still in review or one ${this.owner.name} sent back with changes`);
         // an old-schema lead revises without board: the revision stays on its board. Still in review, its flag is
         // unanswered, so it stays and the new revision gets its own Needs you card; sent back, the owner already settled it.
@@ -5266,6 +5529,7 @@ export class Engine {
         else delete d.scope_task;
         if (board) d.board = board;
         else delete d.board;
+        if (workTask) d.task = workTask;
         this.saveDeliverable(d);
         // The owner's request is answered by the new revision: its item would otherwise be resent and dead-lettered
         this.closeItems(`recipient = ? AND kind = 'deliverable.changes' AND ref = ?`, [by.address, d.id], "done", `re-delivered as rev ${d.rev}`);
@@ -5287,6 +5551,7 @@ export class Engine {
           ...(scoping ? { scope: true } : {}),
           ...(task ? { scope_task: task } : {}),
           ...(board ? { board } : {}),
+          ...(workTask ? { task: workTask } : {}),
         };
         this.fileInto(d, proof);
         this.saveDeliverable(d);
@@ -5408,7 +5673,7 @@ export class Engine {
 
   /**
    * The owner approves the revision they saw. Without a next action the lead gets a notice and does nothing further.
-   * With one ("forward this to the team", 2026-11-16) the lead gets it as a needs-ack item instead: they act on it and ack
+   * With one ("forward this to the team") the lead gets it as a needs-ack item instead: they act on it and ack
    * with an outcome and a note, which the deliverable then shows (deliverableNext).
    */
   personApprove(id: string, rev: number, note: string | null, next: string | null = null): Deliverable {
@@ -5447,9 +5712,14 @@ export class Engine {
    */
   deliverableNext(d: Deliverable): DeliverableNext | null {
     if (!d.next) return null;
-    const it = this.item(d.next.item);
+    const it = this.db.prepare(`${NEXT_MOVES_SQL} AND id = ?`).get(d.next.item) as { state: string; outcome: string | null; note: string | null; closed_at: number | null } | undefined;
     const state = it?.state === "closed" ? "closed" : it?.state === "dead" ? "dead" : "open";
-    return { ...d.next, state, outcome: state === "closed" ? (it?.outcome ?? null) : null, note: state === "closed" ? (it?.note ?? null) : null, closedAt: state === "closed" ? (it?.closedAt ?? null) : null };
+    return { ...d.next, state, outcome: state === "closed" ? (it?.outcome ?? null) : null, note: state === "closed" ? (it?.note ?? null) : null, closedAt: state === "closed" ? (it?.closed_at ?? null) : null };
+  }
+
+  /** What each derived notice table stands for, printed (write-log.ts DerivedTables). */
+  changePrints(): Record<DerivedTable, () => string> {
+    return { [NEXT_MOVES]: () => JSON.stringify(this.db.prepare(`${NEXT_MOVES_SQL} ORDER BY id`).all()), [OWNER_MAIL]: () => ownerMailPrint(this.db) };
   }
 
   /** The owner sends the revision they saw back with their words. The lead must act on it and re-deliver (`revises`). */
@@ -5478,7 +5748,7 @@ export class Engine {
   }
 
   /**
-   * Deliverables as the CoS and the Steward read them (orch_deliverables, 2026-11-15), per project: the same rows the
+   * Deliverables as the CoS and the Steward read them (orch_deliverables), per project: the same rows the
    * owner's Deliverables tab shows, so there is no second ledger to drift. Each with its state, the owner's latest note,
    * dates, and the proof of its latest revision (URLs and file paths, with captions).
    */
@@ -5518,7 +5788,6 @@ export class Engine {
     return { text: lines.join("\n"), count: rows.length };
   }
 
-  /** A proof by its id, with the deliverable it is in. */
   proof(proofId: string): { deliverableId: string; proof: Proof } | null {
     const r = this.db
       .prepare(`SELECT d.id AS did, p.value AS proof FROM deliverables d, json_each(d.json, '$.revisions') r, json_each(r.value, '$.proof') p WHERE json_extract(p.value, '$.id') = ? LIMIT 1`)
@@ -5535,7 +5804,7 @@ export class Engine {
     if (!found) throw new EngineError("not_found", `no proof ${proofId}`);
     const p = found.proof;
     if (!p.path || (p.kind !== "image" && p.kind !== "video" && p.kind !== "text")) throw new EngineError("not_found", `${proofId} is not a file the proof route serves`);
-    // the deliverable's own copy, else (2026-11-17) the original it was copied from; either must still be the file registered
+    // the deliverable's own copy, else the original it was copied from; either must still be the file registered
     const real = stillFile(p.path) ?? (p.source ? stillFile(p.source) : null);
     if (!real) throw new EngineError("not_found", existsSync(p.path) ? `${proofId}'s file is no longer the one registered` : `${proofId}'s file is gone`);
     if (p.kind === "text") return { path: real, contentType: TEXT_TYPE, maxBytes: TEXT_PROOF_MAX };
@@ -5545,9 +5814,9 @@ export class Engine {
   }
 
   /**
-   * What the proof route may serve for a recorded output (2026-11-17: a third of the Files view's image tiles were blank,
-   * because only proof was served). The same rules as proofFile: only the output's own recorded path, still at that
-   * realpath and a file; an image or video by its extension, or plain text (.txt, .log) capped; never HTML or SVG.
+   * What the proof route may serve for a recorded output. The same rules as proofFile: only the output's own recorded
+   * path, still at that realpath and a file; an image or video by its extension, or plain text (.txt, .log) capped;
+   * never HTML or SVG.
    */
   outputFile(outputId: string): { path: string; contentType: string; maxBytes: number | null } {
     const o = this.output(outputId);
@@ -5569,7 +5838,6 @@ export class Engine {
     return prRow(this.db.prepare(`SELECT * FROM prs WHERE url = ? OR url = ? ORDER BY seen_at DESC LIMIT 1`).get(bare, `${bare}/`) as PrsRow | undefined);
   }
 
-  // ---------------------------------------------------------------- the clock
 
   /** Escalations, deferrals that came due, resends and dead letters. Runs every few seconds; no model involved. */
   tick(): void {
@@ -5591,7 +5859,7 @@ export class Engine {
     // 2. deferrals that came due
     const due = this.db.prepare(`SELECT id FROM decisions WHERE deferred_until IS NOT NULL AND deferred_until <= ? AND state = 'asked'`).all(t) as { id: string }[];
     for (const { id } of due) this.personReturn(id, null, "engine");
-    // 3. mail to an address no live agent holds (retired at once; never held after a grace: 2026-11-17)
+    // 3. mail to an address no live agent holds (a retired holder's at once; one no agent ever held after a grace)
     this.deadLetterOrphans();
     // 4. unacked items whose recipient has been idle long enough: one resend, then a dead letter
     const open = (this.db.prepare(`SELECT * FROM items WHERE state = 'delivered' AND needs_ack = 1`).all() as ItemRow[]).map(toItem);
@@ -5601,16 +5869,15 @@ export class Engine {
       if (external && this.ports.externalEnabled?.(external.source, it.recipient) === false) continue;
       const a = this.agentByAddress(it.recipient);
       if (!a || a.status !== "idle" || a.idleAt === null) continue;
-      // on hold the owner's direct message waits without expiring (PLAN 3.8): the lead answers it after the resume
+      // on hold the owner's direct message waits without expiring: the lead answers it after the resume
       if (it.kind === "owner.message" && a.project && this.project(a.project)?.heldAt) continue;
       // the owner's message to the CoS never goes dead: its feed state says "no reply yet" and offers Resend
       if (it.kind === "owner.cos") continue;
       const since = Math.max(a.idleAt, it.deliveredAt ?? 0);
       if (t - since < this.settings.resendMs) continue;
-      // 2026-11-13: a resend landed thread:agent-v2:9's "squash then QA" 63 min late, after five newer messages from
-      // its lead had been acked; the thread closed it as superseded at once. A message whose sender has since sent
-      // this recipient newer mail that went out is that sender's old word: close it, don't resend it.
-      // the orchestrator's own messages (PR-bound answers coming back) are each their own work, never an older word
+      // a message whose sender has since sent this recipient newer mail that went out is that sender's old word: close it,
+      // don't resend it. The orchestrator's own messages (PR-bound answers coming back) are each their own work, never an
+      // older word
       const newer = it.kind === "message" && it.sender !== "orchestrator" ? this.newerMail(it) : null;
       if (newer) {
         this.closeItems(`id = ?`, [it.id], "superseded", `Not resent: ${it.sender} sent ${it.recipient} newer mail since (${newer}), which went out`);
@@ -5633,10 +5900,16 @@ export class Engine {
     }
     // 9. a lead whose status went stale while it has work going is told once
     this.statusNudges();
+    // 10. the work board's column changes since the last settle are logged (task_moves), once a minute
+    if (this.now() - this.boardSettledAt >= 60_000) {
+      this.boardSettledAt = this.now();
+      this.settleBoard();
+      this.flagStaleTasks();
+    }
   }
   private outdatedCheckedAt = 0;
+  private boardSettledAt = 0;
 
-  // ---------------------------------------------------------------- dreams (phase 3, gap 5): the orchestrator's own cards
   // A card the orchestrator itself puts to the owner (the nightly dream batch): no agent asks it, so it skips the CoS and goes
   // straight to Needs you. Its asker is "orchestrator": the answer item is never delivered (no thread has that address);
   // the dreams service reads the answer from the decision and closes it with orchestratorAck.
@@ -5703,7 +5976,6 @@ export class Engine {
     });
   }
 
-  // ---------------------------------------------------------------- views
 
   /** Full item text is available only to its recipient, including passive imports. Reading is not completion. */
   readItem(a: Agent, id: string): string {
@@ -5791,7 +6063,6 @@ export class Engine {
     return { text: lines.join("\n"), count: items.length + owed.length };
   }
 
-  /** Needs you: what waits on the owner. */
   needsYou(): { cards: Decision[]; deferred: Decision[]; triaging: Decision[]; held: Decision[] } {
     // a scoping project's cards wait in the Scope pane (scopeView), never here
     const all = (this.db.prepare(`SELECT json FROM decisions WHERE state IN ('open','asked') AND at_level != 'lead'`).all() as { json: string }[]).map((r) => JSON.parse(r.json) as Decision).filter((d) => !d.orchestrator.scope);
@@ -5811,7 +6082,7 @@ export class Engine {
   }
 
   /**
-   * The owner's Needs you as the CoS and the Steward read it (orch_needs_you, 2026-11-15): the cards waiting on the owner,
+   * The owner's Needs you as the CoS and the Steward read it (orch_needs_you): the cards waiting on the owner,
    * deferred ones, ones still with the CoS, and what the owner answered and what went moot since `since`.
    */
   needsYouView(o: { since?: number | null; project?: string | null; limit?: number | null } = {}): { text: string; count: number } {
@@ -5871,6 +6142,10 @@ export class Engine {
 
   decisions(limit = 100): Decision[] {
     return (this.db.prepare(`SELECT json FROM decisions ORDER BY id DESC LIMIT ?`).all(limit) as { json: string }[]).map((r) => JSON.parse(r.json));
+  }
+
+  projectDecisions(slug: string, limit = 5000): Decision[] {
+    return (this.db.prepare(`SELECT json FROM decisions WHERE project = ? ORDER BY id DESC LIMIT ?`).all(slug, limit) as { json: string }[]).map((r) => JSON.parse(r.json));
   }
 
   decisionByRequestKey(asker: string, key: string): Decision | null {
