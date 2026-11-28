@@ -15,11 +15,13 @@ backfilled when batch mode is used; previously closed mail is not resurrected.
 Semantic card resolution may close an item, but its unread ledger entry stays
 until acknowledged. Reading alone never changes unread state.
 
-`orch_inbox` returns one digest of all unread bodies, ids, sender, kind, ref,
-severity, needs-reply and due timestamp, oldest arrival first. There is no preview
-truncation or hidden pagination: a large backlog produces a large digest. The
-opaque cursor comes from a durable read snapshot. `orch_ack(through=cursor)`
-acknowledges only that thread/address's prefix atomically; later arrivals survive.
+`orch_inbox` pages unread mail oldest first within a 32,000-byte serialized
+response budget. A large item shows a preview and `orch_inbox(id, part)`
+instructions. After fetching every part, read the inbox for a cursor. Part
+reads belong to the current holder and arrival of the item. The opaque cursor
+comes from a durable read snapshot. `orch_ack(through=cursor)` acknowledges that
+thread and address's prefix atomically. At upgrade, fetch a new cursor for any
+unacknowledged page issued by the old version.
 Retrying a cursor cannot reset a newer wake. Cursor ack records mail as read; it
 does not approve/answer a decision, grant a plan or merge anything. It closes only
 items that need no outcome (copies, notices), as per-message delivery does. An item
@@ -34,10 +36,9 @@ retain their existing tools and approval gates. The instruction recovery view an
 
 One durable `inbox_wakes` row per recipient coalesces arrivals. INFO never wakes
 alone; ACTION (the send default), needs-reply or a due deadline does. The wake
-carries the digest (2026-11-19): its own cursor covers exactly the items it shows,
-later arrivals stay unread for the next wake, and past `WAKE_DIGEST_CAP` characters
-it shows the first items and says how many more `orch_inbox` will read. A wake to a
-thread bb reports busy goes bare (no bodies), since bb queues it behind the turn. `inboxDebounceMs` defaults to 2000 and is checked by
+carries the first digest page within a 16,000-byte serialized budget. Later
+arrivals remain unread. A wake to a thread bb reports busy goes bare because bb
+queues it behind the turn. `inboxDebounceMs` defaults to 2000 and is checked by
 the existing 5-second clock. A lead gets at least `inboxGapMs` (default 120000, 0 = off)
 between two wakes (2026-11-24): mail inside the gap joins the next wake, whose
 `due_at` moves to the gap's end; the owner's items, overdue items, the owner's Resend

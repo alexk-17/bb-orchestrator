@@ -248,8 +248,6 @@ async function poolAccounts(bb: BbPluginApi, current: { accountKey: string | nul
 }
 
 export default async function plugin(bb: BbPluginApi) {
-  // The scanner keeps its cache next to the plugin's own database and reads
-  // bb.db read-only for thread names.
   const scanner = usageScannerForPlugin(bb);
   bb.onDispose(() => scanner.close());
 

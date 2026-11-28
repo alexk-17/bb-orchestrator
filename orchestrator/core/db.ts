@@ -526,6 +526,9 @@ export const MIGRATIONS: string[] = [
   `CREATE INDEX outputs_at ON outputs (at, id);
    DROP INDEX handed_off_prs_project;
    DROP INDEX multiplayer_records_board`,
+  `ALTER TABLE agents ADD COLUMN wake_recovery_pending INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE agents ADD COLUMN active_at INTEGER;
+   CREATE TABLE inbox_stuck_members (recipient TEXT PRIMARY KEY, since INTEGER NOT NULL, sequences TEXT NOT NULL)`,
 ];
 
 /** Per connection, outside any transaction: bb sets WAL, busy_timeout and auto_vacuum; these add to them. */
@@ -567,6 +570,11 @@ export function prepareHinted(db: Db, index: string, sql: string): Stmt {
     if (!String((e as Error)?.message ?? e).includes(`no such index: ${index}`)) throw e;
     return db.prepare(sql.replace(` INDEXED BY ${index}`, ""));
   }
+}
+
+export function addColumn(db: Db, table: string, column: string, definition: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (!columns.some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 let depth = 0;

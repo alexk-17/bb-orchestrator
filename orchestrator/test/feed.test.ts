@@ -342,8 +342,9 @@ test("batchInbox on: Resend brings back a recipient whose inbox wake died", asyn
   const s = setup(true);
   s.e.send(s.thread, "lead:kite", "Other unread mail under the same wake", null);
   const it = s.e.ownerMessage("kite", "Ping?");
-  // the lead never acks its wakes: two attempts, then the wake is dead and nothing else would wake it
-  for (let i = 0; i < 4; i++) {
+  // the lead never acks its wakes: two attempts, then the wake is dead until its re-arm cooldown ends
+  const state = () => s.e.batch.wakes().find((w) => w.recipient === "lead:kite")?.state;
+  for (let i = 0; i < 6 && state() !== "dead"; i++) {
     await s.step();
     s.advance(11 * M);
   }

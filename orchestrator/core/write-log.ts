@@ -7,10 +7,7 @@ import { DERIVED, type DerivedTable, STATUS } from "../change-notice.ts";
 const WRITE = /\b(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+(?!SET\b)["`]?([A-Za-z_][A-Za-z0-9_]*)/gi;
 const DDL = /\b(?:CREATE|DROP|ALTER)\s+(?:TABLE|INDEX|TRIGGER|VIEW)\b/i;
 
-// A thread's status flips (Engine.setStatus) are most of the change notices; most reads show no status. An update of
-// agents that sets only these columns, and an event of kind "status", are STATUS, which only the reads that show a
-// status declare.
-const STATUS_ONLY = new Set(["status", "idle_at", "last_idle_at"]);
+const STATUS_ONLY = new Set(["status", "idle_at", "last_idle_at", "wake_recovery_pending", "active_at"]);
 const AGENTS_SET = /\bUPDATE\s+agents\s+SET\s+([\s\S]*?)(?:\bWHERE\b|$)/i;
 const EVENTS_INSERT = /^\s*INSERT\s+INTO\s+events\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)\s*$/i;
 

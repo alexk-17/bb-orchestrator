@@ -1,6 +1,3 @@
-// The daily stale-thread item (2026-11-16). Threads sat idle for days with nothing left to wait on, and five leads never
-// sent anything, and only the owner's "what's left?" turned them up. Once a day the CoS now gets that list, and only
-// that list: a thread waiting on a card, a review, CI or a bound answer is not stale, and an unchanged list isn't news.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
@@ -59,7 +56,7 @@ test("only threads idle over a day with nothing to wait on are listed, with lead
   assert.match(body, /Leads that never sent anything \(1\):\n- lead:quiet: started 1d ago/);
   for (const a of [asking, reviewing, bound, busy]) assert.doesNotMatch(body, new RegExp(`${a.address}:`), `${a.address} is waiting on something or working`);
   assert.equal(items[0]!.needsAck, false);
-  assert.equal(s.e.needsYou().cards.length, 0, "it goes to the CoS, never to the owner");
+  assert.equal(s.e.needsYou().cards.filter((c) => !c.request_key?.startsWith("inbox-stuck:")).length, 0, "it goes to the CoS, never to the owner");
 });
 
 test("once a day at most, nothing when the list is empty, and nothing when it hasn't changed", () => {

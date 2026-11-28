@@ -45,8 +45,8 @@ export const READS = {
 export type ChangeRead = keyof typeof READS;
 
 export const UNREAD_TABLES = [
-  "_migrations",
-  "inbox_reads", "inbox_wakes", "inbox_wake_log",
+  "_migrations", "sqlite_sequence",
+  "inbox_reads", "inbox_read_parts", "inbox_wakes", "inbox_wake_log", "inbox_wake_rearms", "inbox_stuck_members",
   "xp_cursor", "thread_numbers", "alarms", "memchecks", "dream_batches",
   "slack_watch_events", "slack_watch_profiles", "slack_watch_roots",
   "multiplayer_beats", "multiplayer_records", "review_queue_lease",

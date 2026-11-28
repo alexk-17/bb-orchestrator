@@ -1,6 +1,3 @@
-// A dead inbox wake leaves a recipient with unread mail that nothing will wake it for. Logging that isn't enough: the
-// CoS must hear about it by itself (an actionable notice, which wakes the CoS), and when it is the CoS's own wake that
-// died, the owner's board gets it.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
@@ -92,14 +89,14 @@ test("mail to a worker archived before it read it is a dead letter for the CoS, 
   assert.equal(s.e.batch.read(s.lead).count, 1, "re-routed, it is unread again for its new recipient");
 });
 
-test("when the CoS's own wake dies, the owner's board gets it", async () => {
+test("when the CoS's own wake dies, the owner's Needs you gets it", async () => {
   const s = setup();
   s.fail(new Set(["T-cos"]));
   s.e.send(s.lead, "cos", "need a hand", null);
   await s.run(6);
   assert.equal(s.e.batch.wakes().find((w) => w.recipient === "cos")!.state, "dead");
   assert.equal(s.toCos().length, 0, "not into the inbox that can't be woken");
-  assert.ok(s.e.board().some((b) => b.title === "Inbox wake dead for cos"));
+  assert.ok(s.e.needsYou().cards.some((c) => c.request_key?.startsWith("inbox-stuck:")));
 });
 
 test("a dead letter from before batching was switched on is not backfilled into the next holder's unread", async () => {

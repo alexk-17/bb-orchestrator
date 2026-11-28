@@ -4,7 +4,7 @@
 // runs through bb's SDK. An item is written before it is sent, so a crash between the two re-sends it, marked
 // "(again)" — never loses it. Nothing here calls a model: escalation, resends and dead letters are the `tick`.
 import { cosLine, feedPage, feedThread, leftOutCount, ownerMailPrint, type CosLineEntry, type FeedFilter, type FeedMsg, type FeedPage, type FeedPrompt, type FeedSource, type FeedThread } from "./feed.ts";
-import { BatchInbox, type MailPolicy } from "./batch-inbox.ts";
+import { BatchInbox, REARM_CAP, REARM_COOLDOWN_MS, REARM_WINDOW_MS, type MailPolicy } from "./batch-inbox.ts";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { extname, isAbsolute, sep } from "node:path";
@@ -158,6 +158,16 @@ export function parseSince(s: string | null | undefined, now: number, fallbackMs
   if (Number.isNaN(at)) throw new EngineError("invalid", `since is an ISO time or a span like 24h or 7d, not ${JSON.stringify(v)}`);
   return at;
 }
+/** How long an inbox may hold actionable unread that no wake gets read before the CoS and the owner hear. */
+export const STUCK_MS = 3_600_000;
+export const HUNG_MS = 3 * 3_600_000;
+const STUCK_EPISODE = "inbox.stuck.episode";
+const STUCK_KEY = "inbox-stuck:";
+const STUCK_OPTIONS = [
+  { label: "Retry their wakes now", detail: "Restarts eligible wakes and keeps blocked inboxes visible." },
+  { label: "Leave them to recover", detail: "Their wakes re-arm by themselves; this card closes once all read again." },
+];
+
 function decisionId(now: number): string {
   const t = new Date(now).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
   return `d-${t}-${hex(3)}`;
@@ -1275,11 +1285,19 @@ export class Engine {
     const cur = this.agentByThread(threadId);
     if (!cur) return;
     if (cur.status === "stopped" && status !== "active" && status !== "archived") return;
-    // idle since it went idle: the startup reconcile re-reports every agent's status, and a repeat isn't a new idle
     const idle = status === "idle" ? (cur.status === "idle" && cur.idleAt !== null ? cur.idleAt : this.now()) : null;
-    this.db.prepare(`UPDATE agents SET status = ?, idle_at = ?, last_idle_at = COALESCE(?, last_idle_at) WHERE thread_id = ?`).run(status, idle, idle, threadId);
-    // a change only: the startup reconcile re-reports every agent's status
+    const rearmed = tx(this.db, () => {
+      const prev = this.db.prepare(`SELECT wake_recovery_pending FROM agents WHERE thread_id=?`).get(threadId) as { wake_recovery_pending: number };
+      this.db.prepare(`UPDATE agents SET status=?, idle_at=?, last_idle_at=COALESCE(?,last_idle_at),
+        wake_recovery_pending=CASE WHEN ? IN ('error','unknown') THEN 1 WHEN ? IN ('active','starting','pending') THEN wake_recovery_pending ELSE 0 END,
+        active_at=CASE WHEN ?='active' THEN COALESCE(active_at,?) ELSE NULL END
+        WHERE thread_id=?`).run(status, idle, idle, status, status, status, this.now(), threadId);
+      return status === "idle" && cur.status !== "idle" && (prev.wake_recovery_pending || cur.status === "error" || cur.status === "unknown")
+        && this.settings.batchInbox && !(cur.project && this.project(cur.project)?.heldAt)
+        && this.batch.rearmOnIdle(cur, (id) => this.importPaused(id));
+    });
     if (cur.status !== status) this.event({ kind: "status", project: cur.project, address: cur.address, threadId, value: status });
+    if (rearmed) this.ports.log(`inbox wake re-armed for ${cur.address}: back to idle`);
     // live or not (liveAt): the feed's reply line and an archived lead's persona go by it, not by every status flip
     if ((cur.status === "archived") !== (status === "archived")) this.ports.changed([LIVE]);
     if (status === "archived" && cur.role === "thread") {
@@ -1493,7 +1511,7 @@ export class Engine {
         held: (a) => !!(a.project && this.project(a.project)?.heldAt),
         deliver: (a, text, token, bare) => this.ports.deliver(a.threadId, text, { id: `wake:${token}`, sender: "orchestrator", recipient: a.address, kind: "notice", body: bare } as Item),
         log: (text) => this.ports.log(text),
-        dead: (recipient, _token, note) => this.wakeDead(recipient, note),
+        dead: (recipient, token, note) => this.wakeDead(recipient, note, token),
         paused,
       });
       // A pass waits on each delivery; a deadline or a wake that came due meanwhile was judged with the time from before
@@ -1587,7 +1605,7 @@ export class Engine {
   /** The user removed a queued row before it went: it isn't delivered, so it becomes a dead letter. */
   cancelled(queuedMessageId: string): void {
     const wake = this.batch.cancelled(queuedMessageId);
-    if (wake) this.wakeDead(wake.recipient, wake.note);
+    if (wake) this.wakeDead(wake.recipient, wake.note, wake.token);
     const r = this.db.prepare(`SELECT * FROM items WHERE queued_message_id = ? AND state = 'queued'`).get(queuedMessageId) as ItemRow | undefined;
     if (r) this.dead(toItem(r), "its queued message was removed before it was sent");
   }
@@ -1623,18 +1641,140 @@ export class Engine {
     this.ports.changed();
   }
 
-  /**
-   * A recipient's inbox wake died: its unread mail waits and nothing else will wake it, so the CoS is told (an
-   * actionable notice, which wakes the CoS) to retry it once the recipient can take it. When the dead wake is the CoS's
-   * own, or there is no CoS, the owner's board gets it instead.
-   */
-  private wakeDead(recipient: string, note: string): void {
-    const body = `${recipient}'s inbox wake is dead (${note}). Its unread mail is kept, but nothing will wake ${recipient} for it. Check the thread, then retry with orch_inbox(retry_wake=${JSON.stringify(recipient)}).`;
-    if (recipient !== "cos" && this.agentByAddress("cos")) {
-      const it = this.put({ recipient: "cos", sender: "orchestrator", kind: "notice", body, needsAck: false });
+  private wakeDead(recipient: string, note: string, token: string): void {
+    if (!this.batch.wasRearmed(token) && recipient !== "cos" && this.agentByAddress("cos")) {
+      const body = `${recipient}'s inbox wake is dead (${note}). Its unread mail is kept. The wake re-arms by itself when ${recipient} recovers from an error, or ${REARM_COOLDOWN_MS / 60_000} min after it died (at most ${REARM_CAP} times in ${REARM_WINDOW_MS / 3_600_000} h). Check the thread, then retry now with orch_inbox(retry_wake=${JSON.stringify(recipient)}).`;
+      const it = this.put({ recipient: "cos", sender: "orchestrator", kind: "notice", body, key: `wake-dead:${recipient}:${token}`, needsAck: false });
       this.batch.policy(it.id, { severity: "ACTION" });
-    } else this.boardAdd("notice", "orchestrator", null, `Inbox wake dead for ${recipient}`, body, null);
+    } else this.stuckInboxes();
     this.ports.changed();
+  }
+
+  private stuckCheckedAt = 0;
+
+  private stuckInboxes(): void {
+    const now = this.now();
+    const cos = this.agentByAddress("cos");
+    const waiting = this.batch.waiting(now, (id) => this.importPaused(id));
+    tx(this.db, () => {
+      const members = this.db.prepare(`SELECT * FROM inbox_stuck_members`).all() as { recipient: string; since: number; sequences: string }[];
+      const stuck = new Map<string, number>();
+      for (const member of members) {
+        const unread = this.agentByAddress(member.recipient) ? waiting.get(member.recipient) : undefined;
+        const remaining = (JSON.parse(member.sequences) as number[]).filter((seq) => unread?.sequences.has(seq));
+        if (remaining.length) {
+          stuck.set(member.recipient, member.since);
+          const sequences = JSON.stringify(remaining);
+          if (sequences !== member.sequences)
+            this.db.prepare(`UPDATE inbox_stuck_members SET sequences=? WHERE recipient=?`).run(sequences, member.recipient);
+        } else this.db.prepare(`DELETE FROM inbox_stuck_members WHERE recipient=?`).run(member.recipient);
+      }
+      const added = new Set<string>();
+      for (const [address, unread] of waiting) {
+        if (stuck.has(address)) continue;
+        const a = this.agentByAddress(address);
+        if (!a || a.status === "stopped" || a.status === "archived" || (a.project && this.project(a.project)?.heldAt)) continue;
+        const failing = (address === "cos" || !cos) && this.batch.wakeFailing(address, now);
+        const quiet = (a.status !== "active" || this.activeSince(a.threadId, now) <= now - HUNG_MS)
+          && unread.since <= now - STUCK_MS && (this.batch.lastRead(address) ?? 0) <= now - STUCK_MS;
+        if (!failing && !quiet) continue;
+        stuck.set(address, unread.since);
+        added.add(address);
+        const sequences = [...unread.sequences];
+        this.db.prepare(`INSERT INTO inbox_stuck_members VALUES(?,?,?)`).run(address, unread.since, JSON.stringify(sequences));
+        if (cos && address !== "cos") {
+          const body = `${address} has had unread mail for over an hour that no wake got read (wake ${this.batch.wakeState(address) ?? "none"}). Check the thread, then retry with orch_inbox(retry_wake=${JSON.stringify(address)}).`;
+          const it = this.put({ recipient: "cos", sender: "orchestrator", kind: "notice", body, key: `inbox-stuck:${address}:${sequences[0]}`, needsAck: false });
+          this.batch.policy(it.id, { severity: "ACTION" });
+        }
+      }
+      const episode = this.cursor(STUCK_EPISODE);
+      const card = episode ? this.decision(this.stuckCardId(episode) ?? "") : null;
+      const open = card?.state === "open" || card?.state === "asked";
+      const previous = new Map((card?.request.blocks ?? []).flatMap((b) =>
+        b.kind === "list" ? b.items.map(({ label, meta }) => [label, meta] as const) : []));
+      const blocked = new Map<string, string>();
+      const retry = card?.state === "answered" && card.answer?.option === "1";
+      if (card?.state === "answered") {
+        const results: string[] = [];
+        if (retry) for (const address of previous.keys()) {
+          if (!stuck.has(address)) continue;
+          const result = this.retryStuckInbox(address);
+          results.push(`${address} ${result}`);
+          if (result !== "retried") blocked.set(address, result);
+        }
+        this.orchestratorAck(card.id, "done", retry ? results.join("; ") || "no unread inboxes left" : "left to recover");
+      }
+      const listed = [...stuck]
+        .filter(([address]) => added.has(address) || (open ? previous.has(address) : !retry || blocked.has(address)))
+        .map(([address, since]) => ({
+          address,
+          since,
+          meta: open ? previous.get(address) : blocked.has(address) ? `Last retry: ${blocked.get(address)}` : undefined,
+        }))
+        .sort((x, y) => x.address.localeCompare(y.address));
+      if (!listed.length) {
+        if (open) this.mootOne(card, "no listed inbox still needs delivery", "orchestrator");
+        return;
+      }
+      if (!open && !added.size && !blocked.size) return;
+      const text = this.stuckCardText(listed);
+      if (!open) {
+        const start = Math.max(now, (episode ?? 0) + 1);
+        this.setCursor(STUCK_EPISODE, start);
+        const d = this.orchestratorCard(now, { title: text.title, question: text.question, context: text.context, key: `${STUCK_KEY}${start}`, options: STUCK_OPTIONS });
+        d.request.blocks = text.blocks;
+        this.save(d, "add", "orchestrator", null, null);
+        this.putAsk(d, "orchestrator", d.request.title, d.request.question, d.request.context, d.request.options, false);
+        this.save(d, "ask", "orchestrator", null, null);
+        return;
+      }
+      const r = card.request;
+      if (r.question === text.question && JSON.stringify(r.blocks ?? []) === JSON.stringify(text.blocks)) return;
+      r.title = text.title;
+      r.question = text.question;
+      r.context = text.context;
+      r.blocks = text.blocks;
+      if (card.ask) card.ask = { ...card.ask, title: r.title, question: r.question, context: r.context };
+      this.save(card, "revise", "orchestrator", "the stuck inboxes changed", null);
+    });
+  }
+
+  private retryStuckInbox(address: string): string {
+    const state = this.batch.wakeState(address);
+    if (state === "queued") return "queued";
+    if (state === "pending") return "already pending";
+    if (state === "sending") return "sending";
+    const a = this.agentByAddress(address);
+    if (!a || a.status === "stopped" || a.status === "archived" || (a.project && this.project(a.project)?.heldAt)) return "unavailable";
+    if (!["idle", "unknown", "error"].includes(a.status)) return "blocked by an active turn";
+    return this.batch.rewake(address) ? "retried" : "no wake to retry";
+  }
+
+  private activeSince(threadId: string, now: number): number {
+    const r = this.db.prepare(`SELECT active_at FROM agents WHERE thread_id=?`).get(threadId) as { active_at: number | null };
+    return r.active_at ?? now;
+  }
+
+  private stuckCardId(episode: number): string | null {
+    const r = this.db.prepare(`SELECT id FROM decisions WHERE asker = 'orchestrator' AND json_extract(json, '$.request_key') = ?`).get(`${STUCK_KEY}${episode}`) as { id: string } | undefined;
+    return r?.id ?? null;
+  }
+
+  private stuckCardText(stuck: { address: string; since: number; meta?: string }[]): { title: string; question: string; context: string; blocks: Block[] } {
+    const onlyCos = stuck.length === 1 && stuck[0]!.address === "cos";
+    const n = stuck.length;
+    const names = stuck.map((s) => s.address).join(", ");
+    const question = onlyCos
+      ? "The CoS's inbox wake is failing: its unread mail waits and nothing tells it. Retry its wake now?"
+      : `${n} inbox${n === 1 ? " has" : "es have"} unread mail that no wake got read${names.length <= 480 ? `: ${names}` : ""}. Retry their wakes now?`;
+    const context = onlyCos
+      ? `Its wake re-arms by itself within the bound, but nothing else reaches the CoS. This card closes itself once the CoS reads its mail again.`
+      : `${stuck.some((s) => s.address !== "cos") ? "The CoS was told about each one, except itself. " : ""}Their wakes re-arm by themselves within a bound. This card closes itself once every one of them reads its mail again.`;
+    const items = stuck.map((s) => ({ label: s.address, meta: s.meta ?? `unread since ${iso(s.since).slice(5, 16).replace("T", " ")} UTC` }));
+    const blocks: Block[] = [];
+    for (let i = 0; i < items.length; i += 50) blocks.push({ kind: "list", ...(i ? {} : { title: "Not waking" }), items: items.slice(i, i + 50) });
+    return { title: onlyCos ? "CoS inbox not waking" : "Inboxes not waking", question, context, blocks };
   }
 
   /** The owner resends a dead letter from the board, or the CoS from its dead letters (no board row then). */
@@ -3755,6 +3895,7 @@ export class Engine {
       if (proposal?.rule_id) this.put({ recipient: "cos", sender: "person", kind: "notice", ref: d.id, body: `Rule ${proposal.rule_id} is live: ${JSON.stringify(proposal.text)}. It settles the cards it matches by itself; you hear about each one.`, key: `rule-live:${d.id}`, needsAck: false });
       this.offerRule(d);
       this.releaseHeld();
+      if (opt?.id === "1" && this.settings.batchInbox && d.request_key?.startsWith(STUCK_KEY)) this.stuckInboxes();
       return this.mustDecision(id);
     });
   }
@@ -3816,7 +3957,7 @@ export class Engine {
       d.deferred = null;
       d.returned = { at: iso(this.now()), by, why: by === "engine" ? "time" : "brought back", source: by === "person" ? "bb-orchestrator" : null };
       this.save(d, "return", by, null, rev);
-      if (by === "engine" && !d.orchestrator.scope) this.ports.cardUp?.(d);
+      if (by === "engine" && !d.orchestrator.scope && !d.request_key?.startsWith(STUCK_KEY)) this.ports.cardUp?.(d);
       return this.mustDecision(id);
     });
   }
@@ -4645,6 +4786,8 @@ export class Engine {
         this.save(d, "withdraw", "person", note, null);
       }
       this.db.prepare(`UPDATE projects SET archived_at = ?, held_at = NULL WHERE slug = ?`).run(this.now(), slug);
+      this.batch.dropProject(slug);
+      if (this.settings.batchInbox) this.stuckInboxes();
       const who = agents.length ? agents.map((a) => a.address).join(", ") : "no agents";
       this.boardAdd("archived", "person", slug, `${slug} archived`, `Retired ${who}; ${open.length} open card${open.length === 1 ? "" : "s"} withdrawn. Its deliverables and outputs stay. Start its lead to bring it back.`, null);
       this.ports.changed();
@@ -5906,6 +6049,10 @@ export class Engine {
       this.settleBoard();
       this.flagStaleTasks();
     }
+    if (this.settings.batchInbox && this.now() - this.stuckCheckedAt >= 60_000) {
+      this.stuckCheckedAt = this.now();
+      this.stuckInboxes();
+    }
   }
   private outdatedCheckedAt = 0;
   private boardSettledAt = 0;
@@ -5916,48 +6063,11 @@ export class Engine {
 
   /** File a card at person level, asked by "orchestrator". The same key returns the first card, in any state. */
   orchestratorAsk(input: { title: string; question: string; context?: string; options: { label: string; detail?: string }[]; key: string; allowText: boolean; blocks?: Block[] }): Decision {
-    const options = this.options(input.options, 2);
     return tx(this.db, () => {
       const dup = this.db.prepare(`SELECT id FROM decisions WHERE asker = 'orchestrator' AND json_extract(json, '$.request_key') = ?`).get(input.key) as { id: string } | undefined;
       if (dup) return this.mustDecision(dup.id);
-      const t = this.now();
-      const title = oneLine(input.title, 60, "title");
-      const question = oneLine(input.question, 600, "question");
-      const context = (input.context ?? "").slice(0, 8192);
-      const d: Decision = {
-        schema: 1,
-        id: decisionId(t),
-        rev: 0,
-        state: "open",
-        kind: "question",
-        created_at: iso(t),
-        updated_at: iso(t),
-        project: null,
-        request_key: input.key,
-        request: { by: { role: "orchestrator", project: null, thread: null, terminal: null, machine: null, address: "orchestrator" }, title, question, context, options, blocks: parseBlocks(input.blocks) },
-        reply_to: { labels: { "orchestrator.address": "orchestrator" }, terminal: null, machine: null },
-        ask: null,
-        answer: null,
-        relay: null,
-        ack: null,
-        cos_notified_at: null,
-        owed_from: null,
-        merged_into: null,
-        merged: [],
-        withdrawn: null,
-        deferred: null,
-        returned: null,
-        history: [],
-        orchestrator: {
-          at_level: "person",
-          asker: "orchestrator",
-          origin: "orchestrator",
-          action: null,
-          triage: { filed_at: null, due_at: null, triaged_at: null, by: null, escalated_at: null },
-          forwarded_by: null,
-          plan: null,
-        },
-      };
+      const d = this.orchestratorCard(this.now(), input);
+      const { title, question, context, options } = d.request;
       this.save(d, "add", "orchestrator", null, null);
       if (this.ruleSettles(d)) return this.mustDecision(d.id);
       this.putAsk(d, "orchestrator", title, question, context, options, input.allowText);
@@ -5965,6 +6075,47 @@ export class Engine {
       this.ports.cardUp?.(d);
       return this.mustDecision(d.id);
     });
+  }
+
+  private orchestratorCard(t: number, input: { title: string; question: string; context?: string; options: { label: string; detail?: string }[]; key: string; blocks?: Block[] }): Decision {
+    const options = this.options(input.options, 2);
+    const title = oneLine(input.title, 60, "title");
+    const question = oneLine(input.question, 600, "question");
+    const context = (input.context ?? "").slice(0, 8192);
+    return {
+      schema: 1,
+      id: decisionId(t),
+      rev: 0,
+      state: "open",
+      kind: "question",
+      created_at: iso(t),
+      updated_at: iso(t),
+      project: null,
+      request_key: input.key,
+      request: { by: { role: "orchestrator", project: null, thread: null, terminal: null, machine: null, address: "orchestrator" }, title, question, context, options, blocks: parseBlocks(input.blocks) },
+      reply_to: { labels: { "orchestrator.address": "orchestrator" }, terminal: null, machine: null },
+      ask: null,
+      answer: null,
+      relay: null,
+      ack: null,
+      cos_notified_at: null,
+      owed_from: null,
+      merged_into: null,
+      merged: [],
+      withdrawn: null,
+      deferred: null,
+      returned: null,
+      history: [],
+      orchestrator: {
+        at_level: "person",
+        asker: "orchestrator",
+        origin: "orchestrator",
+        action: null,
+        triage: { filed_at: null, due_at: null, triaged_at: null, by: null, escalated_at: null },
+        forwarded_by: null,
+        plan: null,
+      },
+    };
   }
 
   /** Close an orchestrator card once acted on, and the items written to "orchestrator" about it (answer, deferrals). */
@@ -5977,12 +6128,11 @@ export class Engine {
   }
 
 
-  /** Full item text is available only to its recipient, including passive imports. Reading is not completion. */
-  readItem(a: Agent, id: string): string {
+  readItem(a: Agent, id: string, part?: number): string {
     const it = this.item(id);
     if (!it) throw new EngineError("not_found", `no item ${id}`);
     if (it.recipient !== a.address) throw new EngineError("forbidden", "read only your own inbox items");
-    return this.render(it, false);
+    return this.batch.readItem(a, it, this.renderInDigest(it), this.render(it, false), part);
   }
 
   /** An agent's recovery view: unread mail, its open asks, what it owes. */

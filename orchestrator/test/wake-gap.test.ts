@@ -1,9 +1,3 @@
-// Fewer lead wake-ups (2026-11-24, the owner's call: "Build all four, 2-min gap"). Every wake
-// turn re-reads a lead's whole cached context, so a short ack turn on a 450k-context lead costs about as much as a real
-// one; inbox wakes were 48% of agent cost in the usage audit. So: notices never wake a lead on their own, status nudges
-// come only after a real turn, and a lead gets at least 2 minutes between two wakes. The owner's own items and anything
-// overdue skip the gap, no actionable item waits more than the gap plus the debounce, no mail is ever lost, and the CoS,
-// the Steward and threads keep the wakes they had.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
@@ -269,7 +263,7 @@ test("many held notices: the wake still says what it couldn't show, and orch_inb
   await s.run(3000);
   const w = s.wakesOf(s.lead)[0]!;
   assert.ok(!w.text.includes(real.id), "the oldest notices fill the digest");
-  assert.match(w.text, /more unread, not shown here and not covered by this cursor: read them with orch_inbox\./);
+  assert.match(w.text, /more unread, not shown here and not covered by this cursor: ack this cursor, then read them with orch_inbox\./);
   const all = s.e.batch.read(s.lead);
   assert.ok(all.text.includes(real.id), "orch_inbox shows everything, the actionable item included");
   s.e.batch.ack(s.lead, all.cursor!);
@@ -318,20 +312,23 @@ test("the owner's approval of a deliverable wakes no one alone, but brings a gap
   assert.match(s.wakesOf(s.lead).at(-1)!.text, /approved/);
 });
 
-test("the CoS keeps today's retry: a partial ack of its capped digest waits for the resend, as before", async () => {
+test("the CoS's partial ack of its capped digest answers its wake: the rest wakes it at once, and the wake never dies of it", async () => {
   const s = setup();
   for (let n = 0; n < 60; n++) s.e.notifySupervisor(s.lead, `finished a turn. Last words: ${JSON.stringify(`step ${n} ${"x".repeat(380)}`)}`);
   s.e.send(s.lead, s.cos.address, "the real question", null);
   await s.run(3000);
-  const cursor = s.wakesOf(s.cos)[0]!.text.match(/orch_ack\(through="([0-9a-f]+)"\)/)![1]!;
-  s.e.batch.ack(s.cos, cursor);
-  await s.run(GAP + 5000);
-  assert.equal(s.wakesOf(s.cos).length, 1, "no fresh wake 2 s later for the CoS: it has no gap, so it keeps the old retry");
+  for (let page = 0; page < 6 && s.e.batch.read(s.cos).count; page++) {
+    const w = s.wakesOf(s.cos).at(-1)!;
+    s.e.batch.ack(s.cos, w.text.match(/orch_ack\(through="([0-9a-f]+)"\)/)![1]!);
+    await s.run(DEBOUNCE + 1000);
+  }
+  assert.ok(s.wakesOf(s.cos).length >= 2, "each page acked brings the next within the debounce, not the 10-minute retry");
+  assert.equal(s.e.batch.read(s.cos).count, 0, "every page reached the CoS");
+  assert.ok(!s.e.batch.wakes().some((w) => w.recipient === "cos" && w.state === "dead"));
 });
 
-// Codex review of f7127eb, P1 (2026-11-24): a deferral was written to due_at and never worked out again, and the
-// urgent check ran only while the gap was on. So turning the gap off kept a wake held for up to 2 min, and the owner's
-// message after that waited with it (116 s in Codex's replay). The owner turns the gap off to get mail through now.
+// A held wake's deferral is worked out again on every flush, and the urgent check runs with the gap off too: the owner
+// turns the gap off to get mail through now.
 async function heldWake() {
   const s = setup();
   s.e.send(s.cos, s.lead.address, "earlier work", null);
@@ -368,10 +365,9 @@ test("with the gap off, the owner's message wakes the lead after the debounce ev
   assert.match(s.wakesOf(s.lead)[1]!.text, /Stop the deploy/);
 });
 
-// Found under load while testing Codex's third-pass P1 (2026-11-24): a pass waits on each delivery, and a wake that came
-// due meanwhile (here a plain debounce, no deadline) was neither sent by that pass, which read the time before it, nor
-// armed for by the wake timer, which leaves out wakes already due. With the clock stuck it sat there. A flush must pass
-// again for wakes that came due during its last pass, as for deadlines.
+// A pass waits on each delivery, and a wake that came due meanwhile is neither sent by that pass, which read the time
+// before it, nor armed for by the wake timer, which leaves out wakes already due. A flush passes again for wakes that
+// came due during its last pass, as for deadlines.
 test("a wake that comes due while a flush waits on another delivery goes in the same flush", async () => {
   const s = setup();
   const ports = (s.e as unknown as { ports: { deliver: (t: string, x: string, i: Item) => Promise<DeliverResult> } }).ports;

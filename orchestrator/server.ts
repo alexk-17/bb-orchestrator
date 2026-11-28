@@ -13,6 +13,7 @@ import { createPathwaysSnapshots, type PathwaysSnapshot, type PathwaysView } fro
 import { localPathwaysMap } from "./core/pathways-local.ts";
 import type { FeedPrompt } from "./core/feed.ts";
 import { type DeliverPlace, type OutputPlace, type ProofInput, SCOPING_SUMMARY_MAX, SCOPING_TASK_NAME_MAX, SECRET_TTL_MS } from "./core/engine.ts";
+import { inboxToolResult as ok } from "./core/batch-inbox.ts";
 import { deliverBlocks, deliverPoints, fromJson, inputBlocksSchema, lessTextRefusal, looksLikeCode } from "./blocks.ts";
 import { CARD_CAPS, DELIVER_BUDGET, deliverBudgetRefusal } from "./core/caps.ts";
 import { ignoredTopLevelUpdate, statusParams, statusLine } from "./core/status.ts";
@@ -146,9 +147,6 @@ function gapMs(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? Math.min(30 * 60_000, Math.max(0, v)) : 120_000;
 }
 
-function ok(text: string) {
-  return { content: [{ type: "text" as const, text }] };
-}
 function fail(text: string) {
   return { content: [{ type: "text" as const, text }], isError: true };
 }
@@ -837,15 +835,17 @@ export default async function plugin(bb: BbPluginApi) {
 
   bb.agents.registerTool({
     name: "orch_inbox",
-    description: "Your recovery view: unread items, decisions waiting for you, your own open decisions, the standing rules you may cite, and the standing practices to follow (they settle nothing). With batchInbox on: ALL unread oldest first with full bodies, ids, refs and an ack-through cursor; reading never acknowledges. The CoS may inspect wakes or retry_wake by recipient.",
+    description: "Your recovery view: unread items, decisions waiting for you, your own open decisions, the standing rules you may cite, and the standing practices to follow (they settle nothing). With batchInbox on: unread oldest first with bodies, ids, refs and an ack-through cursor, a page at a time. For a large item, read every part by id, then fetch a new page. Ack each cursor after handling its items, then read again; reading never acknowledges. The CoS may inspect wakes or retry_wake by recipient.",
     presentation: { label: { pending: "Reading the inbox", completed: "Read the inbox" } },
     parameters: z.object({
-      id: z.string().regex(/^i-[a-f0-9]+$/).optional().describe("Read the complete text of one item addressed to you, including passive INFO"),
+      id: z.string().regex(/^i-[a-f0-9]+$/).optional().describe("Read one item addressed to you, including passive INFO"),
+      part: z.number().int().positive().optional().describe("Part number for a large item, starting at 1; requires id"),
       wakes: z.boolean().optional(),
       retry_wake: z.string().optional(),
     }),
     execute: (p, { threadId }) => run(threadId, (a) => {
-      if (p.id) return engine.readItem(a, p.id);
+      if (p.id) return engine.readItem(a, p.id, p.part);
+      if (p.part !== undefined) throw new EngineError("invalid", "part requires id");
       if (p.wakes || p.retry_wake) {
         if (a.role !== "cos") throw new EngineError("forbidden", "only CoS manages inbox wakes");
         if (p.retry_wake) engine.batch.retry(p.retry_wake);

@@ -11,12 +11,13 @@ start with `[orchestrator] <kind> <id> from <sender>:`.
 ## Batched inbox (the default: `batchInbox=true`)
 
 On by default; with `batchInbox=false` each message is delivered into a turn as described below. When on, sending accumulates unread mail; it does not send each item into a turn. A burst gets
-one debounced wake per recipient. The wake **is the digest**: all unread items oldest
-first, including full bodies, ids and refs, with its cursor (past a size cap it says
-how many more are unread; read those with `orch_inbox`). Handle the digest, then
-`orch_ack(through=<its cursor>)`. A wake that bb queued behind your turn comes bare:
-then call `orch_inbox` to read all unread. Reads do not ack. A cursor covers only that
-snapshot and is bound to your current thread/address; later arrivals stay unread.
+one debounced wake per recipient. The wake carries the first inbox page, oldest
+first. Handle the items covered by its cursor, then call
+`orch_ack(through=<its cursor>)` and use `orch_inbox` for any remaining unread mail.
+A large item shows a preview and instructions to fetch every part with
+`orch_inbox(id=<item id>, part=<number>)`. After reading all parts, fetch the inbox
+again for its cursor. A wake queued behind your turn comes bare. Use `orch_inbox`
+to fetch the first page. A cursor is bound to its thread and address.
 Cursor ack records mail as read, not an outcome: it closes only what needs no
 answer (copies, notices). A message that asks for an outcome stays open until you
 `orch_ack(id, outcome)` it or reply with `ref=<its id>`; decisions and PR waits
@@ -33,8 +34,14 @@ turn starts during delivery, never steering or interrupting that turn. The defau
 2-second debounce is checked by the existing 5-second clock. Unread remains until
 cursor acknowledgement, including after restart, failed wake or dead-lettering.
 Only wakes retry (one retry after `resendMinutes`, then dead), not message bodies.
-CoS inspects `orch_inbox(wakes=true)` and retries a dead recipient wake with
+A dead wake can re-arm after 15 minutes, up to three times per thread in six hours
+and two re-arms across recipients per five seconds. Recovery from an error can
+skip the cooldown once for the same unread mail, within the shared pacing limit. Any cursor ack that reads
+something answers the wake. CoS inspects `orch_inbox(wakes=true)` and retries a recipient's wake with
 `orch_inbox(retry_wake="lead:project")`. These calls do not acknowledge any mail.
+An inbox with actionable unread and nothing read for over an hour is stuck: the CoS
+gets an ACTION notice for it, and the owner gets one Needs-you card listing every
+stuck inbox. Retry restarts eligible wakes and leaves blocked inboxes on Needs you.
 
 With `batchInbox=false` the per-item retry/reply-ack descriptions
 below apply. Before changing modes, reconcile queued wakes/messages: changing settings
@@ -203,7 +210,7 @@ board. Like the existing privileged CLI, this is a same-user operator boundary,
 not protection against a process that can drop BB_THREAD_ID. Keep configuration,
 journals and handoff manifests private; never treat labels as approval provenance.
 
-Use `orch_inbox(id=<item id>)` for full item text and references. Imported envelopes
+Use `orch_inbox(id=<item id>)` to read item text and references. Imported envelopes
 expose source/external ID, original ID, reply reference, creation time, due time and
 needs-reply without converting those fields into implicit approval or completion.
 Adoption also requires an empty bb queue before and after its parent check.

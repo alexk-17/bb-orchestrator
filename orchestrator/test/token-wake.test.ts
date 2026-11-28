@@ -1,7 +1,3 @@
-// A batched wake carries its digest (2026-11-19, tokens; the lead's go). Every wake used to
-// begin with an orch_inbox call that only fetched the mail: 4.6% of a host's spend over five days. The conditions it
-// was approved on: the wake says it is the digest; its cursor covers only what it shows; a cap that says "more",
-// never a silent cut; a wake bb queues behind a running turn carries no copy; ACTION still wakes at once.
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
@@ -10,14 +6,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import plugin from "../server.ts";
 import { Engine, type DeliverResult } from "../core/engine.ts";
-import { WAKE_DIGEST_CAP } from "../core/batch-inbox.ts";
+import { INBOX_READ_BUDGET, WAKE_DIGEST_CAP } from "../core/batch-inbox.ts";
 import type { Item } from "../core/model.ts";
+
+const inboxResponseBytes = (text: string) => Buffer.byteLength(JSON.stringify({ content: [{ type: "text", text }] }));
 
 function setup() {
   const clock = { t: Date.parse("2026-11-19T10:00:00Z") };
   const sent: { threadId: string; text: string; item: Item }[] = [];
+  const db = new DatabaseSync(":memory:");
   const e = new Engine(
-    new DatabaseSync(":memory:") as never,
+    db as never,
     {
       now: () => clock.t,
       deliver: async (threadId: string, text: string, item: Item): Promise<DeliverResult> => {
@@ -43,7 +42,7 @@ function setup() {
   };
   const wakes = () => sent.filter((x) => x.item.id.startsWith("wake:"));
   const cursorOf = (text: string) => text.match(/through="([0-9a-f]+)"/)![1]!;
-  return { e, clock, sent, cos, lead, worker, step, wakes, cursorOf };
+  return { db, e, clock, sent, cos, lead, worker, step, wakes, cursorOf };
 }
 
 test("the wake is the digest: it says so, and carries every body with the cursor that acks them", async () => {
@@ -75,20 +74,21 @@ test("the wake's cursor covers only what it showed: later mail stays unread and 
 
 test("past the cap the wake shows the first items and says how many more, and its cursor leaves those unread", async () => {
   const s = setup();
-  const big = "x".repeat(3800); // a message is at most 4000 characters
+  const big = "x".repeat(3800);
   const items = [1, 2, 3, 4, 5, 6].map((n) => s.e.send(s.worker, s.lead.address, `${n} ${big}`, null));
   await s.step();
   const w = s.wakes()[0]!;
   const shown = items.filter((it) => w.text.includes(it.id)).length;
   assert.ok(shown >= 1 && shown < 6, `the wake shows ${shown} of 6`);
   assert.match(w.text, new RegExp(`${shown} of 6 unread`));
-  assert.match(w.text, new RegExp(`${6 - shown} more unread, not shown here and not covered by this cursor: read them with orch_inbox\\.`));
-  assert.ok(w.text.length < WAKE_DIGEST_CAP + 1000, "the wake stays near the cap");
+  assert.match(w.text, new RegExp(`${6 - shown} more unread, not shown here and not covered by this cursor: ack this cursor, then read them with orch_inbox\\.`));
+  assert.ok(inboxResponseBytes(w.text) <= WAKE_DIGEST_CAP);
   assert.equal(s.e.batch.ack(s.lead, s.cursorOf(w.text)), shown);
   assert.equal(s.e.batch.read(s.lead).count, 6 - shown, "the rest is still unread, never cut silently");
-  const one = s.e.batch.read(s.lead, 10);
-  assert.equal(one.count, 1, "an item past the cap on its own still goes, whole");
-  assert.ok(one.text.includes(big));
+  const one = s.e.batch.read(s.lead, 2000);
+  assert.equal(one.count, 0);
+  assert.equal(one.cursor, null);
+  assert.match(one.text, /part=1/);
 });
 
 test("ACTION mail wakes once its debounce ends; INFO alone does not wake", async () => {
@@ -151,7 +151,7 @@ function host(status: string) {
           return {
             define: (schema: Record<string, { default: unknown }>) => {
               const v: any = Object.fromEntries(Object.entries(schema).map(([key, d]) => [key, d.default]));
-              Object.assign(v, { stateDir: join(root, "state"), projectsDir: join(root, "projects"), memoryConfig: "", diskPath: root, batchInbox: true, inboxDebounceMs: 1, prPollMinutes: 0 });
+              Object.assign(v, { stateDir: join(root, "state"), projectsDir: join(root, "projects"), memoryConfig: "", diskPath: root, batchInbox: true, inboxDebounceMs: 1, prPollMinutes: 0, integrationRoutes: '{"fleet":["lead:demo"]}' });
               return { get: async () => v, onChange: () => {} };
             },
           };
@@ -185,5 +185,133 @@ for (const [status, digest] of [["idle", true], ["active", false], ["starting", 
     assert.equal(w!.mode, "queue-if-active");
     assert.equal(/This is your digest/.test(w!.text), digest);
     assert.equal(w!.text.includes("the plan is ready"), digest);
-    if (!digest) assert.match(w!.text, /Read ALL unread with orch_inbox/, "the bare wake still says where the mail is");
+    if (!digest) assert.match(w!.text, /Read unread with orch_inbox a page at a time/, "the bare wake still says where the mail is");
   });
+
+test("a 20,000-character import is paged on the wake, inbox and direct tool paths", async () => {
+  const h = host("idle");
+  const e = new Engine(h.db as never, { now: Date.now, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} });
+  const cos = e.register("T-cos", "cos", null);
+  const lead = e.register("T-lead", "lead", "demo");
+  e.setStatus(lead.threadId, "idle");
+  const body = "你好世界".repeat(5000);
+  const item = e.importMail({ source: "fleet", id: "big", originalId: "big", to: lead.address, sender: "worker", task: "task", severity: "NEEDS-COS", summary: "Review", body, refs: [], re: null, createdAt: Date.now(), dueAt: null, needsReply: true });
+  const later = e.send(cos, lead.address, "later", null);
+  await plugin(h.bb);
+  const inbox = async (args: { id?: string; part?: number } = {}) => {
+    const result = await h.tools.orch_inbox!.execute(args, { threadId: lead.threadId }) as { content: { text: string }[]; isError?: boolean };
+    assert.equal(result.isError, undefined);
+    assert.ok(Buffer.byteLength(JSON.stringify(result)) <= INBOX_READ_BUDGET);
+    return result.content[0]!.text;
+  };
+  await inbox();
+  await sleep(20);
+  await inbox();
+  await sleep(20);
+  const wake = h.sends.find((x) => x.threadId === lead.threadId && x.text.includes("Inbox wake"));
+  assert.ok(wake);
+  assert.ok(inboxResponseBytes(wake.text) <= WAKE_DIGEST_CAP);
+  assert.match(wake.text, /part=1/);
+  assert.doesNotMatch(wake.text, /through="/);
+  const first = JSON.parse(await inbox());
+  assert.equal(first.cursor, null);
+  assert.equal(first.more, 2);
+  assert.ok(!first.text.includes(later.id));
+  const stub = await inbox({ id: item.id });
+  assert.match(stub, /part=1/);
+  const last = Number(stub.match(/Read all (\d+) parts/)?.[1]);
+  assert.ok(last > 1);
+  const chunks: string[] = [];
+  for (let part = last; part > 1; part--) {
+    const [header, label, continuation, ...lines] = (await inbox({ id: item.id, part })).split("\n");
+    assert.match(header ?? "", /from external:fleet/);
+    assert.match(label ?? "", /UNTRUSTED external mail/);
+    assert.match(continuation ?? "", /^> /);
+    chunks[part - 1] = [continuation!.slice(2), ...lines].join("\n");
+  }
+  assert.equal(JSON.parse(await inbox()).cursor, null);
+  chunks[0] = (await inbox({ id: item.id, part: 1 })).split("\n").slice(1).join("\n");
+  assert.equal(chunks.join(""), item.body);
+  assert.equal(e.batch.read({ ...lead, threadId: "T-other" }).cursor, null);
+  const complete = JSON.parse(await inbox());
+  assert.equal(complete.count, 2);
+  assert.equal(e.batch.readAt(item.id), null);
+  assert.equal(e.batch.ack(lead, complete.cursor), 2);
+  assert.notEqual(e.batch.readAt(item.id), null);
+});
+
+test("a cursor issued before bounded inbox pages cannot acknowledge unread mail", () => {
+  const h = host("idle");
+  const e = new Engine(h.db as never, { now: Date.now, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} });
+  const cos = e.register("T-cos", "cos", null);
+  const lead = e.register("T-lead", "lead", "demo");
+  const item = e.send(cos, lead.address, "read me", null);
+  const legacy = "a".repeat(32);
+  h.db.prepare(`INSERT INTO inbox_reads SELECT ?,recipient,?,seq FROM inbox_entries WHERE item_id=?`).run(legacy, lead.threadId, item.id);
+  assert.throws(() => e.batch.ack(lead, legacy), /new cursor/);
+  assert.equal(e.batch.readAt(item.id), null);
+  assert.equal(e.batch.ack(lead, e.batch.read(lead).cursor!), 1);
+});
+
+test("an oversized ref cannot block the cursor after all parts are read", () => {
+  const s = setup();
+  const item = s.e.send(s.worker, s.lead.address, "界".repeat(3800), null);
+  s.db.prepare("UPDATE items SET ref=? WHERE id=?").run("\\".repeat(40_000), item.id);
+  const stub = s.e.batch.read(s.lead, 4000);
+  assert.equal(stub.cursor, null);
+  assert.match(stub.text, /ref=.{96}…/);
+  assert.match(stub.text, /part=1/);
+  assert.ok(inboxResponseBytes(JSON.stringify(stub)) <= 4000);
+  assert.match(s.e.readItem(s.lead, item.id, 1), /界/);
+  const page = s.e.batch.read(s.lead, 4000);
+  assert.equal(page.count, 1);
+  assert.ok(inboxResponseBytes(JSON.stringify(page)) <= 4000);
+  assert.equal(s.e.batch.ack(s.lead, page.cursor!), 1);
+  assert.notEqual(s.e.batch.readAt(item.id), null);
+});
+
+test("pruning the highest arrival cannot let an old cursor acknowledge a resend", () => {
+  const h = host("idle");
+  const e = new Engine(h.db as never, { now: Date.now, deliver: async () => ({ delivery: "sent" }), mirror: () => {}, changed: () => {}, log: () => {} });
+  const cos = e.register("T-cos", "cos", null);
+  const lead = e.register("T-lead", "lead", "demo");
+  const first = e.send(cos, lead.address, "resend this later", null);
+  const newest = e.send(cos, lead.address, "prune this later", null);
+  e.batch.reroute(newest.id, lead.address);
+  const { cursor } = e.batch.read(lead);
+  assert.equal(e.batch.ack(lead, cursor!), 2);
+  h.db.prepare("DELETE FROM items WHERE id=?").run(newest.id);
+  h.db.prepare("DELETE FROM inbox_entries WHERE item_id=?").run(newest.id);
+  e.batch.reroute(first.id, lead.address);
+  assert.equal(e.batch.ack(lead, cursor!), 0);
+  assert.equal(e.batch.readAt(first.id), null);
+  assert.equal(e.batch.read(lead).count, 1);
+});
+
+test("reopening advances the first new arrival beyond a saved cursor bound", () => {
+  const h = host("idle");
+  const path = h.db.name;
+  const ports = { now: Date.now, deliver: async () => ({ delivery: "sent" as const }), mirror: () => {}, changed: () => {}, log: () => {} };
+  const first = new Engine(h.db as never, ports);
+  const cos = first.register("T-cos", "cos", null);
+  const lead = first.register("T-lead", "lead", "demo");
+  first.send(cos, lead.address, "before restart", null);
+  const cursor = first.batch.read(lead).cursor!;
+  h.db.prepare("UPDATE inbox_reads SET through_seq=through_seq+1000 WHERE token=?").run(cursor);
+  const { through_seq: bound } = h.db.prepare("SELECT through_seq FROM inbox_reads WHERE token=?").get(cursor) as { through_seq: number };
+  const before = h.db.prepare("SELECT seq FROM sqlite_sequence WHERE name='inbox_entries'").get() as { seq: number };
+  assert.ok(bound > before.seq);
+  h.db.close();
+
+  const db = new DatabaseSync(path);
+  try {
+    const reopened = new Engine(db as never, ports);
+    const item = reopened.send(cos, lead.address, "first arrival after restart", null);
+    const { seq } = db.prepare("SELECT seq FROM inbox_entries WHERE item_id=?").get(item.id) as { seq: number };
+    assert.ok(seq > bound, `arrival ${seq} must exceed the saved cursor bound ${bound}`);
+    assert.equal(reopened.batch.ack(lead, cursor), 1);
+    assert.equal(reopened.batch.readAt(item.id), null);
+  } finally {
+    db.close();
+  }
+});

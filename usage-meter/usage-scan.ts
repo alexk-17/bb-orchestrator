@@ -20,15 +20,11 @@
 // 3. ATTRIBUTION. Usage is worth looking at in slices, not as one heap: main
 //    session against subagents, project, bb thread, model, workflow run,
 //    background /go run, skill.
-import { execFile } from "node:child_process";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { setImmediate as yieldToLoop } from "node:timers/promises";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import { setTimeout as sleep, setImmediate as yieldToLoop } from "node:timers/promises";
 
 // ───────────────────────────────── constants ─────────────────────────────────
 
@@ -36,8 +32,6 @@ const execFileAsync = promisify(execFile);
 export const DEFAULT_TRANSCRIPTS_DIR = path.join(os.homedir(), ".claude", "projects");
 /** Where the /go skill keeps the metadata of its background runs. */
 export const DEFAULT_GO_RUNS_DIR = path.join(os.homedir(), ".claude", "go-runs");
-/** The bb database. Opened read-only: it is the live database of the server. */
-export const DEFAULT_BB_DB_PATH = path.join(os.homedir(), ".bb", "bb.db");
 
 /** Cache format version. Change it and the cache is rebuilt from scratch. */
 const CACHE_VERSION = 2;
@@ -52,8 +46,8 @@ const YIELD_EVERY_CHUNKS = 1;
 const SESSION_ACTIVE_MS = 5 * 60_000;
 /** Two markers of one skill closer than this are the same run, not two. */
 const SKILL_DEDUP_MS = 120_000;
-/** How long the in-memory snapshot of the bb.db tables is reused. */
-const BB_DB_TTL_MS = 60_000;
+/** How long the snapshot of bb threads is reused. */
+const THREADS_TTL_MS = 60_000;
 /** A day, in milliseconds. */
 const DAY_MS = 86_400_000;
 /** An hour, in milliseconds. */
@@ -240,7 +234,7 @@ export interface UsageQuery {
   topN?: number;
   /** Boundary rule for a skill's usage window. Defaults to untilNextHumanPrompt. */
   skillWindow?: SkillWindowBoundary;
-  /** Do not go to bb.db for thread names. */
+  /** Do not attribute sessions to bb threads. */
   skipThreads?: boolean;
   /** Timeline bucket width; by default an hour for a day, six hours for a week. */
   timelineStepMs?: number;
@@ -439,8 +433,8 @@ export interface UsageScanOptions {
   goRunsDir?: string;
   /** Cache directory. Without one the module still works, but every pass is cold. */
   cacheDir?: string | null;
-  /** Path to bb.db; null means do not go to the database at all. */
-  bbDbPath?: string | null;
+  /** bb.sdk.threads, for thread names; without it threads stay unnamed. */
+  threads?: BbThreadsApi | null;
   log?: (level: "debug" | "info" | "warn", message: string) => void;
   /** A stand-in clock, for tests. */
   now?: () => number;
@@ -456,7 +450,7 @@ export interface UsageScanner {
   runForever(signal: AbortSignal, intervalMs?: number): Promise<void>;
   /** Aggregates over a window. Answers mid-cold-pass too, from what has been read. */
   summary(query?: UsageQuery): UsageSummary;
-  /** Let go of the resources (the bb.db snapshot). */
+  /** Let go of the resources (the bb threads snapshot). */
   close(): void;
 }
 
@@ -935,7 +929,7 @@ async function readGoRuns(dir: string): Promise<Map<string, GoRunMeta>> {
   return out;
 }
 
-// ─────────────────────────────── reading bb.db ───────────────────────────────
+// ───────────────────────────── bb threads, via bb.sdk ────────────────────────────
 
 interface ThreadRow {
   id: string;
@@ -944,178 +938,233 @@ interface ThreadRow {
   environmentId: string | null;
 }
 
-interface BbDbSnapshot {
-  /** Claude Code sessionId → bb thread id, via events.provider_thread_id. */
+interface BbThreadsSnapshot {
+  /** Claude Code sessionId → bb thread id, via the providerThreadId of thread events. */
   bySession: Map<string, string>;
   /** environment_id → thread id, only where the environment has a single thread. */
   byEnvironment: Map<string, string>;
   threads: Map<string, ThreadRow>;
 }
 
-interface SqliteLikeStatement {
-  all(...params: unknown[]): unknown[];
-}
-interface SqliteLikeDatabase {
-  prepare(sql: string): SqliteLikeStatement;
-  close(): void;
-}
-interface NodeSqliteModule {
-  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => SqliteLikeDatabase;
+/** The part of `bb.sdk.threads` the scanner reads. */
+export interface BbThreadsApi {
+  list(args: { includeHidden: boolean; signal?: AbortSignal }): Promise<unknown[]>;
+  events: {
+    list(args: {
+      threadId: string;
+      types: readonly ["thread/identity", "turn/started"];
+      order: "asc";
+      limit: string;
+      afterSeq?: string;
+      signal?: AbortSignal;
+    }): Promise<unknown[]>;
+  };
 }
 
-const THREADS_SQL =
-  "select id, coalesce(title, title_fallback, '') as title, project_id, environment_id from threads where deleted_at is null";
-const EVENTS_SQL =
-  "select distinct provider_thread_id, thread_id from events where provider_thread_id is not null";
+const SESSION_EVENT_TYPES = ["thread/identity", "turn/started"] as const;
+/** THREAD_EVENT_LIST_PAGE_SIZE on the server. */
+const EVENTS_PAGE = 100;
+const THREADS_CACHE_VERSION = 1;
+const THREADS_CACHE_FILE = "bb-threads.json";
+/** Consecutive failed event reads after which a pass gives up until the next one. */
+const MAX_EVENT_FAILURES = 3;
+/** Each events read costs the server tens to hundreds of milliseconds of its main thread. */
+const EVENT_READ_PAUSE_MS = 50;
+const CURSOR_SAVE_EVERY = 100;
+/** Providers whose sessions never write Claude Code transcripts. */
+const PROVIDERS_WITHOUT_TRANSCRIPTS = new Set(["codex"]);
 
-/**
- * The bb.db reader. The database is live, so it is opened read-only and nothing
- * else. The built-in node:sqlite is tried first, then an external
- * `sqlite3 -readonly`; with neither of them a thread simply stays unnamed.
- */
-class BbDbReader {
-  private snapshot: BbDbSnapshot | null = null;
-  private loadedAt = 0;
-  private failed = false;
+interface ThreadCursor {
+  updatedAt: number;
+  afterSeq: number;
+  sessions: string[];
+}
 
-  private readonly dbPath: string | null;
+function emptyThreadsSnapshot(): BbThreadsSnapshot {
+  return { bySession: new Map(), byEnvironment: new Map(), threads: new Map() };
+}
+
+/** Thread names and the session → thread mapping, from bb's API; cursors persist in the cache. */
+class BbThreadsReader {
+  private snapshot = emptyThreadsSnapshot();
+  private loadedAt: number | null = null;
+  private cursors: Map<string, ThreadCursor> | null = null;
+  private complaint = "";
+  private readonly api: BbThreadsApi | null;
+  private readonly cacheDir: string | null;
   private readonly log: (level: "debug" | "info" | "warn", message: string) => void;
 
   constructor(
-    dbPath: string | null,
+    api: BbThreadsApi | null,
+    cacheDir: string | null,
     log: (level: "debug" | "info" | "warn", message: string) => void,
   ) {
-    this.dbPath = dbPath;
+    this.api = api;
+    this.cacheDir = cacheDir;
     this.log = log;
   }
 
-  /** A snapshot of the tables; on any trouble it answers empty and stops trying. */
-  async load(now: number): Promise<BbDbSnapshot> {
-    const empty: BbDbSnapshot = {
-      bySession: new Map(),
-      byEnvironment: new Map(),
-      threads: new Map(),
-    };
-    if (!this.dbPath || this.failed) return this.snapshot ?? empty;
-    if (this.snapshot && now - this.loadedAt < BB_DB_TTL_MS) return this.snapshot;
-    const rows = this.viaNodeSqlite() ?? (await this.viaCli());
-    if (!rows) {
-      this.failed = true;
-      return this.snapshot ?? empty;
-    }
-    const threads = new Map<string, ThreadRow>();
-    const perEnvironment = new Map<string, string[]>();
-    for (const row of rows.threads) {
-      threads.set(row.id, row);
-      if (row.environmentId) {
-        const list = perEnvironment.get(row.environmentId) ?? [];
-        list.push(row.id);
-        perEnvironment.set(row.environmentId, list);
+  async load(now: number, signal?: AbortSignal): Promise<BbThreadsSnapshot> {
+    if (!this.api) return this.snapshot;
+    if (this.loadedAt !== null && now - this.loadedAt < THREADS_TTL_MS) return this.snapshot;
+    this.loadedAt = now;
+    try {
+      const cursors = await this.readCursors();
+      const listed: Array<ThreadRow & { providerId: string; createdAt: number; updatedAt: number }> = [];
+      for (const raw of await this.api.list({ includeHidden: true, ...(signal ? { signal } : {}) })) {
+        const row = asObject(raw);
+        const id = asString(row?.id);
+        if (!row || !id) continue;
+        listed.push({
+          id,
+          title: asString(row.title) ?? asString(row.titleFallback) ?? "",
+          projectId: asString(row.projectId) ?? "",
+          environmentId: asString(row.environmentId),
+          providerId: asString(row.providerId) ?? "",
+          createdAt: asNumber(row.createdAt),
+          updatedAt: asNumber(row.updatedAt),
+        });
+      }
+      listed.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+
+      let changed = false;
+      let unsaved = 0;
+      let failures = 0;
+      const live = new Set(listed.map((thread) => thread.id));
+      for (const id of cursors.keys()) {
+        if (!live.has(id)) {
+          cursors.delete(id);
+          changed = true;
+        }
+      }
+      for (const thread of [...listed].sort((a, b) => b.updatedAt - a.updatedAt)) {
+        if (failures >= MAX_EVENT_FAILURES || signal?.aborted) break;
+        if (PROVIDERS_WITHOUT_TRANSCRIPTS.has(thread.providerId)) continue;
+        const cursor = cursors.get(thread.id);
+        if (
+          cursor &&
+          cursor.updatedAt === thread.updatedAt &&
+          now - thread.updatedAt >= 2 * THREADS_TTL_MS
+        ) {
+          continue;
+        }
+        try {
+          cursors.set(thread.id, await this.readSessions(thread.id, thread.updatedAt, cursor, signal));
+          changed = true;
+          failures = 0;
+          if (++unsaved >= CURSOR_SAVE_EVERY) {
+            unsaved = 0;
+            await this.writeCursors(cursors);
+          }
+        } catch (error) {
+          if (signal?.aborted) break;
+          failures += 1;
+          this.log("debug", `thread events of ${thread.id} unreadable: ${String(error)}`);
+        }
+        await sleep(EVENT_READ_PAUSE_MS, undefined, signal ? { signal } : {}).catch(() => {});
+      }
+
+      const threads = new Map<string, ThreadRow>();
+      const perEnvironment = new Map<string, string[]>();
+      const bySession = new Map<string, string>();
+      for (const { providerId: _providerId, createdAt: _createdAt, updatedAt: _updatedAt, ...row } of listed) {
+        threads.set(row.id, row);
+        if (row.environmentId) {
+          const list = perEnvironment.get(row.environmentId) ?? [];
+          list.push(row.id);
+          perEnvironment.set(row.environmentId, list);
+        }
+        // A fork copies its source's events, session ids included: the oldest thread owns the session.
+        for (const session of cursors.get(row.id)?.sessions ?? []) {
+          if (!bySession.has(session)) bySession.set(session, row.id);
+        }
+      }
+      const byEnvironment = new Map<string, string>();
+      for (const [environmentId, ids] of perEnvironment) {
+        // Guessing between two threads of one environment would be dishonest.
+        if (ids.length === 1) byEnvironment.set(environmentId, ids[0]);
+      }
+      this.snapshot = { bySession, byEnvironment, threads };
+      if (changed) await this.writeCursors(cursors);
+      this.complaint = "";
+    } catch (error) {
+      const message = String(error);
+      if (message !== this.complaint) {
+        this.complaint = message;
+        this.log("warn", `bb threads unreadable: ${message}`);
       }
     }
-    const byEnvironment = new Map<string, string>();
-    for (const [environmentId, ids] of perEnvironment) {
-      // Guessing between two threads of one environment would be dishonest.
-      if (ids.length === 1) byEnvironment.set(environmentId, ids[0]);
-    }
-    this.snapshot = { bySession: rows.bySession, byEnvironment, threads };
-    this.loadedAt = now;
     return this.snapshot;
   }
 
   close(): void {
-    this.snapshot = null;
+    this.snapshot = emptyThreadsSnapshot();
   }
 
-  private viaNodeSqlite(): { threads: ThreadRow[]; bySession: Map<string, string> } | null {
-    if (!this.dbPath) return null;
-    // The built-in module is taken through process.getBuiltinModule rather
-    // than an import: the plugin bundler leaves such a call alone, and on a
-    // runtime without node:sqlite it honestly answers with nothing, so the
-    // external sqlite3 gets its turn.
-    const runtime = process as unknown as { getBuiltinModule?: (id: string) => unknown };
-    if (typeof runtime.getBuiltinModule !== "function") return null;
-    let database: SqliteLikeDatabase;
-    try {
-      const loaded = runtime.getBuiltinModule("node:sqlite") as NodeSqliteModule | undefined;
-      if (!loaded || typeof loaded.DatabaseSync !== "function") return null;
-      database = new loaded.DatabaseSync(this.dbPath, { readOnly: true });
-    } catch (error) {
-      this.log("debug", `node:sqlite unavailable: ${String(error)}`);
-      return null;
-    }
-    try {
-      const threads: ThreadRow[] = [];
-      for (const raw of database.prepare(THREADS_SQL).all()) {
+  private async readSessions(
+    threadId: string,
+    updatedAt: number,
+    previous: ThreadCursor | undefined,
+    signal: AbortSignal | undefined,
+  ): Promise<ThreadCursor> {
+    const api = this.api as BbThreadsApi;
+    let afterSeq = previous?.afterSeq ?? 0;
+    const sessions = new Set(previous?.sessions ?? []);
+    for (;;) {
+      const rows = await api.events.list({
+        threadId,
+        types: SESSION_EVENT_TYPES,
+        order: "asc",
+        limit: String(EVENTS_PAGE),
+        ...(afterSeq > 0 ? { afterSeq: String(afterSeq) } : {}),
+        ...(signal ? { signal } : {}),
+      });
+      for (const raw of rows) {
         const row = asObject(raw);
         if (!row) continue;
-        const id = asString(row.id);
-        if (!id) continue;
-        threads.push({
-          id,
-          title: asString(row.title) ?? "",
-          projectId: asString(row.project_id) ?? "",
-          environmentId: asString(row.environment_id),
-        });
+        const session = asString(asObject(row.data)?.providerThreadId);
+        if (session) sessions.add(session);
+        afterSeq = Math.max(afterSeq, asNumber(row.seq));
       }
-      const bySession = new Map<string, string>();
-      for (const raw of database.prepare(EVENTS_SQL).all()) {
-        const row = asObject(raw);
-        if (!row) continue;
-        const session = asString(row.provider_thread_id);
-        const thread = asString(row.thread_id);
-        if (session && thread) bySession.set(session, thread);
-      }
-      return { threads, bySession };
-    } catch (error) {
-      this.log("warn", `bb.db read failed: ${String(error)}`);
-      return null;
-    } finally {
-      try {
-        database.close();
-      } catch {
-        /* closing failed — we will live */
-      }
+      if (rows.length < EVENTS_PAGE) break;
     }
+    return { updatedAt, afterSeq, sessions: [...sessions] };
   }
 
-  private async viaCli(): Promise<{ threads: ThreadRow[]; bySession: Map<string, string> } | null> {
-    if (!this.dbPath) return null;
+  private async readCursors(): Promise<Map<string, ThreadCursor>> {
+    if (this.cursors) return this.cursors;
+    this.cursors = new Map();
+    if (!this.cacheDir) return this.cursors;
     try {
-      const query = async (sql: string): Promise<unknown[]> => {
-        const { stdout } = await execFileAsync(
-          "sqlite3",
-          ["-readonly", "-json", this.dbPath as string, sql],
-          { maxBuffer: 32 << 20 },
-        );
-        const text = stdout.trim();
-        return text ? (JSON.parse(text) as unknown[]) : [];
-      };
-      const threads: ThreadRow[] = [];
-      for (const raw of await query(THREADS_SQL)) {
-        const row = asObject(raw);
-        if (!row) continue;
-        const id = asString(row.id);
-        if (!id) continue;
-        threads.push({
-          id,
-          title: asString(row.title) ?? "",
-          projectId: asString(row.project_id) ?? "",
-          environmentId: asString(row.environment_id),
+      const parsed = asObject(
+        JSON.parse(await fsp.readFile(path.join(this.cacheDir, THREADS_CACHE_FILE), "utf8")),
+      );
+      if (parsed?.version !== THREADS_CACHE_VERSION) return this.cursors;
+      for (const [id, raw] of Object.entries(asObject(parsed.threads) ?? {})) {
+        const cursor = asObject(raw);
+        if (!cursor) continue;
+        this.cursors.set(id, {
+          updatedAt: asNumber(cursor.updatedAt),
+          afterSeq: asNumber(cursor.afterSeq),
+          sessions: asArray(cursor.sessions).filter((value): value is string => typeof value === "string"),
         });
       }
-      const bySession = new Map<string, string>();
-      for (const raw of await query(EVENTS_SQL)) {
-        const row = asObject(raw);
-        if (!row) continue;
-        const session = asString(row.provider_thread_id);
-        const thread = asString(row.thread_id);
-        if (session && thread) bySession.set(session, thread);
-      }
-      return { threads, bySession };
+    } catch {
+      this.cursors.clear();
+    }
+    return this.cursors;
+  }
+
+  private async writeCursors(cursors: Map<string, ThreadCursor>): Promise<void> {
+    if (!this.cacheDir) return;
+    try {
+      await fsp.mkdir(this.cacheDir, { recursive: true });
+      await writeAtomic(
+        path.join(this.cacheDir, THREADS_CACHE_FILE),
+        JSON.stringify({ version: THREADS_CACHE_VERSION, threads: Object.fromEntries(cursors) }),
+      );
     } catch (error) {
-      this.log("debug", `sqlite3 cli unavailable: ${String(error)}`);
-      return null;
+      this.log("debug", `thread cursors not saved: ${String(error)}`);
     }
   }
 }
@@ -1545,7 +1594,7 @@ function parsePrompt(record: JsonObject, time: number, sink: ParseSink): void {
 
 class Scanner implements UsageScanner {
   private readonly store = new UsageStore();
-  private readonly bbDb: BbDbReader;
+  private readonly bbThreads: BbThreadsReader;
   private readonly log: (level: "debug" | "info" | "warn", message: string) => void;
   private readonly now: () => number;
   private readonly transcriptsDir: string;
@@ -1556,11 +1605,7 @@ class Scanner implements UsageScanner {
   private running: Promise<ScanStatus> | null = null;
   private workflowCache = new Map<string, WorkflowMeta | null>();
   private goRuns = new Map<string, GoRunMeta>();
-  private threads: BbDbSnapshot = {
-    bySession: new Map(),
-    byEnvironment: new Map(),
-    threads: new Map(),
-  };
+  private threads = emptyThreadsSnapshot();
   private state: ScanStatus = {
     phase: "idle",
     cold: true,
@@ -1583,10 +1628,7 @@ class Scanner implements UsageScanner {
     this.cacheDir = options.cacheDir === undefined ? null : options.cacheDir;
     this.log = options.log ?? (() => {});
     this.now = options.now ?? (() => Date.now());
-    this.bbDb = new BbDbReader(
-      options.bbDbPath === undefined ? DEFAULT_BB_DB_PATH : options.bbDbPath,
-      this.log,
-    );
+    this.bbThreads = new BbThreadsReader(options.threads ?? null, this.cacheDir, this.log);
   }
 
   status(): ScanStatus {
@@ -1594,7 +1636,7 @@ class Scanner implements UsageScanner {
   }
 
   close(): void {
-    this.bbDb.close();
+    this.bbThreads.close();
   }
 
   async scan(options: { signal?: AbortSignal; full?: boolean } = {}): Promise<ScanStatus> {
@@ -1783,7 +1825,7 @@ class Scanner implements UsageScanner {
 
       await this.loadWorkflowMeta();
       this.goRuns = await readGoRuns(this.goRunsDir);
-      this.threads = await this.bbDb.load(this.now());
+      this.threads = await this.bbThreads.load(this.now(), options.signal);
       await this.persist(rewrite, newEvents, newMarks);
 
       const finished = this.now();
@@ -2831,6 +2873,7 @@ export function createUsageScanner(options: UsageScanOptions = {}): UsageScanner
 /** The least of bb the module needs: the path to its own database, and a log. */
 export interface BbLike {
   storage: { database(): { name: string } };
+  sdk?: { threads: BbThreadsApi };
   log?: {
     debug?: (message: string) => void;
     info?: (message: string) => void;
@@ -2842,21 +2885,13 @@ export interface BbLike {
  * A scanner tied to the plugin's data directory. The SDK gives no file path
  * outright, but bb.storage.database() opens the plugin's database at
  * <dataDir>/plugins/<id>/data.db — and that is enough to work from: the cache
- * goes next to it, and bb.db is looked for in the data directory itself.
+ * goes next to it. Thread names come from bb.sdk.threads, never from bb.db.
  */
 export function usageScannerForPlugin(bb: BbLike, options: UsageScanOptions = {}): UsageScanner {
   let cacheDir = options.cacheDir ?? null;
-  let bbDbPath = options.bbDbPath;
   try {
     const own = bb.storage.database().name;
-    const pluginDir = path.dirname(own);
-    if (cacheDir === null) cacheDir = path.join(pluginDir, "usage-scan");
-    if (bbDbPath === undefined) {
-      // <dataDir>/plugins/<id>/data.db → <dataDir>/bb.db
-      const dataDir = path.dirname(path.dirname(pluginDir));
-      const candidate = path.join(dataDir, "bb.db");
-      bbDbPath = fs.existsSync(candidate) ? candidate : DEFAULT_BB_DB_PATH;
-    }
+    if (cacheDir === null) cacheDir = path.join(path.dirname(own), "usage-scan");
   } catch {
     // The plugin database is out of reach — no cache then, but still working.
   }
@@ -2865,5 +2900,6 @@ export function usageScannerForPlugin(bb: BbLike, options: UsageScanOptions = {}
     ((level: "debug" | "info" | "warn", message: string) => {
       bb.log?.[level]?.(message);
     });
-  return createUsageScanner({ ...options, cacheDir, bbDbPath, log });
+  const threads = options.threads === undefined ? (bb.sdk?.threads ?? null) : options.threads;
+  return createUsageScanner({ ...options, cacheDir, threads, log });
 }

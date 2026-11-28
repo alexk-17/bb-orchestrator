@@ -174,7 +174,7 @@ from that cache, and the page never touches the transcripts itself.
 | Afterwards | Only the tails of files that changed are read — a pass costs about a second |
 | A transcript that a fork copied disappears | The cache is rebuilt from scratch, in the background, rather than losing the calls that only lived there |
 | Two files hold the same call and neither is the original | The tie goes to the file whose first timestamped line is older, then to byte order of the path — an arbitrary rule, and the only kind available (see above) |
-| bb thread names | `bb.db` is opened read-only, and a missing or unreadable database only costs the names, not the figures |
+| bb thread names | From `bb.sdk.threads` (thread list, and the session ids on each thread's `thread/identity` and `turn/started` events), never from `bb.db`: a second SQLite library in the server process drops the server's locks on it. An unreachable API only costs the names, not the figures |
 | Message bodies | Never read into the summary: counts, names and paths only — from `SKILL.md` just its size, from a workflow run everything but the script |
 
 ## Development
